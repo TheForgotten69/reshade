@@ -1668,11 +1668,13 @@ void reshade::runtime::draw_gui_home()
 
 		ImGui::SameLine(0, button_spacing);
 
+#if defined(_WIN32)
 		if (ImGui::Button(ICON_FK_FOLDER, ImVec2(button_height, button_height)))
 			utils::open_explorer(_current_preset_path);
 		ImGui::SetItemTooltip(_("Open folder in explorer"));
 
 		ImGui::SameLine();
+#endif
 
 		// Cannot save in performance mode, since there are no variables to retrieve values from then
 		ImGui::BeginDisabled(_performance_mode || _is_in_preset_transition);
@@ -2107,10 +2109,12 @@ void reshade::runtime::draw_gui_home()
 }
 void reshade::runtime::draw_gui_settings()
 {
+#if defined(_WIN32)
 	if (ImGui::Button(ICON_FK_FOLDER " " + _("Open base folder in explorer"), ImVec2(ImGui::GetContentRegionAvail().x, 0)))
 		utils::open_explorer(_config_path);
 
 	ImGui::Spacing();
+#endif
 
 	bool modified = false;
 	bool modified_custom_style = false;
@@ -2233,6 +2237,7 @@ void reshade::runtime::draw_gui_settings()
 		modified |= ImGui::Checkbox(_("Save before and after images"), &_screenshot_save_before);
 		modified |= ImGui::Checkbox(_("Save separate image with the overlay visible"), &_screenshot_save_gui);
 
+#if defined(_WIN32)
 		modified |= imgui::file_input_box(_("Screenshot sound"), "sound.wav", _screenshot_sound_path, _file_selection_path, { L".wav" });
 		ImGui::SetItemTooltip(_("Audio file that is played when taking a screenshot."));
 
@@ -2301,6 +2306,7 @@ void reshade::runtime::draw_gui_settings()
 
 		modified |= imgui::directory_input_box(_("Post-save command working directory"), _screenshot_post_save_command_working_directory, _file_selection_path);
 		modified |= ImGui::Checkbox(_("Hide post-save command window"), &_screenshot_post_save_command_hide_window);
+#endif
 	}
 
 	if (ImGui::CollapsingHeader(_("Overlay & Styling"), ImGuiTreeNodeFlags_DefaultOpen))
@@ -3112,11 +3118,13 @@ void reshade::runtime::draw_gui_log()
 
 	ImGui::SameLine();
 
+#if defined(_WIN32)
 	if (ImGui::Button(ICON_FK_FOLDER, ImVec2(ImGui::GetFrameHeight(), 0.0f)))
 		utils::open_explorer(log_path);
 	ImGui::SetItemTooltip(_("Open folder in explorer"));
 
 	ImGui::SameLine();
+#endif
 
 	if (ImGui::Button(_("Clear Log"), ImVec2(8.0f * ImGui::GetFontSize(), 0.0f)))
 		// Close and open the stream again, which will clear the file too
@@ -4220,10 +4228,12 @@ void reshade::runtime::draw_technique_editor()
 
 			if (ImGui::BeginPopup("##context"))
 			{
+#if defined(_WIN32)
 				if (ImGui::Button(ICON_FK_FOLDER " " + _("Open folder in explorer"), ImVec2(18.0f * ImGui::GetFontSize(), 0)))
 					utils::open_explorer(effect.source_file);
 
 				ImGui::Separator();
+#endif
 
 				if (imgui::popup_button(ICON_FK_PENCIL " " + _("Edit source code"), 18.0f * ImGui::GetFontSize()))
 				{
@@ -4456,10 +4466,12 @@ void reshade::runtime::draw_technique_editor()
 				if (is_not_top || is_not_bottom || (_input != nullptr && !force_enabled))
 					ImGui::Separator();
 
+#if defined(_WIN32)
 				if (ImGui::Button(ICON_FK_FOLDER " " + _("Open folder in explorer"), ImVec2(18.0f * ImGui::GetFontSize(), 0)))
 					utils::open_explorer(effect.source_file);
 
 				ImGui::Separator();
+#endif
 
 				if (imgui::popup_button(ICON_FK_PENCIL " " + _("Edit source code"), 18.0f * ImGui::GetFontSize()))
 				{

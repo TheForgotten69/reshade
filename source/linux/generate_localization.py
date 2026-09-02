@@ -54,11 +54,26 @@ def encode_cpp_string(s: str) -> str:
 
 def parse_rc2(path: Path):
 	entries = []
-	for line in path.read_text(encoding='utf-8').splitlines():
+	seen_stringtable = False
+	in_stringtable = False
+	for line_number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+		if line.strip() == 'STRINGTABLE':
+			seen_stringtable = True
+			continue
+		if seen_stringtable and line.strip() == 'BEGIN':
+			in_stringtable = True
+			continue
+		if in_stringtable and line.strip() == 'END':
+			in_stringtable = False
+			continue
+		if not in_stringtable or not line.strip():
+			continue
 		match = LINE_RE.match(line)
 		if match is None:
-			continue
+			raise ValueError(f"{path}:{line_number}: malformed STRINGTABLE entry: {line}")
 		entries.append((int(match.group(1)), decode_rc_string(match.group(2))))
+	if not seen_stringtable or in_stringtable or not entries:
+		raise ValueError(f"{path}: no STRINGTABLE entries found")
 	return entries
 
 
@@ -88,12 +103,26 @@ def main():
 	cpp.append("#include \"localization_linux.hpp\"\n#include <cstring>\n#include <unordered_map>\n\nnamespace\n{\n")
 
 	languages = []
+	expected_ids = None
 	for rc2 in rc2_files:
 		code = rc2.stem[len('lang_'):]
 		identifier = re.sub(r'[^A-Za-z0-9]', '_', code)
 		languages.append((code, identifier))
 
-		entries = parse_rc2(rc2)
+		try:
+			entries = parse_rc2(rc2)
+		except (OSError, UnicodeError, ValueError) as error:
+			print(error, file=sys.stderr)
+			return 1
+		ids = {id_value for id_value, _ in entries}
+		if len(ids) != len(entries):
+			print(f"{rc2}: duplicate STRINGTABLE identifier", file=sys.stderr)
+			return 1
+		if expected_ids is None:
+			expected_ids = ids
+		elif ids != expected_ids:
+			print(f"{rc2}: STRINGTABLE identifiers differ from {rc2_files[0].name}", file=sys.stderr)
+			return 1
 		cpp.append(f"\tconst std::unordered_map<unsigned short, const char *> s_language_{identifier} = {{\n")
 		for id_value, text in entries:
 			cpp.append(f"\t\t{{ {id_value}, {encode_cpp_string(text)} }},\n")

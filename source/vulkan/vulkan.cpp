@@ -379,6 +379,10 @@ enum VkNegotiateLayerStructType
 	LAYER_NEGOTIATE_INTERFACE_STRUCT = 1,
 };
 
+constexpr uint32_t loader_layer_interface_version = 2;
+
+// ABI mirror of the Vulkan loader's 'vk_layer.h'. Keep this local to avoid making the
+// loader implementation headers a build dependency for the public Vulkan headers.
 struct VkNegotiateLayerInterface
 {
 	VkNegotiateLayerStructType sType;
@@ -391,13 +395,14 @@ struct VkNegotiateLayerInterface
 
 extern "C" __attribute__((visibility("default"))) VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
 {
-	if (!reshade::process::initialize())
-		return VK_ERROR_INITIALIZATION_FAILED;
 	if (pVersionStruct == nullptr ||
-		pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT)
+		pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT ||
+		pVersionStruct->loaderLayerInterfaceVersion < loader_layer_interface_version)
 		return VK_ERROR_INITIALIZATION_FAILED;
 
-	pVersionStruct->loaderLayerInterfaceVersion = 2; // Version 2 added 'vkNegotiateLoaderLayerInterfaceVersion'
+	// Version 2 added 'vkNegotiateLoaderLayerInterfaceVersion'. Do not perform process
+	// initialization until the loader ABI handshake has completed successfully.
+	pVersionStruct->loaderLayerInterfaceVersion = loader_layer_interface_version;
 	pVersionStruct->pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
 	pVersionStruct->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;
 	pVersionStruct->pfnGetPhysicalDeviceProcAddr = nullptr;

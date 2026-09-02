@@ -39,6 +39,11 @@ struct VkLayerInstanceCreateInfo
 
 VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkInstance *pInstance)
 {
+#if defined(__linux__)
+	if (!reshade::process::initialize())
+		return VK_ERROR_INITIALIZATION_FAILED;
+#endif
+
 	reshade::log::message(reshade::log::level::info, "Redirecting vkCreateInstance(pCreateInfo = %p, pAllocator = %p, pInstance = %p) ...", pCreateInfo, pAllocator, pInstance);
 
 	assert(pCreateInfo != nullptr && pInstance != nullptr);

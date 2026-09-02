@@ -436,27 +436,48 @@ struct reshade::wayland_input_context
 bool reshade::input::is_keyboard_layout_german() { return s_keyboard_layout_german; }
 std::shared_ptr<reshade::input> reshade::input::register_window(window_handle window)
 {
-	std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
-	auto it = s_wayland_surfaces.find(window);
-	if (it == s_wayland_surfaces.end() || it->second.display == nullptr)
-		return nullptr;
-	if (const std::shared_ptr<input> existing = it->second.input_instance.lock())
+	wayland_surface_info surface_info;
 	{
-		existing->_wayland->width = std::max(1u, it->second.width);
-		existing->_wayland->height = std::max(1u, it->second.height);
-		return existing;
+		std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
+		const auto it = s_wayland_surfaces.find(window);
+		if (it == s_wayland_surfaces.end() || it->second.display == nullptr)
+			return nullptr;
+		if (const std::shared_ptr<input> existing = it->second.input_instance.lock())
+		{
+			existing->_wayland->width = std::max(1u, it->second.width);
+			existing->_wayland->height = std::max(1u, it->second.height);
+			return existing;
+		}
+		surface_info = it->second;
 	}
 
+	// Wayland round trips may block. Do not hold the surface registry lock while creating
+	// the input context, so swapchain destruction and concurrent surface updates can proceed.
 	auto result = std::make_shared<input>(window);
-	result->_wayland = new wayland_input_context { result.get(), it->second.display, static_cast<wl_surface *>(window) };
-	result->_wayland->width = std::max(1u, it->second.width);
-	result->_wayland->height = std::max(1u, it->second.height);
+	result->_wayland = new wayland_input_context { result.get(), surface_info.display, static_cast<wl_surface *>(window) };
+	result->_wayland->width = std::max(1u, surface_info.width);
+	result->_wayland->height = std::max(1u, surface_info.height);
 	if (!result->_wayland->initialize())
 	{
 		log::message(log::level::warning, "Failed to initialize Wayland input for surface %p.", window);
 		delete result->_wayland;
 		result->_wayland = nullptr;
 		return nullptr;
+	}
+
+	std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
+	const auto it = s_wayland_surfaces.find(window);
+	if (it == s_wayland_surfaces.end() || it->second.display != surface_info.display)
+	{
+		// The surface was replaced or destroyed while the initial round trips were pending.
+		// Leave it unregistered; a later runtime recreation can retry with the current surface.
+		return nullptr;
+	}
+	if (const std::shared_ptr<input> existing = it->second.input_instance.lock())
+	{
+		existing->_wayland->width = std::max(1u, it->second.width);
+		existing->_wayland->height = std::max(1u, it->second.height);
+		return existing;
 	}
 
 	log::message(log::level::info, "Initialized Wayland input for surface %p.", window);
@@ -472,7 +493,11 @@ void reshade::input::register_wayland_surface(window_handle surface, void *displ
 	it->second.width = width;
 	it->second.height = height;
 }
-void reshade::input::unregister_wayland_surface(window_handle surface) { std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex); s_wayland_surfaces.erase(surface); }
+void reshade::input::unregister_wayland_surface(window_handle surface)
+{
+	std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
+	s_wayland_surfaces.erase(surface);
+}
 const char *reshade::input::get_clipboard_text(void *user_data)
 {
 	// Owns the string so the returned pointer stays valid for ImGui to read; only ever called

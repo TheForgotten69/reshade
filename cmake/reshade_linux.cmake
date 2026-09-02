@@ -12,7 +12,6 @@ else()
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     OUTPUT_VARIABLE RESHADE_VERSION_TAG
     OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE RESHADE_VERSION_RESULT
   )
 endif()
 if(NOT RESHADE_VERSION_TAG MATCHES "^v([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
@@ -47,6 +46,9 @@ find_package(Threads REQUIRED)
 # Generate xdg-output bindings used to reconcile logical Wayland pointer coordinates
 # with physical Vulkan swapchain dimensions under fractional display scaling.
 set(RESHADE_WAYLAND_XDG_OUTPUT_XML "${WAYLAND_PROTOCOLS_DIR}/unstable/xdg-output/xdg-output-unstable-v1.xml")
+if(NOT EXISTS "${RESHADE_WAYLAND_XDG_OUTPUT_XML}")
+  message(FATAL_ERROR "Wayland xdg-output protocol XML not found: ${RESHADE_WAYLAND_XDG_OUTPUT_XML}")
+endif()
 set(RESHADE_WAYLAND_XDG_OUTPUT_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/xdg-output-unstable-v1-client-protocol.h")
 set(RESHADE_WAYLAND_XDG_OUTPUT_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/xdg-output-unstable-v1-protocol.c")
 add_custom_command(
@@ -63,6 +65,9 @@ set_source_files_properties(source/linux/input_linux.cpp PROPERTIES OBJECT_DEPEN
 
 # Generate a native lookup table from the same localization resources used by Windows.
 file(GLOB RESHADE_LOCALIZATION_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/lang_*.rc2")
+if(NOT RESHADE_LOCALIZATION_SOURCES)
+  message(FATAL_ERROR "No ReShade localization sources found in ${CMAKE_CURRENT_SOURCE_DIR}/res")
+endif()
 set(RESHADE_LOCALIZATION_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/localization_linux.hpp")
 set(RESHADE_LOCALIZATION_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/localization_linux.cpp")
 add_custom_command(
