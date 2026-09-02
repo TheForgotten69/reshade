@@ -9,6 +9,8 @@ The ReShade FX shader compiler contained in this repository is standalone, so ca
 
 ## Building
 
+### Windows
+
 You'll need Visual Studio 2017 or higher to build ReShade. And Python in the PATH environment variable for the `glad` dependency to build.
 
 1. Clone this repository including all Git submodules\
@@ -16,6 +18,24 @@ You'll need Visual Studio 2017 or higher to build ReShade. And Python in the PAT
 2. Open the Visual Studio solution
 3. Select either the `32-bit` or `64-bit` target platform and build the solution.\
    This will build ReShade and all dependencies. To build the setup tool, first build the `Release` configuration for both `32-bit` and `64-bit` targets and only afterwards build the `Release Setup` configuration (does not matter which target is selected then).
+
+### Linux
+
+The native Linux build currently supports x86-64 Vulkan applications running on Wayland. It requires CMake, a C++17 compiler, Python, pkg-config, and the development packages for Wayland client, Wayland protocols, xkbcommon, and Fontconfig.
+
+```sh
+cmake -S . -B build-linux -DRESHADE_VERSION=<major.minor.patch>
+cmake --build build-linux
+cmake --install build-linux --prefix "$HOME/.local"
+```
+
+The version option is only needed when the source tree has no reachable ReShade version tag. The install registers an opt-in Vulkan implicit layer. Launch an application with `RESHADE_ENABLE=1`, for example:
+
+```sh
+RESHADE_ENABLE=1 /path/to/application
+```
+
+Configuration and logs are stored below the XDG config and state directories (normally `~/.config/reshade` and `~/.local/state/reshade`). Depth access and add-ons are not supported in the Linux build yet.
 
 A quick overview of what some of the source code files contain:
 

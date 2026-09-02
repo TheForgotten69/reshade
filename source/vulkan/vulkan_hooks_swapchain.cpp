@@ -184,10 +184,6 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	// Look up window handle from surface
 	const vulkan_surface surface_info = g_vulkan_surfaces.at(create_info.surface);
 	void *const hwnd = surface_info.window;
-#if defined(__linux__)
-	if (surface_info.display != nullptr)
-		reshade::input::register_wayland_surface(hwnd, surface_info.display, create_info.imageExtent.width, create_info.imageExtent.height);
-#endif
 
 #if RESHADE_ADDON
 	reshade::api::swapchain_desc desc = {};
@@ -316,6 +312,11 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 		reshade::log::message(reshade::log::level::warning, "vkCreateSwapchainKHR failed with error code %d.", static_cast<int>(result));
 		return result;
 	}
+
+#if defined(__linux__)
+	if (surface_info.display != nullptr)
+		reshade::input::register_wayland_surface(hwnd, surface_info.display, create_info.imageExtent.width, create_info.imageExtent.height);
+#endif
 
 	if (nullptr == swapchain_impl)
 	{

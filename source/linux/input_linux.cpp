@@ -2,6 +2,7 @@
 #include "dll_log.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -77,6 +78,7 @@ struct reshade::wayland_input_context
 	// converted to the swapchain's physical pixel space when fractional display scaling is active.
 	struct output_info
 	{
+		uint32_t global_name = 0;
 		wl_output *output = nullptr;
 		zxdg_output_v1 *xdg_output = nullptr;
 		int32_t mode_width = 0, mode_height = 0;
@@ -89,6 +91,7 @@ struct reshade::wayland_input_context
 	wl_event_queue *queue = nullptr;
 	wl_registry *registry = nullptr;
 	wl_seat *seat = nullptr;
+	uint32_t seat_global_name = 0;
 	wl_keyboard *keyboard = nullptr;
 	wl_pointer *pointer = nullptr;
 	xkb_context *xkb_context = nullptr;
@@ -102,6 +105,7 @@ struct reshade::wayland_input_context
 	// this must not be a 'std::vector' (whose elements can move on reallocation).
 	std::deque<output_info> outputs;
 	zxdg_output_manager_v1 *xdg_output_manager = nullptr;
+	uint32_t xdg_output_manager_global_name = 0;
 	// Ratio of physical to logical output pixels; 0 when it could not be determined (compositor
 	// does not support 'xdg-output', or connected outputs disagree on scale), in which case
 	// 'observed_max' below is used as a self-correcting fallback instead.
@@ -122,9 +126,11 @@ struct reshade::wayland_input_context
 	// on 'data_device_data_offer').
 	wl_data_offer *pending_offer = nullptr;
 	bool pending_offer_has_text = false;
+	std::string pending_offer_mime_type;
 	// The offer backing the current clipboard contents, once confirmed via 'data_device_selection'.
 	wl_data_offer *clipboard_offer = nullptr;
 	bool clipboard_offer_has_text = false;
+	std::string clipboard_offer_mime_type;
 
 	~wayland_input_context()
 	{
@@ -174,20 +180,22 @@ struct reshade::wayland_input_context
 		int fds[2];
 		if (pipe(fds) != 0)
 			return {};
-		wl_data_offer_receive(clipboard_offer, "text/plain;charset=utf-8", fds[1]);
+		wl_data_offer_receive(clipboard_offer, clipboard_offer_mime_type.c_str(), fds[1]);
 		close(fds[1]);
 		wl_display_flush(display);
 		std::string result;
 		char buffer[4096];
-		for (;;)
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+		while (result.size() < 16 * 1024 * 1024)
 		{
 			pollfd pfd { fds[0], POLLIN, 0 };
-			if (poll(&pfd, 1, 1000) <= 0)
+			const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+			if (remaining.count() <= 0 || poll(&pfd, 1, static_cast<int>(remaining.count())) <= 0)
 				break;
 			const ssize_t n = read(fds[0], buffer, sizeof(buffer));
 			if (n <= 0)
 				break;
-			result.append(buffer, static_cast<size_t>(n));
+			result.append(buffer, std::min(static_cast<size_t>(n), 16 * 1024 * 1024 - result.size()));
 		}
 		close(fds[0]);
 		return result;
@@ -198,9 +206,12 @@ struct reshade::wayland_input_context
 	// is no way to know which specific output a foreign surface is currently shown on.
 	void compute_output_scale()
 	{
+		output_scale = 0.0;
 		double scale = 0.0;
 		for (const output_info &info : outputs)
 		{
+			if (info.output == nullptr)
+				continue;
 			if (info.mode_width <= 0 || info.mode_height <= 0 || info.logical_width <= 0 || info.logical_height <= 0)
 				return;
 			const double info_scale = static_cast<double>(info.mode_width) / info.logical_width;
@@ -210,6 +221,19 @@ struct reshade::wayland_input_context
 				return;
 		}
 		output_scale = scale;
+	}
+	void clear_keyboard_state()
+	{
+		for (unsigned int key = input::key_button_xbutton2 + 1; key < std::size(owner->_keys); ++key)
+			if ((owner->_keys[key] & 0x80) != 0)
+				owner->_keys[key] = 0x08;
+	}
+	void clear_pointer_state()
+	{
+		constexpr unsigned int keys[] = { input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2 };
+		for (const unsigned int key : keys)
+			if ((owner->_keys[key] & 0x80) != 0)
+				owner->_keys[key] = 0x08;
 	}
 
 	void set_key(uint32_t key, uint32_t key_state)
@@ -221,9 +245,9 @@ struct reshade::wayland_input_context
 		if (virtual_key != 0)
 		{
 			owner->_keys[virtual_key] = key_state == WL_KEYBOARD_KEY_STATE_PRESSED ? 0x88 : 0x08;
-			if (virtual_key == input::key_left_ctrl || virtual_key == input::key_right_ctrl) owner->_keys[input::key_ctrl] = owner->_keys[virtual_key];
-			if (virtual_key == input::key_left_shift || virtual_key == input::key_right_shift) owner->_keys[input::key_shift] = owner->_keys[virtual_key];
-			if (virtual_key == input::key_left_alt || virtual_key == input::key_right_alt) owner->_keys[input::key_alt] = owner->_keys[virtual_key];
+			if (virtual_key == input::key_left_ctrl || virtual_key == input::key_right_ctrl) owner->_keys[input::key_ctrl] = (owner->_keys[input::key_left_ctrl] & 0x80) != 0 || (owner->_keys[input::key_right_ctrl] & 0x80) != 0 ? 0x88 : 0x08;
+			if (virtual_key == input::key_left_shift || virtual_key == input::key_right_shift) owner->_keys[input::key_shift] = (owner->_keys[input::key_left_shift] & 0x80) != 0 || (owner->_keys[input::key_right_shift] & 0x80) != 0 ? 0x88 : 0x08;
+			if (virtual_key == input::key_left_alt || virtual_key == input::key_right_alt) owner->_keys[input::key_alt] = (owner->_keys[input::key_left_alt] & 0x80) != 0 || (owner->_keys[input::key_right_alt] & 0x80) != 0 ? 0x88 : 0x08;
 		}
 		if (key_state == WL_KEYBOARD_KEY_STATE_PRESSED)
 		{
@@ -239,6 +263,7 @@ struct reshade::wayland_input_context
 		if (std::strcmp(interface, wl_seat_interface.name) == 0 && context->seat == nullptr)
 		{
 			context->seat = static_cast<wl_seat *>(wl_registry_bind(registry, name, &wl_seat_interface, std::min(version, 5u)));
+			context->seat_global_name = name;
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->seat), context->queue);
 			static const wl_seat_listener listener = { seat_capabilities, seat_name };
 			wl_seat_add_listener(context->seat, &listener, context);
@@ -246,6 +271,7 @@ struct reshade::wayland_input_context
 		else if (std::strcmp(interface, wl_output_interface.name) == 0)
 		{
 			output_info &info = context->outputs.emplace_back();
+			info.global_name = name;
 			info.output = static_cast<wl_output *>(wl_registry_bind(registry, name, &wl_output_interface, std::min(version, 2u)));
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(info.output), context->queue);
 			static const wl_output_listener listener = { output_geometry, output_mode, output_done, output_scale_event, output_name, output_description };
@@ -254,6 +280,7 @@ struct reshade::wayland_input_context
 		else if (std::strcmp(interface, zxdg_output_manager_v1_interface.name) == 0)
 		{
 			context->xdg_output_manager = static_cast<zxdg_output_manager_v1 *>(wl_registry_bind(registry, name, &zxdg_output_manager_v1_interface, std::min(version, 3u)));
+			context->xdg_output_manager_global_name = name;
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->xdg_output_manager), context->queue);
 		}
 		else if (std::strcmp(interface, wl_data_device_manager_interface.name) == 0 && context->data_device_manager == nullptr)
@@ -262,7 +289,37 @@ struct reshade::wayland_input_context
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->data_device_manager), context->queue);
 		}
 	}
-	static void registry_global_remove(void *, wl_registry *, uint32_t) {}
+	static void registry_global_remove(void *data, wl_registry *, uint32_t name)
+	{
+		auto *context = static_cast<wayland_input_context *>(data);
+		if (context->seat_global_name == name)
+		{
+			context->clear_keyboard_state();
+			context->clear_pointer_state();
+			if (context->pointer != nullptr) { wl_pointer_destroy(context->pointer); context->pointer = nullptr; }
+			if (context->keyboard != nullptr) { wl_keyboard_destroy(context->keyboard); context->keyboard = nullptr; }
+			if (context->seat != nullptr) { wl_seat_destroy(context->seat); context->seat = nullptr; }
+			context->keyboard_focused = context->pointer_focused = false;
+			context->seat_global_name = 0;
+		}
+		if (context->xdg_output_manager_global_name == name)
+		{
+			for (output_info &info : context->outputs)
+				if (info.xdg_output != nullptr) { zxdg_output_v1_destroy(info.xdg_output); info.xdg_output = nullptr; }
+			zxdg_output_manager_v1_destroy(context->xdg_output_manager);
+			context->xdg_output_manager = nullptr;
+			context->xdg_output_manager_global_name = 0;
+			context->compute_output_scale();
+		}
+		for (output_info &info : context->outputs)
+			if (info.global_name == name)
+			{
+				if (info.xdg_output != nullptr) { zxdg_output_v1_destroy(info.xdg_output); info.xdg_output = nullptr; }
+				if (info.output != nullptr) { wl_output_destroy(info.output); info.output = nullptr; }
+				context->compute_output_scale();
+				break;
+			}
+	}
 	static void seat_capabilities(void *data, wl_seat *seat, uint32_t capabilities)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
@@ -273,12 +330,26 @@ struct reshade::wayland_input_context
 			static const wl_keyboard_listener listener = { keyboard_keymap, keyboard_enter, keyboard_leave, keyboard_key, keyboard_modifiers, keyboard_repeat_info };
 			wl_keyboard_add_listener(context->keyboard, &listener, context);
 		}
+		else if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) == 0 && context->keyboard != nullptr)
+		{
+			context->clear_keyboard_state();
+			wl_keyboard_destroy(context->keyboard);
+			context->keyboard = nullptr;
+			context->keyboard_focused = false;
+		}
 		if ((capabilities & WL_SEAT_CAPABILITY_POINTER) != 0 && context->pointer == nullptr)
 		{
 			context->pointer = wl_seat_get_pointer(seat);
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->pointer), context->queue);
 			static const wl_pointer_listener listener = { pointer_enter, pointer_leave, pointer_motion, pointer_button, pointer_axis, pointer_frame, pointer_axis_source, pointer_axis_stop, pointer_axis_discrete };
 			wl_pointer_add_listener(context->pointer, &listener, context);
+		}
+		else if ((capabilities & WL_SEAT_CAPABILITY_POINTER) == 0 && context->pointer != nullptr)
+		{
+			context->clear_pointer_state();
+			wl_pointer_destroy(context->pointer);
+			context->pointer = nullptr;
+			context->pointer_focused = false;
 		}
 	}
 	static void seat_name(void *, wl_seat *, const char *) {}
@@ -305,6 +376,7 @@ struct reshade::wayland_input_context
 		wl_data_offer_add_listener(offer, &listener, context);
 		context->pending_offer = offer;
 		context->pending_offer_has_text = false;
+		context->pending_offer_mime_type.clear();
 	}
 	static void data_device_enter(void *, wl_data_device *, uint32_t, wl_surface *, wl_fixed_t, wl_fixed_t, wl_data_offer *) {}
 	static void data_device_leave(void *, wl_data_device *) {}
@@ -317,14 +389,20 @@ struct reshade::wayland_input_context
 			wl_data_offer_destroy(context->clipboard_offer);
 		context->clipboard_offer = offer;
 		context->clipboard_offer_has_text = offer != nullptr && offer == context->pending_offer && context->pending_offer_has_text;
+		context->clipboard_offer_mime_type = context->clipboard_offer_has_text ? std::move(context->pending_offer_mime_type) : std::string();
 		context->pending_offer = nullptr;
 	}
 	static void data_offer_offer(void *data, wl_data_offer *offer, const char *mime_type)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
-		if (offer == context->pending_offer &&
-			(std::strcmp(mime_type, "text/plain;charset=utf-8") == 0 || std::strcmp(mime_type, "text/plain") == 0 || std::strcmp(mime_type, "UTF8_STRING") == 0))
+		if (offer != context->pending_offer)
+			return;
+		if (std::strcmp(mime_type, "text/plain;charset=utf-8") == 0 || std::strcmp(mime_type, "text/plain") == 0 || std::strcmp(mime_type, "UTF8_STRING") == 0)
+		{
 			context->pending_offer_has_text = true;
+			if (context->pending_offer_mime_type.empty() || std::strcmp(mime_type, "text/plain;charset=utf-8") == 0)
+				context->pending_offer_mime_type = mime_type;
+		}
 	}
 	static void data_offer_source_actions(void *, wl_data_offer *, uint32_t) {}
 	static void data_offer_action(void *, wl_data_offer *, uint32_t) {}
@@ -377,8 +455,8 @@ struct reshade::wayland_input_context
 		update_keyboard_layout_german(keymap, 0);
 	}
 	static void keyboard_enter(void *data, wl_keyboard *, uint32_t, wl_surface *surface, wl_array *) { auto *context = static_cast<wayland_input_context *>(data); context->keyboard_focused = surface == context->surface; }
-	static void keyboard_leave(void *data, wl_keyboard *, uint32_t, wl_surface *) { static_cast<wayland_input_context *>(data)->keyboard_focused = false; }
-	static void keyboard_key(void *data, wl_keyboard *, uint32_t serial, uint32_t, uint32_t key, uint32_t state) { auto *context = static_cast<wayland_input_context *>(data); context->last_serial = serial; context->set_key(key, state); }
+	static void keyboard_leave(void *data, wl_keyboard *, uint32_t, wl_surface *) { auto *context = static_cast<wayland_input_context *>(data); context->clear_keyboard_state(); context->keyboard_focused = false; }
+	static void keyboard_key(void *data, wl_keyboard *, uint32_t serial, uint32_t, uint32_t key, uint32_t state) { auto *context = static_cast<wayland_input_context *>(data); if (context->keyboard_focused) { context->last_serial = serial; context->set_key(key, state); } }
 	static void keyboard_modifiers(void *data, wl_keyboard *, uint32_t, uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) { auto *context = static_cast<wayland_input_context *>(data); if (context->state != nullptr) { xkb_state_update_mask(context->state, depressed, latched, locked, 0, 0, group); update_keyboard_layout_german(context->keymap, group); } }
 	static void keyboard_repeat_info(void *, wl_keyboard *, int32_t, int32_t) {}
 	// Tracks the highest pointer coordinates seen so far as a fallback maximum, used only while
@@ -389,9 +467,9 @@ struct reshade::wayland_input_context
 		observed_max[1] = std::max(observed_max[1], static_cast<unsigned int>(y));
 	}
 	static void pointer_enter(void *data, wl_pointer *, uint32_t, wl_surface *surface, wl_fixed_t x, wl_fixed_t y) { auto *context = static_cast<wayland_input_context *>(data); context->pointer_focused = surface == context->surface; if (context->pointer_focused) { const int px = std::max(0, wl_fixed_to_int(x)), py = std::max(0, wl_fixed_to_int(y)); context->owner->_mouse_position[0] = px; context->owner->_mouse_position[1] = py; context->observe_pointer_position(px, py); } }
-	static void pointer_leave(void *data, wl_pointer *, uint32_t, wl_surface *) { static_cast<wayland_input_context *>(data)->pointer_focused = false; }
+	static void pointer_leave(void *data, wl_pointer *, uint32_t, wl_surface *) { auto *context = static_cast<wayland_input_context *>(data); context->clear_pointer_state(); context->pointer_focused = false; }
 	static void pointer_motion(void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) { auto *context = static_cast<wayland_input_context *>(data); if (context->pointer_focused) { const int px = std::max(0, wl_fixed_to_int(x)), py = std::max(0, wl_fixed_to_int(y)); context->owner->_mouse_position[0] = px; context->owner->_mouse_position[1] = py; context->observe_pointer_position(px, py); } }
-	static void pointer_button(void *data, wl_pointer *, uint32_t serial, uint32_t, uint32_t button, uint32_t state) { auto *context = static_cast<wayland_input_context *>(data); context->last_serial = serial; if (!context->pointer_focused) return; unsigned int key = 0; if (button == 0x110) key = input::key_button_left; else if (button == 0x111) key = input::key_button_right; else if (button == 0x112) key = input::key_button_middle; else if (button == 0x113) key = input::key_button_xbutton1; else if (button == 0x114) key = input::key_button_xbutton2; if (key != 0) context->owner->_keys[key] = state == WL_POINTER_BUTTON_STATE_PRESSED ? 0x88 : 0x08; }
+	static void pointer_button(void *data, wl_pointer *, uint32_t serial, uint32_t, uint32_t button, uint32_t state) { auto *context = static_cast<wayland_input_context *>(data); if (!context->pointer_focused) return; context->last_serial = serial; unsigned int key = 0; if (button == 0x110) key = input::key_button_left; else if (button == 0x111) key = input::key_button_right; else if (button == 0x112) key = input::key_button_middle; else if (button == 0x113) key = input::key_button_xbutton1; else if (button == 0x114) key = input::key_button_xbutton2; if (key != 0) context->owner->_keys[key] = state == WL_POINTER_BUTTON_STATE_PRESSED ? 0x88 : 0x08; }
 	static void pointer_axis(void *data, wl_pointer *, uint32_t, uint32_t axis, wl_fixed_t value) { auto *context = static_cast<wayland_input_context *>(data); if (context->pointer_focused && axis == WL_POINTER_AXIS_VERTICAL_SCROLL && value != 0) context->owner->_mouse_wheel_delta += value > 0 ? -1 : 1; }
 	static void pointer_frame(void *, wl_pointer *) {} static void pointer_axis_source(void *, wl_pointer *, uint32_t) {} static void pointer_axis_stop(void *, wl_pointer *, uint32_t, uint32_t) {}
 	static void pointer_axis_discrete(void *data, wl_pointer *, uint32_t axis, int32_t discrete) { auto *context = static_cast<wayland_input_context *>(data); if (context->pointer_focused && axis == WL_POINTER_AXIS_VERTICAL_SCROLL) context->owner->_mouse_wheel_delta -= static_cast<short>(discrete); }
@@ -400,7 +478,7 @@ struct reshade::wayland_input_context
 	{
 		queue = wl_display_create_queue(display); xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS); if (queue == nullptr || xkb_context == nullptr) return false;
 		registry = wl_display_get_registry(display); wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(registry), queue);
-		static const wl_registry_listener registry_listener = { registry_global, registry_global_remove }; wl_registry_add_listener(registry, &registry_listener, this); wl_display_roundtrip_queue(display, queue); if (seat == nullptr) return false;
+		static const wl_registry_listener registry_listener = { registry_global, registry_global_remove }; wl_registry_add_listener(registry, &registry_listener, this); if (wl_display_roundtrip_queue(display, queue) < 0 || seat == nullptr) return false;
 
 		if (data_device_manager != nullptr)
 		{
@@ -422,12 +500,14 @@ struct reshade::wayland_input_context
 				zxdg_output_v1_add_listener(info.xdg_output, &listener, &info);
 			}
 
-		wl_display_roundtrip_queue(display, queue);
+		if (wl_display_roundtrip_queue(display, queue) < 0)
+			return false;
 		// The keyboard and pointer requests are issued from the seat capability callback
 		// during the previous roundtrip, so another roundtrip is required to receive their
 		// initial events (in particular the keyboard keymap) before returning. This also
 		// covers the xdg-output requests issued just above.
-		wl_display_roundtrip_queue(display, queue);
+		if (wl_display_roundtrip_queue(display, queue) < 0)
+			return false;
 		compute_output_scale();
 		return keyboard != nullptr && state != nullptr;
 	}
@@ -518,6 +598,8 @@ void reshade::input::next_frame()
 {
 	const std::unique_lock<std::recursive_mutex> lock(_mutex);
 	std::copy(std::begin(_keys), std::end(_keys), std::begin(_last_keys));
+	for (uint8_t &state : _keys)
+		state &= ~0x08;
 	std::copy(std::begin(_mouse_position), std::end(_mouse_position), std::begin(_last_mouse_position));
 	_mouse_wheel_delta = 0;
 	_text_input.clear();

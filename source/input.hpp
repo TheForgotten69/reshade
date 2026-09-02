@@ -12,7 +12,9 @@
 
 namespace reshade
 {
+	#if defined(__linux__)
 	struct wayland_input_context;
+	#endif
 
 	class input
 	{
@@ -239,9 +241,11 @@ namespace reshade
 		unsigned int _last_mouse_position[2] = {};
 		uint64_t _frame_count = 0; // Keep track of frame count to identify windows with a lot of rendering
 		std::wstring _text_input;
+	#if defined(__linux__)
 		wayland_input_context *_wayland = nullptr;
 
 		friend struct wayland_input_context;
+	#endif
 	};
 
 	class input_gamepad
