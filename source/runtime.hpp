@@ -26,7 +26,7 @@ namespace reshade
 	/// <summary>
 	/// The main ReShade post-processing effect runtime.
 	/// </summary>
-	class __declspec(uuid("77FF8202-5BEC-42AD-8CE0-397F3E84EAA6")) runtime : public api::effect_runtime
+	class RESHADE_API_UUID("77FF8202-5BEC-42AD-8CE0-397F3E84EAA6") runtime : public api::effect_runtime
 	{
 	public:
 		runtime(api::swapchain *swapchain, api::command_queue *graphics_queue, const std::filesystem::path &config_path, bool is_vr);
@@ -535,3 +535,7 @@ namespace reshade
 	template <> void runtime::set_uniform_value<int32_t>(uniform &variable, const int32_t *values, size_t count, size_t array_index);
 	template <> void runtime::set_uniform_value<uint32_t>(uniform &variable, const uint32_t *values, size_t count, size_t array_index);
 }
+
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(reshade::runtime,
+	0x02, 0x82, 0xFF, 0x77, 0xEC, 0x5B, 0xAD, 0x42,
+	0x8C, 0xE0, 0x39, 0x7F, 0x3E, 0x84, 0xEA, 0xA6);

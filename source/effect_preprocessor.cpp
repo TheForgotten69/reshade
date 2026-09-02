@@ -16,6 +16,18 @@
 	#define u8string() string()
 #endif
 
+namespace
+{
+	std::filesystem::path path_from_effect_literal(std::string literal)
+	{
+#if defined(__linux__)
+		// Effect files commonly use Windows-style separators in include and exists directives.
+			std::replace(literal.begin(), literal.end(), '\\', '/');
+#endif
+		return std::filesystem::u8path(literal);
+	}
+}
+
 enum op_type
 {
 	op_none = -1,
@@ -729,7 +741,7 @@ void reshadefx::preprocessor::parse_include()
 		return;
 	}
 
-	std::filesystem::path file_name = std::filesystem::u8path(_token.literal_as_string);
+	std::filesystem::path file_name = path_from_effect_literal(_token.literal_as_string);
 	std::filesystem::path file_path = std::filesystem::u8path(_output_location.source);
 	file_path.replace_filename(file_name);
 
@@ -926,7 +938,7 @@ bool reshadefx::preprocessor::evaluate_expression()
 				if (!expect(tokenid::string_literal))
 					return false;
 
-				std::filesystem::path file_name = std::filesystem::u8path(_token.literal_as_string);
+				std::filesystem::path file_name = path_from_effect_literal(_token.literal_as_string);
 				std::filesystem::path file_path = std::filesystem::u8path(_output_location.source);
 				file_path.replace_filename(file_name);
 

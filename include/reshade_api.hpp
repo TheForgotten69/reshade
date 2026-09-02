@@ -47,7 +47,7 @@ namespace reshade::api
 	/// A post-processing effect runtime, used to control effects.
 	/// <para>ReShade associates an independent post-processing effect runtime with most swap chains.</para>
 	/// </summary>
-	struct __declspec(novtable) effect_runtime : public device_object
+	struct RESHADE_API_NOVTABLE effect_runtime : public device_object
 	{
 		/// <summary>
 		/// Gets the handle of the window associated with this effect runtime.

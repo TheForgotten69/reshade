@@ -9,6 +9,7 @@
 #include "hook_manager.hpp"
 #endif
 #include "lockfree_linear_map.hpp"
+#include "process_environment.hpp"
 #include <cstring> // std::strcmp
 
 extern lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
@@ -345,6 +346,9 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 #if VK_KHR_win32_surface
 	RESHADE_VULKAN_HOOK_PROC(CreateWin32SurfaceKHR);
 #endif
+#if VK_KHR_wayland_surface
+	RESHADE_VULKAN_HOOK_PROC(CreateWaylandSurfaceKHR);
+#endif
 
 #if VK_KHR_surface
 	RESHADE_VULKAN_HOOK_PROC(DestroySurfaceKHR);
@@ -368,6 +372,7 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 	return trampoline(instance, pName);
 }
 
+#if defined(__linux__)
 enum VkNegotiateLayerStructType
 {
 	LAYER_NEGOTIATE_UNINTIALIZED = 0,
@@ -384,8 +389,10 @@ struct VkNegotiateLayerInterface
 	PFN_vkGetInstanceProcAddr pfnGetPhysicalDeviceProcAddr;
 };
 
-extern "C" VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
+extern "C" __attribute__((visibility("default"))) VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
 {
+	if (!reshade::process::initialize())
+		return VK_ERROR_INITIALIZATION_FAILED;
 	if (pVersionStruct == nullptr ||
 		pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT)
 		return VK_ERROR_INITIALIZATION_FAILED;
@@ -397,3 +404,4 @@ extern "C" VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiat
 
 	return VK_SUCCESS;
 }
+#endif

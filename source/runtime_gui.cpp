@@ -25,6 +25,17 @@
 
 extern bool resolve_path(std::filesystem::path &path, std::error_code &ec, const std::filesystem::path &base = g_reshade_base_path);
 
+namespace
+{
+#if defined(__linux__)
+	// Dear ImGui's clipboard callbacks moved from 'ImGuiIO' (a plain 'void *user_data') to
+	// 'ImGuiPlatformIO' (an 'ImGuiContext *') in 1.91.1; adapt to the newer shape here so
+	// 'reshade::input's clipboard functions can stay framework-agnostic like the rest of it.
+	const char *imgui_get_clipboard_text(ImGuiContext *ctx) { return reshade::input::get_clipboard_text(ctx->PlatformIO.Platform_ClipboardUserData); }
+	void imgui_set_clipboard_text(ImGuiContext *ctx, const char *text) { reshade::input::set_clipboard_text(ctx->PlatformIO.Platform_ClipboardUserData, text); }
+#endif
+}
+
 static bool string_contains(const std::string_view text, const std::string_view filter)
 {
 	return filter.empty() ||
@@ -118,6 +129,13 @@ void reshade::runtime::init_gui()
 	imgui_io.IniFilename = nullptr;
 	imgui_io.ConfigFlags = ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
 	imgui_io.BackendFlags = ImGuiBackendFlags_HasMouseCursors | ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
+#if defined(__linux__)
+	// Dear ImGui's built-in clipboard default implementation only has native support for
+	// Windows and macOS; wire up the Wayland data-device based implementation here instead
+	// (Platform_ClipboardUserData is kept current in draw_gui(), since '_input' is not yet valid here)
+	_imgui_context->PlatformIO.Platform_GetClipboardTextFn = imgui_get_clipboard_text;
+	_imgui_context->PlatformIO.Platform_SetClipboardTextFn = imgui_set_clipboard_text;
+#endif
 
 	ImGuiStyle &imgui_style = _imgui_context->Style;
 	// Disable rounding by default
@@ -158,6 +176,7 @@ void reshade::runtime::build_font_atlas()
 	if (language.empty())
 		language = resources::get_current_language();
 
+#ifdef _WIN32
 	if (language.compare(0, 2, "ar") == 0 ||
 		language.compare(0, 2, "bg") == 0 ||
 		language.compare(0, 2, "pl") == 0 ||
@@ -206,6 +225,33 @@ void reshade::runtime::build_font_atlas()
 				_default_font_path = L"C:\\Windows\\Fonts\\mingliu.ttc";
 		}
 	}
+#elif defined(__linux__)
+	if (language.compare(0, 2, "ar") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans Arabic");
+	else
+	if (language.compare(0, 2, "bg") == 0 ||
+		language.compare(0, 2, "pl") == 0 ||
+		language.compare(0, 2, "ru") == 0 ||
+		language.compare(0, 2, "sl") == 0 ||
+		language.compare(0, 2, "tr") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans");
+	else
+	if (language.compare(0, 2, "th") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans Thai");
+	else
+	if (language.compare(0, 2, "ja") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans CJK JP");
+	else
+	if (language.compare(0, 2, "ko") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans CJK KR");
+	else
+	if (language.compare(0, 2, "zh") == 0)
+	{
+		// Simplified Chinese (zh-CN, zh-SG, ...) vs. Traditional Chinese (zh-HK, zh-TW, zh-Hant, ...)
+		const bool traditional = language.find("HK") != std::string::npos || language.find("TW") != std::string::npos || language.find("Hant") != std::string::npos;
+		_default_font_path = reshade::utils::find_system_font(traditional ? "Noto Sans CJK TC" : "Noto Sans CJK SC");
+	}
+#endif
 #endif
 
 	const auto add_font_from_file = [atlas](std::filesystem::path &font_path, const ImFontConfig *font_config, std::error_code &ec) -> bool {
@@ -217,7 +263,7 @@ void reshade::runtime::build_font_atlas()
 
 		if (resolve_path(font_path, ec))
 		{
-			if (FILE *const file = _wfsopen(font_path.c_str(), L"rb", SH_DENYNO))
+			if (FILE *const file = reshade::utils::open_file(font_path, "rb"))
 			{
 				fseek(file, 0, SEEK_END);
 				const size_t file_size = ftell(file);
@@ -861,6 +907,10 @@ void reshade::runtime::draw_gui()
 	{
 		imgui_io.MouseDrawCursor = _show_overlay && (!_should_save_screenshot || !_screenshot_save_gui);
 
+#if defined(__linux__)
+		_imgui_context->PlatformIO.Platform_ClipboardUserData = _input.get();
+#endif
+
 		// Scale mouse position in case render resolution does not match the window size
 		unsigned int max_position[2];
 		_input->max_mouse_position(max_position);
@@ -1234,7 +1284,7 @@ void reshade::runtime::draw_gui()
 		if (show_clock)
 		{
 			const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-			struct tm tm; localtime_s(&tm, &t);
+			struct tm tm; reshade::utils::local_time(t, tm);
 
 			int temp_size;
 			switch (_clock_format)
@@ -2533,7 +2583,7 @@ void reshade::runtime::draw_gui_statistics()
 			ImVec2(0, 50));
 
 		const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-		struct tm tm; localtime_s(&tm, &t);
+		struct tm tm; reshade::utils::local_time(t, tm);
 
 		ImGui::BeginGroup();
 
@@ -3080,7 +3130,7 @@ void reshade::runtime::draw_gui_log()
 	{
 		_log_editor.set_readonly(true);
 
-		if (FILE *const file = _wfsopen(log_path.c_str(), L"r", SH_DENYNO))
+		if (FILE *const file = reshade::utils::open_file(log_path, "r"))
 		{
 			if (filter_changed || file_size <= _last_log_size)
 				_log_editor.clear_text();
@@ -4618,7 +4668,7 @@ void reshade::runtime::open_code_editor(editor_instance &instance) const
 	// Only update text if there is no undo history (in which case it can be assumed that the text is already up-to-date)
 	if (!instance.editor.is_modified() && !instance.editor.can_undo())
 	{
-		if (FILE *const file = _wfsopen(instance.file_path.c_str(), L"rb", SH_DENYWR))
+		if (FILE *const file = reshade::utils::open_file(instance.file_path, "rb", reshade::utils::file_share_mode::read_only))
 		{
 			fseek(file, 0, SEEK_END);
 			const size_t file_size = ftell(file);
@@ -4652,7 +4702,7 @@ void reshade::runtime::draw_code_editor(editor_instance &instance)
 			(_input != nullptr && _input->is_key_pressed('S', true, false, false))))
 	{
 		// Write current editor text to file
-		if (FILE *const file = _wfsopen(instance.file_path.c_str(), L"wb", SH_DENYWR))
+		if (FILE *const file = reshade::utils::open_file(instance.file_path, "wb", reshade::utils::file_share_mode::read_only))
 		{
 			const std::string text = instance.editor.get_text();
 			fwrite(text.data(), 1, text.size(), file);

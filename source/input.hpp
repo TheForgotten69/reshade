@@ -12,6 +12,8 @@
 
 namespace reshade
 {
+	struct wayland_input_context;
+
 	class input
 	{
 	public:
@@ -113,6 +115,9 @@ namespace reshade
 		using window_handle = void *;
 
 		explicit input(window_handle window);
+	#if defined(__linux__)
+		~input();
+	#endif
 
 		/// <summary>
 		/// Registers a window using raw input with the input manager.
@@ -127,6 +132,16 @@ namespace reshade
 		/// <param name="window">Window handle of the target window.</param>
 		/// <returns>Pointer to the input manager registered for this <paramref name="window"/>.</returns>
 		static std::shared_ptr<input> register_window(window_handle window);
+#if defined(__linux__)
+		static void register_wayland_surface(window_handle surface, void *display, unsigned int width, unsigned int height);
+		static void unregister_wayland_surface(window_handle surface);
+
+		// Wayland clipboard integration; 'user_data' is expected to be the 'reshade::input'
+		// instance owning the Wayland connection, matching the shape ImGui's clipboard
+		// callbacks expect (see 'ImGuiIO::GetClipboardTextFn'/'SetClipboardTextFn').
+		static const char *get_clipboard_text(void *user_data);
+		static void set_clipboard_text(void *user_data, const char *text);
+#endif
 
 		// Before accessing input data with any of the member functions below, first call "lock()" and keep the returned object alive while accessing it.
 
@@ -224,6 +239,9 @@ namespace reshade
 		unsigned int _last_mouse_position[2] = {};
 		uint64_t _frame_count = 0; // Keep track of frame count to identify windows with a lot of rendering
 		std::wstring _text_input;
+		wayland_input_context *_wayland = nullptr;
+
+		friend struct wayland_input_context;
 	};
 
 	class input_gamepad

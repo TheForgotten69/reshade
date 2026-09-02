@@ -11,6 +11,7 @@
 #include "dll_log.hpp"
 #include "addon_manager.hpp"
 #include "runtime_manager.hpp"
+#include "input.hpp"
 #include "lockfree_linear_map.hpp"
 #include <algorithm> // std::fill_n, std::sort, std::unique
 
@@ -18,7 +19,7 @@
 
 extern thread_local bool g_in_dxgi_runtime;
 
-extern lockfree_linear_map<VkSurfaceKHR, HWND, 16> g_vulkan_surfaces;
+extern lockfree_linear_map<VkSurfaceKHR, vulkan_surface, 16> g_vulkan_surfaces;
 extern lockfree_linear_map<void *, reshade::vulkan::device_impl *, 8> g_vulkan_devices;
 
 #if RESHADE_ADDON
@@ -181,7 +182,12 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	}
 
 	// Look up window handle from surface
-	HWND const hwnd = g_vulkan_surfaces.at(create_info.surface);
+	const vulkan_surface surface_info = g_vulkan_surfaces.at(create_info.surface);
+	void *const hwnd = surface_info.window;
+#if defined(__linux__)
+	if (surface_info.display != nullptr)
+		reshade::input::register_wayland_surface(hwnd, surface_info.display, create_info.imageExtent.width, create_info.imageExtent.height);
+#endif
 
 #if RESHADE_ADDON
 	reshade::api::swapchain_desc desc = {};

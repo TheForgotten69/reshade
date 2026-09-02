@@ -51,6 +51,12 @@ struct vulkan_instance
 	GladVulkanContext dispatch_table;
 };
 
+struct vulkan_surface
+{
+	void *window;
+	void *display;
+};
+
 #define RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(name, device) \
 	assert((device) != nullptr); \
 	PFN_vk##name trampoline = (device)->_dispatch_table.name; \
@@ -67,6 +73,9 @@ void     VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAllocationCal
 
 #if VK_KHR_win32_surface
 VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32SurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
+#endif
+#if VK_KHR_wayland_surface
+VkResult VKAPI_CALL vkCreateWaylandSurfaceKHR(VkInstance instance, const VkWaylandSurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
 #endif
 #if VK_KHR_surface
 void     VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surface, const VkAllocationCallbacks *pAllocator);

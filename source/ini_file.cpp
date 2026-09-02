@@ -4,6 +4,7 @@
  */
 
 #include "ini_file.hpp"
+#include "platform_utils.hpp"
 #include <mutex>
 #include <shared_mutex>
 #include <cctype> // std::toupper
@@ -28,13 +29,14 @@ bool reshade::ini_file::load()
 {
 	std::error_code ec;
 	const std::filesystem::file_time_type modified_at = std::filesystem::last_write_time(_path, ec);
-	if (!ec && _modified_at >= modified_at)
+	// A default timestamp means the file has not been loaded yet
+	if (!ec && _modified_at != std::filesystem::file_time_type {} && _modified_at >= modified_at)
 		return true; // Skip loading if there was no modification to the file since it was last loaded
 
 	// Clear when file does not exist too
 	_sections.clear();
 
-	FILE *const file = _wfsopen(_path.c_str(), L"r", SH_DENYWR);
+	FILE *const file = utils::open_file(_path, "r", utils::file_share_mode::read_only);
 	if (file == nullptr)
 		return false;
 
@@ -204,7 +206,7 @@ bool reshade::ini_file::save()
 		}
 	}
 
-	FILE *const file = _wfsopen(_path.c_str(), L"w", SH_DENYWR);
+	FILE *const file = utils::open_file(_path, "w", utils::file_share_mode::read_only);
 	if (file == nullptr)
 		return false;
 	const size_t file_size_written = fwrite(data.data(), 1, data.size(), file);

@@ -5,7 +5,22 @@
 
 #include "platform_utils.hpp"
 #include <utf8/unchecked.h>
+#include <share.h>
+#include <string_view>
 #include <Windows.h>
+
+FILE *reshade::utils::open_file(const std::filesystem::path &path, const char *mode, file_share_mode sharing)
+{
+	std::wstring wide_mode;
+	for (const char value : std::string_view(mode))
+		wide_mode.push_back(static_cast<wchar_t>(value));
+	return _wfsopen(path.c_str(), wide_mode.c_str(), sharing == file_share_mode::read_only ? SH_DENYWR : SH_DENYNO);
+}
+
+void reshade::utils::local_time(const std::time_t &time, std::tm &result)
+{
+	localtime_s(&result, &time);
+}
 #include <Shellapi.h>
 #include <mmsystem.h>
 

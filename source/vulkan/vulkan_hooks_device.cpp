@@ -14,6 +14,7 @@
 #endif
 #include "addon_manager.hpp"
 #include "lockfree_linear_map.hpp"
+#include "process_environment.hpp"
 #include <cstring> // std::strcmp, std::strncmp
 #include <algorithm> // std::find_if, std::min
 
@@ -301,8 +302,10 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		else
 		{
 			// No Man's Sky initializes OpenVR before loading Vulkan (and therefore before loading ReShade), so need to manually install OpenVR hooks now when used
+#if defined(_WIN32)
 			extern void check_and_init_openvr_hooks();
 			check_and_init_openvr_hooks();
+#endif
 
 #if VK_KHR_swapchain_mutable_format
 			add_extension(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME, true);
