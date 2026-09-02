@@ -5,7 +5,6 @@
 #include <array>
 #include <cstdlib>
 #include <dlfcn.h>
-#include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
@@ -32,6 +31,22 @@ namespace
 			return std::filesystem::u8path(home) / fallback;
 
 		return {};
+	}
+
+	bool initialize_default_config(const std::filesystem::path &config_path, const std::filesystem::path &config_root)
+	{
+		const std::filesystem::path data_root = xdg_path("XDG_DATA_HOME", ".local/share");
+		const std::filesystem::path cache_root = xdg_path("XDG_CACHE_HOME", ".cache");
+		if (data_root.empty() || cache_root.empty())
+			return false;
+
+		const std::filesystem::path shader_root = data_root / "reshade" / "reshade-shaders";
+		reshade::ini_file config(config_path);
+		config.set("GENERAL", "EffectSearchPaths", shader_root / "Shaders" / "**");
+		config.set("GENERAL", "TextureSearchPaths", shader_root / "Textures" / "**");
+		config.set("GENERAL", "IntermediateCachePath", cache_root / "reshade");
+		config.set("GENERAL", "PresetPath", config_root / "reshade" / "ReShadePreset.ini");
+		return config.save();
 	}
 
 	std::filesystem::path canonical_path(const std::filesystem::path &path, std::error_code &ec)
@@ -120,7 +135,7 @@ bool reshade::process::initialize()
 			{
 				ec.clear();
 				std::filesystem::create_directories(s_config_path.parent_path(), ec);
-				if (ec || !std::ofstream(s_config_path))
+				if (ec || !initialize_default_config(s_config_path, config_root))
 				{
 					s_config_path.clear();
 					return;
