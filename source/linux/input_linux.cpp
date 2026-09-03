@@ -18,6 +18,7 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 #include "xdg-output-unstable-v1-client-protocol.h"
+#include "relative-pointer-unstable-v1-client-protocol.h"
 
 namespace
 {
@@ -94,11 +95,15 @@ struct reshade::wayland_input_context
 	uint32_t seat_global_name = 0;
 	wl_keyboard *keyboard = nullptr;
 	wl_pointer *pointer = nullptr;
+	zwp_relative_pointer_manager_v1 *relative_pointer_manager = nullptr;
+	zwp_relative_pointer_v1 *relative_pointer = nullptr;
 	xkb_context *xkb_context = nullptr;
 	xkb_keymap *keymap = nullptr;
 	xkb_state *state = nullptr;
 	bool keyboard_focused = false;
 	bool pointer_focused = false;
+	uint64_t absolute_motion_count = 0;
+	uint64_t relative_motion_count = 0;
 	unsigned int width = 1;
 	unsigned int height = 1;
 	// Elements are referenced by address from Wayland listener 'data' pointers once bound, so
@@ -106,11 +111,8 @@ struct reshade::wayland_input_context
 	std::deque<output_info> outputs;
 	zxdg_output_manager_v1 *xdg_output_manager = nullptr;
 	uint32_t xdg_output_manager_global_name = 0;
-	// Ratio of physical to logical output pixels; 0 when it could not be determined (compositor
-	// does not support 'xdg-output', or connected outputs disagree on scale), in which case
-	// 'observed_max' below is used as a self-correcting fallback instead.
+	// Ratio of physical to logical output pixels; 0 when it could not be determined.
 	double output_scale = 0.0;
-	unsigned int observed_max[2] = { 1, 1 };
 
 	// Clipboard integration via the core 'wl_data_device' protocol (no per-surface exclusivity,
 	// unlike 'wp-fractional-scale-v1', so unlike output scaling this is always safe to use).
@@ -145,6 +147,8 @@ struct reshade::wayland_input_context
 			if (info.output != nullptr) wl_output_destroy(info.output);
 		}
 		if (xdg_output_manager != nullptr) zxdg_output_manager_v1_destroy(xdg_output_manager);
+		if (relative_pointer != nullptr) zwp_relative_pointer_v1_destroy(relative_pointer);
+		if (relative_pointer_manager != nullptr) zwp_relative_pointer_manager_v1_destroy(relative_pointer_manager);
 		if (pointer != nullptr) wl_pointer_destroy(pointer); if (keyboard != nullptr) wl_keyboard_destroy(keyboard);
 		if (seat != nullptr) wl_seat_destroy(seat); if (registry != nullptr) wl_registry_destroy(registry);
 		if (queue != nullptr) wl_event_queue_destroy(queue); if (state != nullptr) xkb_state_unref(state);
@@ -287,6 +291,11 @@ struct reshade::wayland_input_context
 		{
 			context->data_device_manager = static_cast<wl_data_device_manager *>(wl_registry_bind(registry, name, &wl_data_device_manager_interface, std::min(version, 3u)));
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->data_device_manager), context->queue);
+		}
+		else if (std::strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0 && context->relative_pointer_manager == nullptr)
+		{
+			context->relative_pointer_manager = static_cast<zwp_relative_pointer_manager_v1 *>(wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, std::min(version, 1u)));
+			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->relative_pointer_manager), context->queue);
 		}
 	}
 	static void registry_global_remove(void *data, wl_registry *, uint32_t name)
@@ -459,20 +468,50 @@ struct reshade::wayland_input_context
 	static void keyboard_key(void *data, wl_keyboard *, uint32_t serial, uint32_t, uint32_t key, uint32_t state) { auto *context = static_cast<wayland_input_context *>(data); if (context->keyboard_focused) { context->last_serial = serial; context->set_key(key, state); } }
 	static void keyboard_modifiers(void *data, wl_keyboard *, uint32_t, uint32_t depressed, uint32_t latched, uint32_t locked, uint32_t group) { auto *context = static_cast<wayland_input_context *>(data); if (context->state != nullptr) { xkb_state_update_mask(context->state, depressed, latched, locked, 0, 0, group); update_keyboard_layout_german(context->keymap, group); } }
 	static void keyboard_repeat_info(void *, wl_keyboard *, int32_t, int32_t) {}
-	// Tracks the highest pointer coordinates seen so far as a fallback maximum, used only while
-	// 'output_scale' could not be determined (see 'compute_output_scale').
-	void observe_pointer_position(int x, int y)
+	void max_pointer_position(unsigned int position[2]) const
 	{
-		observed_max[0] = std::max(observed_max[0], static_cast<unsigned int>(x));
-		observed_max[1] = std::max(observed_max[1], static_cast<unsigned int>(y));
+		if (output_scale > 0.0)
+		{
+			position[0] = std::max(1u, static_cast<unsigned int>(width / output_scale));
+			position[1] = std::max(1u, static_cast<unsigned int>(height / output_scale));
+		}
+		else
+		{
+			position[0] = width;
+			position[1] = height;
+		}
 	}
-	static void pointer_enter(void *data, wl_pointer *, uint32_t, wl_surface *surface, wl_fixed_t x, wl_fixed_t y) { auto *context = static_cast<wayland_input_context *>(data); context->pointer_focused = surface == context->surface; if (context->pointer_focused) { const int px = std::max(0, wl_fixed_to_int(x)), py = std::max(0, wl_fixed_to_int(y)); context->owner->_mouse_position[0] = px; context->owner->_mouse_position[1] = py; context->observe_pointer_position(px, py); } }
+	void set_absolute_pointer_position(wl_fixed_t x, wl_fixed_t y)
+	{
+		++absolute_motion_count;
+		if (absolute_motion_count == 1 || absolute_motion_count % 120 == 0)
+			log::message(log::level::info, "[DEBUG-wayland-mouse] absolute=%llu relative=%llu focused=%d blocked=%d position=%u,%u event=%d,%d.", static_cast<unsigned long long>(absolute_motion_count), static_cast<unsigned long long>(relative_motion_count), pointer_focused, owner->_block_cursor_warping, owner->_mouse_position[0], owner->_mouse_position[1], wl_fixed_to_int(x), wl_fixed_to_int(y));
+		if (!pointer_focused || (owner->_block_cursor_warping && relative_pointer != nullptr))
+			return;
+		const int px = std::max(0, wl_fixed_to_int(x)), py = std::max(0, wl_fixed_to_int(y));
+		owner->_mouse_position[0] = px;
+		owner->_mouse_position[1] = py;
+	}
+	static void pointer_enter(void *data, wl_pointer *, uint32_t, wl_surface *surface, wl_fixed_t x, wl_fixed_t y) { auto *context = static_cast<wayland_input_context *>(data); context->pointer_focused = surface == context->surface; context->set_absolute_pointer_position(x, y); }
 	static void pointer_leave(void *data, wl_pointer *, uint32_t, wl_surface *) { auto *context = static_cast<wayland_input_context *>(data); context->clear_pointer_state(); context->pointer_focused = false; }
-	static void pointer_motion(void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) { auto *context = static_cast<wayland_input_context *>(data); if (context->pointer_focused) { const int px = std::max(0, wl_fixed_to_int(x)), py = std::max(0, wl_fixed_to_int(y)); context->owner->_mouse_position[0] = px; context->owner->_mouse_position[1] = py; context->observe_pointer_position(px, py); } }
+	static void pointer_motion(void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) { static_cast<wayland_input_context *>(data)->set_absolute_pointer_position(x, y); }
 	static void pointer_button(void *data, wl_pointer *, uint32_t serial, uint32_t, uint32_t button, uint32_t state) { auto *context = static_cast<wayland_input_context *>(data); if (!context->pointer_focused) return; context->last_serial = serial; unsigned int key = 0; if (button == 0x110) key = input::key_button_left; else if (button == 0x111) key = input::key_button_right; else if (button == 0x112) key = input::key_button_middle; else if (button == 0x113) key = input::key_button_xbutton1; else if (button == 0x114) key = input::key_button_xbutton2; if (key != 0) context->owner->_keys[key] = state == WL_POINTER_BUTTON_STATE_PRESSED ? 0x88 : 0x08; }
 	static void pointer_axis(void *data, wl_pointer *, uint32_t, uint32_t axis, wl_fixed_t value) { auto *context = static_cast<wayland_input_context *>(data); if (context->pointer_focused && axis == WL_POINTER_AXIS_VERTICAL_SCROLL && value != 0) context->owner->_mouse_wheel_delta += value > 0 ? -1 : 1; }
 	static void pointer_frame(void *, wl_pointer *) {} static void pointer_axis_source(void *, wl_pointer *, uint32_t) {} static void pointer_axis_stop(void *, wl_pointer *, uint32_t, uint32_t) {}
 	static void pointer_axis_discrete(void *data, wl_pointer *, uint32_t axis, int32_t discrete) { auto *context = static_cast<wayland_input_context *>(data); if (context->pointer_focused && axis == WL_POINTER_AXIS_VERTICAL_SCROLL) context->owner->_mouse_wheel_delta -= static_cast<short>(discrete); }
+	static void relative_pointer_motion(void *data, zwp_relative_pointer_v1 *, uint32_t, uint32_t, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t, wl_fixed_t)
+	{
+		auto *context = static_cast<wayland_input_context *>(data);
+		++context->relative_motion_count;
+		if (context->relative_motion_count == 1 || context->relative_motion_count % 120 == 0)
+			log::message(log::level::info, "[DEBUG-wayland-mouse] relative=%llu absolute=%llu focused=%d blocked=%d position=%u,%u delta=%.2f,%.2f.", static_cast<unsigned long long>(context->relative_motion_count), static_cast<unsigned long long>(context->absolute_motion_count), context->pointer_focused, context->owner->_block_cursor_warping, context->owner->_mouse_position[0], context->owner->_mouse_position[1], wl_fixed_to_double(dx), wl_fixed_to_double(dy));
+		if (!context->pointer_focused || !context->owner->_block_cursor_warping)
+			return;
+		unsigned int maximum[2];
+		context->max_pointer_position(maximum);
+		context->owner->_mouse_position[0] = static_cast<unsigned int>(std::clamp(static_cast<int>(std::lround(context->owner->_mouse_position[0] + wl_fixed_to_double(dx))), 0, static_cast<int>(maximum[0])));
+		context->owner->_mouse_position[1] = static_cast<unsigned int>(std::clamp(static_cast<int>(std::lround(context->owner->_mouse_position[1] + wl_fixed_to_double(dy))), 0, static_cast<int>(maximum[1])));
+	}
 
 	bool initialize()
 	{
@@ -487,6 +526,16 @@ struct reshade::wayland_input_context
 			static const wl_data_device_listener listener = { data_device_data_offer, data_device_enter, data_device_leave, data_device_motion, data_device_drop, data_device_selection };
 			wl_data_device_add_listener(data_device, &listener, this);
 		}
+		if (relative_pointer_manager != nullptr && pointer != nullptr)
+		{
+			relative_pointer = zwp_relative_pointer_manager_v1_get_relative_pointer(relative_pointer_manager, pointer);
+			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(relative_pointer), queue);
+			static const zwp_relative_pointer_v1_listener listener = { relative_pointer_motion };
+			zwp_relative_pointer_v1_add_listener(relative_pointer, &listener, this);
+			log::message(log::level::info, "[DEBUG-wayland-mouse] Created relative pointer for surface %p.", surface);
+		}
+		else
+			log::message(log::level::info, "[DEBUG-wayland-mouse] Relative pointer unavailable for surface %p (manager=%p, pointer=%p).", surface, relative_pointer_manager, pointer);
 
 		// Outputs and the xdg-output manager are both discovered in the roundtrip above, so
 		// only now can per-output xdg-output objects be requested (order of registry globals
@@ -614,21 +663,13 @@ void reshade::input::max_mouse_position(unsigned int position[2]) const
 		position[0] = position[1] = 1;
 		return;
 	}
-	// Wayland pointer coordinates are reported in the surface's logical (post-scale) units,
-	// while 'width'/'height' (and therefore the ImGui display size they are compared against)
-	// are the swapchain's physical pixel size, so convert using the compositor's own scale
-	// where it could be determined, falling back to the highest coordinates observed so far.
-	if (_wayland->output_scale > 0.0)
-	{
-		position[0] = std::max(1u, static_cast<unsigned int>(_wayland->width / _wayland->output_scale));
-		position[1] = std::max(1u, static_cast<unsigned int>(_wayland->height / _wayland->output_scale));
-	}
-	else
-	{
-		position[0] = _wayland->observed_max[0];
-		position[1] = _wayland->observed_max[1];
-	}
+	_wayland->max_pointer_position(position);
 }
-void reshade::input::block_mouse_cursor_warping(bool enable) { _block_cursor_warping = enable; }
+void reshade::input::block_mouse_cursor_warping(bool enable)
+{
+	if (_block_cursor_warping != enable)
+		log::message(log::level::info, "[DEBUG-wayland-mouse] Cursor-warp blocking changed to %d at position %u,%u (focused=%d, relative=%p).", enable, _mouse_position[0], _mouse_position[1], _wayland != nullptr && _wayland->pointer_focused, _wayland != nullptr ? _wayland->relative_pointer : nullptr);
+	_block_cursor_warping = enable;
+}
 std::shared_ptr<reshade::input_gamepad> reshade::input_gamepad::load() { return {}; }
 void reshade::input_gamepad::next_frame() {}
