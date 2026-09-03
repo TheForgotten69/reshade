@@ -35,7 +35,7 @@ The version option is only needed when the source tree has no reachable ReShade 
 RESHADE_ENABLE=1 /path/to/application
 ```
 
-Configuration and logs are stored below the XDG config and state directories (normally `~/.config/reshade` and `~/.local/state/reshade`). Depth access and add-ons are not supported in the Linux build yet.
+Configuration and logs are stored below the XDG config and state directories (normally `~/.config/reshade` and `~/.local/state/reshade`). The built-in Generic Depth add-on is supported for Vulkan; external add-ons remain unsupported.
 
 A quick overview of what some of the source code files contain:
 

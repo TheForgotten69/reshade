@@ -17,9 +17,17 @@
 
 #if defined(RESHADE_API_LIBRARY_EXPORT)
 	#define RESHADE_API_LIBRARY 1
-	#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllexport)
+	#if defined(_WIN32)
+		#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllexport)
+	#elif defined(__linux__)
+		#define RESHADE_API_LIBRARY_DECL extern "C" __attribute__((visibility("default")))
+	#endif
 #else
-	#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllimport)
+	#if defined(_WIN32)
+		#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllimport)
+	#elif defined(__linux__)
+		#define RESHADE_API_LIBRARY_DECL extern "C"
+	#endif
 #endif
 
 RESHADE_API_LIBRARY_DECL void ReShadeLogMessage(void *module, int level, const char *message);

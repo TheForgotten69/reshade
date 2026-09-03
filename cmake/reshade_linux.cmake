@@ -92,6 +92,8 @@ function(reshade_configure_linux_target target)
     ${target}
     PRIVATE
       source/ini_file.cpp
+      source/addon.hpp
+      source/addon_manager.hpp
       source/input.cpp
       source/runtime.cpp
       source/runtime_api.cpp
@@ -106,6 +108,7 @@ function(reshade_configure_linux_target target)
       source/imgui_widgets.cpp
       source/dll_log.cpp
       source/linux/input_linux.cpp
+      source/linux/addon_manager.cpp
       source/linux/platform_utils.cpp
       source/linux/process_environment.cpp
       source/linux/runtime_platform.cpp
@@ -116,12 +119,15 @@ function(reshade_configure_linux_target target)
     PRIVATE
       RESHADE_GUI=1
       RESHADE_API_LIBRARY_EXPORT
-      RESHADE_ADDON=0
+      RESHADE_ADDON=1
       RESHADE_LOCALIZATION
       $<$<CONFIG:Debug>:RESHADE_VERBOSE_LOG>
       $<$<CONFIG:Debug>:_DEBUG>
       $<$<CONFIG:Release>:NDEBUG>
   )
+  set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
+  set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
+  target_sources(${target} PRIVATE examples/09-depth/generic_depth_addon.cpp)
   target_link_libraries(
     ${target}
     PRIVATE
