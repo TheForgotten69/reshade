@@ -21,6 +21,7 @@ namespace
 	bool s_process_active = false;
 	std::string s_application_id;
 	std::filesystem::path s_config_path;
+	std::filesystem::path s_log_path;
 
 	std::filesystem::path xdg_path(const char *variable, const char *fallback)
 	{
@@ -154,12 +155,12 @@ bool reshade::process::initialize()
 		if (config.has("INSTALL", "Logging") && !config.get("INSTALL", "Logging"))
 			return;
 
-		const std::filesystem::path state_root = xdg_path("XDG_STATE_HOME", ".local/state");
-		if (state_root.empty())
+		const std::filesystem::path data_root = xdg_path("XDG_DATA_HOME", ".local/share");
+		if (data_root.empty())
 			return;
 
-		const std::filesystem::path log_path = state_root / "reshade" / s_application_id / "ReShade.log";
-		if (reshade::log::open_log_file(log_path, ec))
+		s_log_path = data_root / "reshade" / "logs" / s_application_id / "ReShade.log";
+		if (reshade::log::open_log_file(s_log_path, ec))
 		{
 			reshade::log::message(reshade::log::level::info,
 				"Initializing ReShade version '" VERSION_STRING_FILE "' loaded from '%s' into '%s'.",
@@ -169,4 +170,9 @@ bool reshade::process::initialize()
 	});
 
 	return s_process_active;
+}
+
+std::filesystem::path reshade::process::get_log_path()
+{
+	return s_log_path;
 }

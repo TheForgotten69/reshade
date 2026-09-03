@@ -61,7 +61,20 @@ add_custom_command(
   COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_XDG_OUTPUT_XML}" "${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}"
   DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_XML}"
 )
-set_source_files_properties(source/linux/input_linux.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER}")
+set(RESHADE_WAYLAND_RELATIVE_POINTER_XML "${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml")
+set(RESHADE_WAYLAND_RELATIVE_POINTER_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/relative-pointer-unstable-v1-client-protocol.h")
+set(RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/relative-pointer-unstable-v1-protocol.c")
+add_custom_command(
+  OUTPUT "${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}"
+  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}" "${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}"
+  DEPENDS "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}"
+)
+add_custom_command(
+  OUTPUT "${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}"
+  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}" "${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}"
+  DEPENDS "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}"
+)
+set_source_files_properties(source/linux/input_linux.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER};${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}")
 
 # Generate a native lookup table from the same localization resources used by Windows.
 file(GLOB RESHADE_LOCALIZATION_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/lang_*.rc2")
@@ -92,6 +105,10 @@ function(reshade_configure_linux_target target)
     ${target}
     PRIVATE
       source/ini_file.cpp
+      source/addon.cpp
+      source/addon.hpp
+      source/addon_manager.cpp
+      source/addon_manager.hpp
       source/input.cpp
       source/runtime.cpp
       source/runtime_api.cpp
@@ -100,6 +117,8 @@ function(reshade_configure_linux_target target)
       ${RESHADE_SOURCE_VULKAN}
       ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER}
       ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
+      ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}
+      ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
       ${RESHADE_LOCALIZATION_HEADER}
       ${RESHADE_LOCALIZATION_SOURCE}
       source/imgui_code_editor.cpp
@@ -116,12 +135,15 @@ function(reshade_configure_linux_target target)
     PRIVATE
       RESHADE_GUI=1
       RESHADE_API_LIBRARY_EXPORT
-      RESHADE_ADDON=0
+      RESHADE_ADDON=2
       RESHADE_LOCALIZATION
       $<$<CONFIG:Debug>:RESHADE_VERBOSE_LOG>
       $<$<CONFIG:Debug>:_DEBUG>
       $<$<CONFIG:Release>:NDEBUG>
   )
+  set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
+  set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
+  target_sources(${target} PRIVATE examples/09-depth/generic_depth_addon.cpp)
   target_link_libraries(
     ${target}
     PRIVATE

@@ -16,6 +16,7 @@
 #include "imgui_widgets.hpp"
 #include "localization.hpp"
 #include "platform_utils.hpp"
+#include "process_environment.hpp"
 #include "fonts/forkawesome.inl"
 #include <cmath> // std::abs, std::ceil, std::floor
 #include <cctype> // std::tolower
@@ -3111,8 +3112,12 @@ void reshade::runtime::draw_gui_statistics()
 void reshade::runtime::draw_gui_log()
 {
 	std::error_code ec;
+	#if defined(__linux__)
+	const std::filesystem::path log_path = process::get_log_path();
+	#else
 	std::filesystem::path log_path = global_config().path();
 	log_path.replace_extension(L".log");
+	#endif
 
 	const bool filter_changed = imgui::search_input_box(_log_filter, sizeof(_log_filter), -(ImGui::GetFrameHeight() + 8.0f * ImGui::GetFontSize() + 2 * _imgui_context->Style.ItemSpacing.x));
 
@@ -3311,7 +3316,7 @@ void reshade::runtime::draw_gui_addons()
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextUnformatted(_("This build of ReShade has only limited add-on functionality."));
 #else
-	std::filesystem::path addon_search_path = L".\\";
+	std::filesystem::path addon_search_path = get_default_addon_search_path();
 	config.get("ADDON", "AddonPath", addon_search_path);
 	if (imgui::directory_input_box(_("Add-on search path"), addon_search_path, _file_selection_path))
 		config.set("ADDON", "AddonPath", addon_search_path);
@@ -3392,7 +3397,9 @@ void reshade::runtime::draw_gui_addons()
 					return (at_pos == 0 || addon_name.substr(0, at_pos) == info.name) && addon_name.substr(at_pos + 1) == info.file;
 				});
 
-			bool enabled = (disabled_it == disabled_addons.end());
+			const bool unavailable = !info.error.empty();
+			bool enabled = !unavailable && disabled_it == disabled_addons.end();
+			ImGui::BeginDisabled(unavailable);
 			if (ImGui::Checkbox(info.name.c_str(), &enabled))
 			{
 				if (enabled)
@@ -3402,10 +3409,11 @@ void reshade::runtime::draw_gui_addons()
 
 				config.set("ADDON", "DisabledAddons", disabled_addons);
 			}
+			ImGui::EndDisabled();
 
 			ImGui::PopStyleColor();
 
-			if (enabled == (info.handle == nullptr))
+			if (info.error.empty() && enabled == (info.handle == nullptr))
 			{
 				ImGui::SameLine();
 				ImGui::TextUnformatted(enabled ? _("(will be enabled on next application restart)") : _("(will be disabled on next application restart)"));
@@ -3428,6 +3436,8 @@ void reshade::runtime::draw_gui_addons()
 					ImGui::Text(_("Website:"));
 				if (!info.issues_url.empty())
 					ImGui::Text(_("Issues:"));
+				if (!info.error.empty())
+					ImGui::Text(_("Status:"));
 
 				ImGui::EndGroup();
 				ImGui::SameLine(ImGui::GetWindowWidth() * 0.25f);
@@ -3449,6 +3459,8 @@ void reshade::runtime::draw_gui_addons()
 					ImGui::TextLinkOpenURL(info.website_url.c_str());
 				if (!info.issues_url.empty())
 					ImGui::TextLinkOpenURL(info.issues_url.c_str());
+				if (!info.error.empty())
+					ImGui::TextColored(COLOR_RED, "%s", info.error.c_str());
 
 				ImGui::EndGroup();
 

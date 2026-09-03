@@ -13,7 +13,13 @@
 #include <cstdio> // std::snprintf
 #include <cstring> // std::strcmp
 #include <algorithm> // std::find_if, std::remove, std::sort
+#if defined(__linux__)
+#include <chrono>
+#include <thread>
+#endif
+#if defined(_WIN32)
 #include <Unknwn.h>
+#endif
 
 using namespace reshade::api;
 
@@ -97,7 +103,7 @@ struct resource_hash
 	}
 };
 
-struct __declspec(uuid("43319e83-387c-448e-881c-7e68fc2e52c4")) state_tracking
+struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 {
 	const bool is_queue;
 	viewport current_viewport = {};
@@ -154,8 +160,11 @@ struct __declspec(uuid("43319e83-387c-448e-881c-7e68fc2e52c4")) state_tracking
 		}
 	}
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(state_tracking,
+	0x83, 0x9e, 0x31, 0x43, 0x7c, 0x38, 0x8e, 0x44,
+	0x88, 0x1c, 0x7e, 0x68, 0xfc, 0x2e, 0x52, 0xc4);
 
-struct __declspec(uuid("7c6363c7-f94e-437a-9160-141782c44a98")) generic_depth_data
+struct RESHADE_API_UUID("7c6363c7-f94e-437a-9160-141782c44a98") generic_depth_data
 {
 	// The depth-stencil resource that is currently selected as being the main depth target
 	resource selected_depth_stencil = { 0 };
@@ -170,6 +179,9 @@ struct __declspec(uuid("7c6363c7-f94e-437a-9160-141782c44a98")) generic_depth_da
 	// True when the shader resource view was created from the backup resource, false when it was created from the original depth-stencil
 	bool using_backup_texture = false;
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(generic_depth_data,
+	0xc7, 0x63, 0x63, 0x7c, 0x4e, 0xf9, 0x7a, 0x43,
+	0x91, 0x60, 0x14, 0x17, 0x82, 0xc4, 0x4a, 0x98);
 
 struct depth_stencil_backup
 {
@@ -205,7 +217,7 @@ struct depth_stencil_resource
 	uint64_t first_used_in_frame = std::numeric_limits<uint64_t>::max();
 };
 
-struct __declspec(uuid("e006e162-33ac-4b9f-b10f-0e15335c7bdb")) generic_depth_device_data
+struct RESHADE_API_UUID("e006e162-33ac-4b9f-b10f-0e15335c7bdb") generic_depth_device_data
 {
 	uint64_t frame_index = 0;
 
@@ -247,8 +259,10 @@ struct __declspec(uuid("e006e162-33ac-4b9f-b10f-0e15335c7bdb")) generic_depth_de
 			if (depth_stencil_resources.find(depth_stencil) == depth_stencil_resources.end())
 				return nullptr;
 
+		#if defined(_WIN32)
 			// Add reference to the resource so that it is not destroyed while it is being copied to the backup texture
 			reinterpret_cast<IUnknown *>(depth_stencil.handle)->AddRef();
+		#endif
 		}
 
 		desc.type = resource_type::texture_2d;
@@ -325,11 +339,16 @@ struct __declspec(uuid("e006e162-33ac-4b9f-b10f-0e15335c7bdb")) generic_depth_de
 		const device_api api = device->get_api();
 		if (api <= device_api::d3d12)
 		{
+		#if defined(_WIN32)
 			// Release the reference that was added above
 			reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
+		#endif
 		}
 	}
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(generic_depth_device_data,
+	0x62, 0xe1, 0x06, 0xe0, 0xac, 0x33, 0x9f, 0x4b,
+	0xb1, 0x0f, 0x0e, 0x15, 0x33, 0x5c, 0x7b, 0xdb);
 
 static bool check_depth_format(format format)
 {
@@ -690,7 +709,11 @@ static void on_destroy_resource(device *device, resource resource)
 
 			// This is bad ... the resource may still be in use by an effect on the GPU and destroying it would crash it
 			// Try to mitigate that somehow by delaying this thread a little to hopefully give the GPU enough time to catch up before the resource memory is deallocated
+		#if defined(_WIN32)
 			Sleep(500);
+		#elif defined(__linux__)
+			std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		#endif
 		}
 	}
 }
