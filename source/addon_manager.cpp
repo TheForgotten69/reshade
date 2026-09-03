@@ -10,16 +10,84 @@
 #include "dll_log.hpp"
 #include "ini_file.hpp"
 #include <algorithm> // std::find, std::find_if, std::remove, std::remove_if
+#include <array>
+#if defined(_WIN32)
 #include <Windows.h>
+#elif defined(__linux__)
+#include <atomic>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <fstream>
+#include <link.h>
+#endif
 
 extern void register_addon_depth();
+#if defined(_WIN32)
 extern void register_addon_effect_runtime_sync();
+#endif
 extern void unregister_addon_depth();
+#if defined(_WIN32)
 extern void unregister_addon_effect_runtime_sync();
+#endif
 
+#if defined(_WIN32)
 extern HMODULE g_module_handle;
 
 extern std::filesystem::path get_module_path(HMODULE module);
+
+namespace
+{
+	void *get_module_symbol(void *module, const char *name)
+	{
+		return reinterpret_cast<void *>(GetProcAddress(static_cast<HMODULE>(module), name));
+	}
+}
+#elif defined(__linux__)
+extern std::filesystem::path g_reshade_dll_path;
+
+namespace
+{
+	void *get_module_handle(const void *address)
+	{
+		Dl_info info = {};
+		struct link_map *map = nullptr;
+		return address != nullptr && dladdr1(address, &info, reinterpret_cast<void **>(&map), RTLD_DL_LINKMAP) != 0 ? map : nullptr;
+	}
+
+	void *const g_module_handle = get_module_handle(reinterpret_cast<const void *>(&get_module_handle));
+
+	std::filesystem::path get_module_path(void *module)
+	{
+		if (module == g_module_handle)
+			return g_reshade_dll_path;
+
+		struct link_map *map = nullptr;
+		return module != nullptr && dlinfo(module, RTLD_DI_LINKMAP, &map) == 0 && map != nullptr && map->l_name != nullptr ? std::filesystem::u8path(map->l_name) : std::filesystem::path();
+	}
+
+	void *get_module_symbol(void *module, const char *name)
+	{
+		return dlsym(module, name);
+	}
+
+	bool is_windows_module(const std::filesystem::path &path)
+	{
+		std::ifstream file(path, std::ios::binary);
+		std::array<unsigned char, 64> dos_header = {};
+		if (!file.read(reinterpret_cast<char *>(dos_header.data()), dos_header.size()) || dos_header[0] != 'M' || dos_header[1] != 'Z')
+			return false;
+
+		const uint32_t pe_offset =
+			static_cast<uint32_t>(dos_header[0x3c]) |
+			(static_cast<uint32_t>(dos_header[0x3d]) << 8) |
+			(static_cast<uint32_t>(dos_header[0x3e]) << 16) |
+			(static_cast<uint32_t>(dos_header[0x3f]) << 24);
+		std::array<char, 4> signature = {};
+		file.seekg(pe_offset);
+		return file.read(signature.data(), signature.size()) && signature == std::array<char, 4> { 'P', 'E', '\0', '\0' };
+	}
+}
+#endif
 
 #if RESHADE_VERBOSE_LOG
 static const char *addon_event_to_string(reshade::addon_event ev)
@@ -140,11 +208,30 @@ std::vector<void *> reshade::addon_event_list[static_cast<uint32_t>(reshade::add
 std::vector<reshade::addon_info> reshade::addon_loaded_info;
 thread_local const reshade::addon_info *reshade::addon_current = nullptr;
 static unsigned long s_reference_count = 0;
+#if defined(__linux__)
+static std::atomic_ulong s_reference_count_linux = 0;
+#endif
+
+std::filesystem::path reshade::get_default_addon_search_path()
+{
+#if defined(__linux__)
+	// Keep add-ons next to the shared shader installation, rather than per-application configuration.
+	if (const char *const data_home = std::getenv("XDG_DATA_HOME"); data_home != nullptr && data_home[0] != '\0')
+		return std::filesystem::u8path(data_home) / "reshade";
+	if (const char *const home = std::getenv("HOME"); home != nullptr && home[0] != '\0')
+		return std::filesystem::u8path(home) / ".local/share/reshade";
+#endif
+	return g_reshade_base_path;
+}
 
 void reshade::load_addons()
 {
 	// Only load add-ons the first time a reference is added
+	#if defined(_WIN32)
 	if (InterlockedIncrement(&s_reference_count) != 1)
+	#elif defined(__linux__)
+	if (s_reference_count_linux.fetch_add(1, std::memory_order_acq_rel) != 0)
+	#endif
 		return;
 
 	ini_file &config = global_config();
@@ -173,6 +260,7 @@ void reshade::load_addons()
 			register_addon_depth();
 		}
 	}
+	#if defined(_WIN32)
 	{	addon_info &info = addon_loaded_info.emplace_back();
 		info.name = "Effect Runtime Sync";
 		info.description = "Adds preset synchronization between different effect runtime instances, e.g. to have changes in a desktop window reflect in VR.";
@@ -187,6 +275,7 @@ void reshade::load_addons()
 			register_addon_effect_runtime_sync();
 		}
 	}
+	#endif
 #endif
 
 	// Initialize any add-ons that were registered externally
@@ -200,9 +289,9 @@ void reshade::load_addons()
 
 		log::message(log::level::info, "Loading externally registered add-on \"%s\" ...", info.name.c_str());
 
-		auto module = static_cast<HMODULE>(info.handle);
+		void *const module = info.handle;
 
-		const auto init_func = reinterpret_cast<bool(*)(HMODULE addon_module, HMODULE reshade_module)>(GetProcAddress(module, "AddonInit"));
+		const auto init_func = reinterpret_cast<bool(*)(void *addon_module, void *reshade_module)>(get_module_symbol(module, "AddonInit"));
 		if (init_func != nullptr && !init_func(module, g_module_handle))
 		{
 			addon_all_loaded = false;
@@ -211,12 +300,12 @@ void reshade::load_addons()
 	}
 
 	// Get directory from where to load add-ons from
-	std::filesystem::path addon_search_path = g_reshade_base_path;
+	std::filesystem::path addon_search_path = get_default_addon_search_path();
 	if (config.get("ADDON", "AddonPath", addon_search_path))
 		addon_search_path = g_reshade_base_path / addon_search_path;
 
 	log::message(log::level::info, "Searching for add-ons (*.addon"
-#ifndef _WIN64
+#if INTPTR_MAX == INT32_MAX
 		", *.addon32"
 #else
 		", *.addon64"
@@ -227,7 +316,7 @@ void reshade::load_addons()
 	for (std::filesystem::path path : std::filesystem::directory_iterator(addon_search_path, std::filesystem::directory_options::skip_permission_denied, ec))
 	{
 		if (path.extension() != L".addon" &&
-#ifndef _WIN64
+#if INTPTR_MAX == INT32_MAX
 			path.extension() != L".addon32")
 #else
 			path.extension() != L".addon64")
@@ -269,10 +358,31 @@ void reshade::load_addons()
 
 		log::message(log::level::info, "Loading add-on from '%s' ...", path.u8string().c_str());
 
+		#if defined(__linux__)
+		if (is_windows_module(path))
+		{
+			addon_info info;
+			info.name = path.stem().u8string();
+			info.file = path.filename().u8string();
+			info.external = false;
+			info.error = "Windows add-ons are incompatible with native Linux.";
+			addon_loaded_info.push_back(std::move(info));
+			addon_all_loaded = false;
+			log::message(log::level::warning, "Skipped Windows add-on '%s': it cannot run in a native Linux process.", path.u8string().c_str());
+			continue;
+		}
+		#endif
+
 		// Use 'LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR' to temporarily add add-on search path to the list of directories 'LoadLibraryEx' will use to resolve DLL dependencies
-		const HMODULE module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+		#if defined(_WIN32)
+		void *const module = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+		#elif defined(__linux__)
+		dlerror();
+		void *const module = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+		#endif
 		if (module == nullptr)
 		{
+		#if defined(_WIN32)
 			const DWORD error_code = GetLastError();
 
 			if (error_code == ERROR_DLL_INIT_FAILED && !addon_loaded_info.empty() && path.filename().u8string() == addon_loaded_info.back().file)
@@ -289,11 +399,16 @@ void reshade::load_addons()
 				addon_all_loaded = false;
 				log::message(log::level::error, "Failed to load add-on from '%s' with error code %lu!", path.u8string().c_str(), error_code);
 			}
+		#elif defined(__linux__)
+			addon_all_loaded = false;
+			const char *const error = dlerror();
+			log::message(log::level::error, "Failed to load add-on from '%s': %s", path.u8string().c_str(), error != nullptr ? error : "unknown error");
+		#endif
 			continue;
 		}
 
 		// Call optional loading entry point (for add-ons wanting to do more complicated one-time initialization than possible in 'DllMain')
-		const auto init_func = reinterpret_cast<bool(*)(HMODULE addon_module, HMODULE reshade_module)>(GetProcAddress(module, "AddonInit"));
+		const auto init_func = reinterpret_cast<bool(*)(void *addon_module, void *reshade_module)>(get_module_symbol(module, "AddonInit"));
 		if (init_func != nullptr && !init_func(module, g_module_handle))
 		{
 			if (!addon_loaded_info.empty() && path.filename().u8string() == addon_loaded_info.back().file)
@@ -310,7 +425,12 @@ void reshade::load_addons()
 				log::message(log::level::error, "Failed to load add-on from '%s' because initialization was not successful!", path.u8string().c_str());
 			}
 
-			FreeLibrary(module);
+			#if defined(_WIN32)
+			FreeLibrary(static_cast<HMODULE>(module));
+			#elif defined(__linux__)
+			ReShadeUnregisterAddon(module);
+			dlclose(module);
+			#endif
 			continue;
 		}
 
@@ -323,7 +443,12 @@ void reshade::load_addons()
 			addon_all_loaded = false;
 			log::message(log::level::warning, "No add-on was registered by '%s'. Unloading again ...", path.u8string().c_str());
 
-			FreeLibrary(module);
+			#if defined(_WIN32)
+			FreeLibrary(static_cast<HMODULE>(module));
+			#elif defined(__linux__)
+			ReShadeUnregisterAddon(module);
+			dlclose(module);
+			#endif
 		}
 #endif
 	}
@@ -334,7 +459,11 @@ void reshade::load_addons()
 void reshade::unload_addons()
 {
 	// Only unload add-ons after the last reference to the manager was released
+	#if defined(_WIN32)
 	if (InterlockedDecrement(&s_reference_count) != 0)
+	#elif defined(__linux__)
+	if (s_reference_count_linux.fetch_sub(1, std::memory_order_acq_rel) != 1)
+	#endif
 		return;
 
 #if RESHADE_ADDON == 1
@@ -349,18 +478,24 @@ void reshade::unload_addons()
 
 		log::message(log::level::info, "Unloading add-on \"%s\" ...", info.name.c_str());
 
-		const auto module = static_cast<HMODULE>(info.handle);
+		void *const module = info.handle;
 
 		// Call optional unloading entry point
-		const auto uninit_func = reinterpret_cast<void(*)(HMODULE addon_module, HMODULE reshade_module)>(GetProcAddress(module, "AddonUninit"));
+		const auto uninit_func = reinterpret_cast<void(*)(void *addon_module, void *reshade_module)>(get_module_symbol(module, "AddonUninit"));
 		if (uninit_func != nullptr)
 			uninit_func(module, g_module_handle);
 
 		if (info.external)
 			continue;
 
-		if (!FreeLibrary(module))
+		#if defined(_WIN32)
+		if (!FreeLibrary(static_cast<HMODULE>(module)))
 			log::message(log::level::warning, "Failed to unload '%s' with error code %lu!", info.file.c_str(), GetLastError());
+		#elif defined(__linux__)
+		ReShadeUnregisterAddon(module);
+		if (dlclose(module) != 0)
+			log::message(log::level::warning, "Failed to unload '%s': %s", info.file.c_str(), dlerror());
+		#endif
 
 		if (addon_info *const registered_info = find_addon(module))
 		{
@@ -378,7 +513,9 @@ void reshade::unload_addons()
 
 #if 1
 	unregister_addon_depth();
+	#if defined(_WIN32)
 	unregister_addon_effect_runtime_sync();
+	#endif
 #endif
 
 	// Remove all unloaded add-ons
@@ -395,7 +532,13 @@ void reshade::unload_addons()
 bool reshade::has_loaded_addons()
 {
 	// Ignore disabled and built-in add-ons
-	return s_reference_count != 0 && std::find_if(addon_loaded_info.cbegin(), addon_loaded_info.cend(),
+	return
+	#if defined(_WIN32)
+		s_reference_count != 0 &&
+	#elif defined(__linux__)
+		s_reference_count_linux.load(std::memory_order_acquire) != 0 &&
+	#endif
+		std::find_if(addon_loaded_info.cbegin(), addon_loaded_info.cend(),
 		[](const addon_info &info) {
 			return info.handle != nullptr && info.handle != g_module_handle;
 		}) != addon_loaded_info.cend();
@@ -406,11 +549,21 @@ reshade::addon_info *reshade::find_addon(const void *address)
 	if (address == nullptr)
 		return nullptr;
 
+	// Loader handles are opaque on Linux (and are not necessarily code addresses).
+	for (auto it = addon_loaded_info.rbegin(); it != addon_loaded_info.rend(); ++it)
+		if (it->handle == address)
+			return &(*it);
+
+#if defined(_WIN32)
 	HMODULE module = nullptr;
 	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(address), &module))
 		return nullptr;
-
 	assert(module != nullptr);
+#elif defined(__linux__)
+	void *const module = get_module_handle(address);
+	if (module == nullptr)
+		return nullptr;
+#endif
 
 	for (auto it = addon_loaded_info.rbegin(); it != addon_loaded_info.rend(); ++it)
 		if (it->handle == module)
@@ -436,7 +589,11 @@ bool ReShadeRegisterAddon(void *module, uint32_t api_version)
 		return false;
 	}
 
+	#if defined(_WIN32)
 	const std::filesystem::path path = get_module_path(static_cast<HMODULE>(module));
+	#elif defined(__linux__)
+	const std::filesystem::path path = get_module_path(module);
+	#endif
 
 	reshade::addon_info info;
 	info.name = path.stem().u8string();
@@ -444,6 +601,7 @@ bool ReShadeRegisterAddon(void *module, uint32_t api_version)
 	info.handle = module;
 	info.api_version = api_version;
 
+	#if defined(_WIN32)
 	DWORD version_dummy, version_size = GetFileVersionInfoSizeW(path.c_str(), &version_dummy);
 	std::vector<uint8_t> version_data(version_size);
 	if (GetFileVersionInfoW(path.c_str(), version_dummy, version_size, version_data.data()))
@@ -479,16 +637,17 @@ bool ReShadeRegisterAddon(void *module, uint32_t api_version)
 			};
 		}
 	}
+	#endif
 
-	if (const char *const *name = reinterpret_cast<const char *const *>(GetProcAddress(static_cast<HMODULE>(module), "NAME")))
+	if (const char *const *name = reinterpret_cast<const char *const *>(get_module_symbol(module, "NAME")))
 		info.name = *name;
-	if (const char *const *author = reinterpret_cast<const char *const *>(GetProcAddress(static_cast<HMODULE>(module), "AUTHOR")))
+	if (const char *const *author = reinterpret_cast<const char *const *>(get_module_symbol(module, "AUTHOR")))
 		info.author = *author;
-	if (const char *const *description = reinterpret_cast<const char *const *>(GetProcAddress(static_cast<HMODULE>(module), "DESCRIPTION")))
+	if (const char *const *description = reinterpret_cast<const char *const *>(get_module_symbol(module, "DESCRIPTION")))
 		info.description = *description;
-	if (const char *const *website_url = reinterpret_cast<const char *const *>(GetProcAddress(static_cast<HMODULE>(module), "WEBSITE")))
+	if (const char *const *website_url = reinterpret_cast<const char *const *>(get_module_symbol(module, "WEBSITE")))
 		info.website_url = *website_url;
-	if (const char *const *issues_url = reinterpret_cast<const char *const *>(GetProcAddress(static_cast<HMODULE>(module), "ISSUES")))
+	if (const char *const *issues_url = reinterpret_cast<const char *const *>(get_module_symbol(module, "ISSUES")))
 		info.issues_url = *issues_url;
 
 	if (std::find_if(reshade::addon_loaded_info.cbegin(), reshade::addon_loaded_info.cend(),

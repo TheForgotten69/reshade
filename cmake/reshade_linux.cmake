@@ -92,7 +92,9 @@ function(reshade_configure_linux_target target)
     ${target}
     PRIVATE
       source/ini_file.cpp
+      source/addon.cpp
       source/addon.hpp
+      source/addon_manager.cpp
       source/addon_manager.hpp
       source/input.cpp
       source/runtime.cpp
@@ -108,7 +110,6 @@ function(reshade_configure_linux_target target)
       source/imgui_widgets.cpp
       source/dll_log.cpp
       source/linux/input_linux.cpp
-      source/linux/addon_manager.cpp
       source/linux/platform_utils.cpp
       source/linux/process_environment.cpp
       source/linux/runtime_platform.cpp
@@ -119,7 +120,7 @@ function(reshade_configure_linux_target target)
     PRIVATE
       RESHADE_GUI=1
       RESHADE_API_LIBRARY_EXPORT
-      RESHADE_ADDON=1
+      RESHADE_ADDON=2
       RESHADE_LOCALIZATION
       $<$<CONFIG:Debug>:RESHADE_VERBOSE_LOG>
       $<$<CONFIG:Debug>:_DEBUG>

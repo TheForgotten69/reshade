@@ -3311,7 +3311,7 @@ void reshade::runtime::draw_gui_addons()
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextUnformatted(_("This build of ReShade has only limited add-on functionality."));
 #else
-	std::filesystem::path addon_search_path = L".\\";
+	std::filesystem::path addon_search_path = get_default_addon_search_path();
 	config.get("ADDON", "AddonPath", addon_search_path);
 	if (imgui::directory_input_box(_("Add-on search path"), addon_search_path, _file_selection_path))
 		config.set("ADDON", "AddonPath", addon_search_path);
@@ -3405,7 +3405,7 @@ void reshade::runtime::draw_gui_addons()
 
 			ImGui::PopStyleColor();
 
-			if (enabled == (info.handle == nullptr))
+			if (info.error.empty() && enabled == (info.handle == nullptr))
 			{
 				ImGui::SameLine();
 				ImGui::TextUnformatted(enabled ? _("(will be enabled on next application restart)") : _("(will be disabled on next application restart)"));
@@ -3428,6 +3428,8 @@ void reshade::runtime::draw_gui_addons()
 					ImGui::Text(_("Website:"));
 				if (!info.issues_url.empty())
 					ImGui::Text(_("Issues:"));
+				if (!info.error.empty())
+					ImGui::Text(_("Status:"));
 
 				ImGui::EndGroup();
 				ImGui::SameLine(ImGui::GetWindowWidth() * 0.25f);
@@ -3449,6 +3451,8 @@ void reshade::runtime::draw_gui_addons()
 					ImGui::TextLinkOpenURL(info.website_url.c_str());
 				if (!info.issues_url.empty())
 					ImGui::TextLinkOpenURL(info.issues_url.c_str());
+				if (!info.error.empty())
+					ImGui::TextColored(COLOR_RED, "%s", info.error.c_str());
 
 				ImGui::EndGroup();
 
