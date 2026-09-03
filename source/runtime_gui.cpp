@@ -16,6 +16,7 @@
 #include "imgui_widgets.hpp"
 #include "localization.hpp"
 #include "platform_utils.hpp"
+#include "process_environment.hpp"
 #include "fonts/forkawesome.inl"
 #include <cmath> // std::abs, std::ceil, std::floor
 #include <cctype> // std::tolower
@@ -3111,8 +3112,12 @@ void reshade::runtime::draw_gui_statistics()
 void reshade::runtime::draw_gui_log()
 {
 	std::error_code ec;
+	#if defined(__linux__)
+	const std::filesystem::path log_path = process::get_log_path();
+	#else
 	std::filesystem::path log_path = global_config().path();
 	log_path.replace_extension(L".log");
+	#endif
 
 	const bool filter_changed = imgui::search_input_box(_log_filter, sizeof(_log_filter), -(ImGui::GetFrameHeight() + 8.0f * ImGui::GetFontSize() + 2 * _imgui_context->Style.ItemSpacing.x));
 
@@ -3392,7 +3397,9 @@ void reshade::runtime::draw_gui_addons()
 					return (at_pos == 0 || addon_name.substr(0, at_pos) == info.name) && addon_name.substr(at_pos + 1) == info.file;
 				});
 
-			bool enabled = (disabled_it == disabled_addons.end());
+			const bool unavailable = !info.error.empty();
+			bool enabled = !unavailable && disabled_it == disabled_addons.end();
+			ImGui::BeginDisabled(unavailable);
 			if (ImGui::Checkbox(info.name.c_str(), &enabled))
 			{
 				if (enabled)
@@ -3402,6 +3409,7 @@ void reshade::runtime::draw_gui_addons()
 
 				config.set("ADDON", "DisabledAddons", disabled_addons);
 			}
+			ImGui::EndDisabled();
 
 			ImGui::PopStyleColor();
 

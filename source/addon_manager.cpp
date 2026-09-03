@@ -338,6 +338,21 @@ void reshade::load_addons()
 			continue;
 		}
 
+		#if defined(__linux__)
+		if (is_windows_module(path))
+		{
+			addon_info info;
+			info.name = path.stem().u8string();
+			info.file = path.filename().u8string();
+			info.external = false;
+			info.error = "Windows add-ons are incompatible with native Linux.";
+			addon_loaded_info.push_back(std::move(info));
+			addon_all_loaded = false;
+			log::message(log::level::warning, "Skipped Windows add-on '%s': it cannot run in a native Linux process.", path.u8string().c_str());
+			continue;
+		}
+		#endif
+
 		// Avoid loading library altogether when it is found in the disabled add-on list
 		if (addon_info info;
 			std::find_if(disabled_addons.cbegin(), disabled_addons.cend(),
@@ -357,21 +372,6 @@ void reshade::load_addons()
 		}
 
 		log::message(log::level::info, "Loading add-on from '%s' ...", path.u8string().c_str());
-
-		#if defined(__linux__)
-		if (is_windows_module(path))
-		{
-			addon_info info;
-			info.name = path.stem().u8string();
-			info.file = path.filename().u8string();
-			info.external = false;
-			info.error = "Windows add-ons are incompatible with native Linux.";
-			addon_loaded_info.push_back(std::move(info));
-			addon_all_loaded = false;
-			log::message(log::level::warning, "Skipped Windows add-on '%s': it cannot run in a native Linux process.", path.u8string().c_str());
-			continue;
-		}
-		#endif
 
 		// Use 'LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR' to temporarily add add-on search path to the list of directories 'LoadLibraryEx' will use to resolve DLL dependencies
 		#if defined(_WIN32)
