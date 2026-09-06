@@ -9,6 +9,8 @@
 #include <list>
 #include <vector>
 #include <string>
+#include <cstring>
+#include <limits>
 #include <algorithm>
 
 constexpr size_t HISTORY_LIMIT = 1000;
@@ -47,6 +49,9 @@ struct __declspec(uuid("ee32daa4-6b5c-47e6-9409-f87cca0e5797")) history_context
 	size_t history_pos = 0;
 	std::list<history> histories;
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(history_context,
+	0xa4, 0xda, 0x32, 0xee, 0x5c, 0x6b, 0xe6, 0x47,
+	0x94, 0x09, 0xf8, 0x7c, 0xca, 0x0e, 0x57, 0x97);
 
 static void on_init(reshade::api::effect_runtime *runtime)
 {

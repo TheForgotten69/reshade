@@ -5,6 +5,7 @@
 
 #include <reshade.hpp>
 #include <cassert>
+#include <mutex>
 #include <sstream>
 #include <shared_mutex>
 #include <unordered_set>

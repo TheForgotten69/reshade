@@ -10,6 +10,7 @@
 #include <cassert>
 #include <algorithm>
 #include <filesystem>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -52,6 +53,12 @@ struct __declspec(uuid("f326a1eb-5062-453e-9852-a787594a977a")) command_list_dat
 {
 	std::unordered_set<resource_view, tex_hash> current_texture_list;
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(device_data,
+	0x56, 0x1b, 0xe5, 0x0c, 0x73, 0xa9, 0x04, 0x41,
+	0xbc, 0xca, 0x94, 0x56, 0x86, 0xf5, 0x01, 0x70);
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(command_list_data,
+	0xeb, 0xa1, 0x26, 0xf3, 0x62, 0x50, 0x3e, 0x45,
+	0x98, 0x52, 0xa7, 0x87, 0x59, 0x4a, 0x97, 0x7a);
 
 static std::mutex s_mutex;
 

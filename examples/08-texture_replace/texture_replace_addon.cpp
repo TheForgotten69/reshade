@@ -5,6 +5,7 @@
 
 #include <reshade.hpp>
 #include "config.hpp"
+#include <cstring>
 #include <vector>
 
 using namespace reshade::api;

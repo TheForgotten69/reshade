@@ -8,6 +8,7 @@
 #include <fstream>
 #include <algorithm>
 #include <filesystem>
+#include <cstring>
 
 using namespace reshade::api;
 
@@ -273,6 +274,9 @@ struct __declspec(uuid("CF2A5A7D-FF11-434F-AA7B-811A2935A8FE")) runtime_data
 		cmd_list->barrier(output_texture, resource_usage::copy_source, resource_usage::unordered_access);
 	}
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(runtime_data,
+	0x7d, 0x5a, 0x2a, 0xcf, 0x11, 0xff, 0x4f, 0x43,
+	0xaa, 0x7b, 0x81, 0x1a, 0x29, 0x35, 0xa8, 0xfe);
 
 static void on_init(effect_runtime *runtime)
 {

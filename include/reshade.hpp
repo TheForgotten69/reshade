@@ -51,6 +51,8 @@ RESHADE_API_LIBRARY_DECL void ReShadeRegisterOverlayForAddon(void *module, const
 RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlay(const char *title, void(*callback)(reshade::api::effect_runtime *runtime));
 RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlayForAddon(void *module, const char *title, void(*callback)(reshade::api::effect_runtime *runtime));
 
+RESHADE_API_LIBRARY_DECL const void *ReShadeGetImGuiFunctionTable(uint32_t version);
+
 RESHADE_API_LIBRARY_DECL bool ReShadeCreateEffectRuntime(reshade::api::device_api api, void *opaque_device, void *opaque_command_queue, void *opaque_swapchain, const char *config_path, reshade::api::effect_runtime **out_runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime);
@@ -258,7 +260,20 @@ namespace reshade
 	inline bool register_addon(void *addon_module, [[maybe_unused]] void *reshade_module = nullptr)
 	{
 #if defined(RESHADE_API_LIBRARY)
-		return ReShadeRegisterAddon(addon_module, RESHADE_API_VERSION);
+		if (!ReShadeRegisterAddon(addon_module, RESHADE_API_VERSION))
+			return false;
+
+#if defined(IMGUI_VERSION_NUM)
+		// The function table keeps add-ons independent of ReShade's ImGui ABI.
+		const auto imgui_func = reinterpret_cast<const imgui_function_table *(*)(uint32_t)>(ReShadeGetImGuiFunctionTable);
+		if (imgui_func == nullptr || !(imgui_function_table_instance() = imgui_func(IMGUI_VERSION_NUM)))
+		{
+			ReShadeUnregisterAddon(addon_module);
+			return false;
+		}
+#endif
+
+		return true;
 #else
 		addon_module = internal::get_current_module_handle(static_cast<HMODULE>(addon_module));
 		reshade_module = internal::get_reshade_module_handle(static_cast<HMODULE>(reshade_module));
@@ -292,6 +307,9 @@ namespace reshade
 	inline void unregister_addon(void *addon_module, [[maybe_unused]] void *reshade_module = nullptr)
 	{
 #if defined(RESHADE_API_LIBRARY)
+	#if defined(IMGUI_VERSION_NUM)
+		imgui_function_table_instance() = nullptr;
+	#endif
 		ReShadeUnregisterAddon(addon_module);
 #else
 		addon_module = internal::get_current_module_handle(static_cast<HMODULE>(addon_module));

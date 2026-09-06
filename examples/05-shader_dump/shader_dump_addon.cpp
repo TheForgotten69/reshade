@@ -14,27 +14,43 @@ using namespace reshade::api;
 
 constexpr uint32_t SPIRV_MAGIC = 0x07230203;
 
-static std::filesystem::path make_shader_file_path(uint32_t shader_hash, const wchar_t *extension)
+static std::filesystem::path make_shader_file_path(uint32_t shader_hash, const wchar_t *extension) noexcept
 {
-	// Prepend executable directory to image files
-	wchar_t file_prefix[MAX_PATH] = L"";
-	GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
+	try
+	{
+#if defined(__linux__)
+		std::filesystem::path path = reshade_addon_utils::get_storage_directory(RESHADE_ADDON_SHADER_SAVE_DIR, true);
+		if (path.empty())
+			return {};
+#else
+		// Prepend executable directory to image files
+		wchar_t file_prefix[MAX_PATH] = L"";
+		GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
 
-	std::filesystem::path path = file_prefix;
-	path = path.parent_path();
-	path /= RESHADE_ADDON_SHADER_SAVE_DIR;
+		std::filesystem::path path = file_prefix;
+		path = path.parent_path();
+		path /= RESHADE_ADDON_SHADER_SAVE_DIR;
 
-	// Ensure target directory exists
-	if (!std::filesystem::exists(path))
-		std::filesystem::create_directory(path);
+		// Ensure target directory exists
+		std::error_code ec;
+		if (!std::filesystem::exists(path, ec))
+			std::filesystem::create_directory(path, ec);
+		if (ec)
+			return {};
+#endif
 
-	wchar_t hash_string[11];
-	swprintf_s(hash_string, L"0x%08X", shader_hash);
+		wchar_t hash_string[11];
+		swprintf_s(hash_string, L"0x%08X", shader_hash);
 
-	path /= hash_string;
-	path += extension;
+		path /= hash_string;
+		path += extension;
 
-	return path;
+		return path;
+	}
+	catch (...)
+	{
+		return {};
+	}
 }
 
 static void save_shader_code(device_api device_type, const shader_desc &desc)
@@ -51,9 +67,18 @@ static void save_shader_code(device_api device_type, const shader_desc &desc)
 		extension = desc.code_size > 5 && std::strncmp(static_cast<const char *>(desc.code), "!!ARB", 5) == 0 ? L".txt" : L".glsl"; // OpenGL otherwise uses plain text ARB assembly language or GLSL
 
 	const std::filesystem::path file_path = make_shader_file_path(shader_hash, extension);
+	if (file_path.empty())
+		return;
 
-	std::ofstream file(file_path, std::ios::binary);
-	file.write(static_cast<const char *>(desc.code), desc.code_size);
+	try
+	{
+		std::ofstream file(file_path, std::ios::binary);
+		file.write(static_cast<const char *>(desc.code), desc.code_size);
+	}
+	catch (...)
+	{
+		// An add-on must never terminate the host when its optional dump path is unavailable.
+	}
 }
 
 static bool on_create_pipeline(device *device, pipeline_layout, uint32_t subobject_count, const pipeline_subobject *subobjects)

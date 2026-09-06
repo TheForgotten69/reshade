@@ -6,8 +6,13 @@
 #pragma once
 
 #include <vector>
+#include <unordered_map>
+#if defined(__linux__)
+#include <mutex>
+#else
 #include <concurrent_vector.h>
 #include <concurrent_unordered_map.h>
+#endif
 
 /// <summary>
 /// An instance of this is automatically created for all devices and can be queried with <c>device->get_private_data&lt;descriptor_tracking&gt;()</c> (assuming descriptor tracking was registered via <see cref="descriptor_tracking::register_events"/>).
@@ -65,7 +70,20 @@ private:
 	};
 	struct descriptor_heap_data
 	{
+	#if defined(__linux__)
+		std::vector<std::pair<reshade::api::descriptor_type, descriptor_data>> descriptors;
+		void grow_to_at_least(std::size_t size)
+		{
+			if (descriptors.size() < size)
+				descriptors.resize(size);
+		}
+	#else
 		concurrency::concurrent_vector<std::pair<reshade::api::descriptor_type, descriptor_data>> descriptors;
+		void grow_to_at_least(std::size_t size)
+		{
+			descriptors.grow_to_at_least(size);
+		}
+	#endif
 	};
 	struct descriptor_heap_hash : std::hash<uint64_t>
 	{
@@ -88,6 +106,16 @@ private:
 		}
 	};
 
+#if defined(__linux__)
+	std::unordered_map<reshade::api::descriptor_heap, descriptor_heap_data, descriptor_heap_hash> heaps;
+	std::unordered_map<reshade::api::pipeline_layout, pipeline_layout_data, pipeline_layout_hash> layouts;
+	mutable std::mutex mutex;
+#else
 	concurrency::concurrent_unordered_map<reshade::api::descriptor_heap, descriptor_heap_data, descriptor_heap_hash> heaps;
 	concurrency::concurrent_unordered_map<reshade::api::pipeline_layout, pipeline_layout_data, pipeline_layout_hash> layouts;
+#endif
 };
+
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(descriptor_tracking,
+	0xf0, 0x2b, 0x21, 0xba, 0xf5, 0xdd, 0x44, 0xaf,
+	0x9e, 0x90, 0xc5, 0x45, 0x35, 0xa9, 0x8c, 0xe3);

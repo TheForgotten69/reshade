@@ -114,6 +114,15 @@ function(reshade_configure_linux_target target)
       source/runtime_api.cpp
       source/runtime_manager.cpp
       source/state_block.cpp
+      source/imgui_function_table.cpp
+      source/imgui_function_table_18600.cpp
+      source/imgui_function_table_18971.cpp
+      source/imgui_function_table_19000.cpp
+      source/imgui_function_table_19040.cpp
+      source/imgui_function_table_19180.cpp
+      source/imgui_function_table_19191.cpp
+      source/imgui_function_table_19222.cpp
+      source/imgui_function_table_19250.cpp
       ${RESHADE_SOURCE_VULKAN}
       ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER}
       ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
@@ -157,3 +166,111 @@ function(reshade_configure_linux_target target)
   install(TARGETS ${target} LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/reshade")
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ReShade64.json" DESTINATION "${CMAKE_INSTALL_DATADIR}/vulkan/implicit_layer.d")
 endfunction()
+
+option(RESHADE_BUILD_LINUX_ADDON_EXAMPLES "Build native Linux add-on examples" OFF)
+
+if(RESHADE_BUILD_LINUX_ADDON_EXAMPLES)
+  # Native add-ons use the same API-library ABI as Windows add-ons. The small
+  # compatibility header only supplies the Win32 spellings still present in
+  # the example sources (DllMain, module paths and secure CRT formatting).
+  set(RESHADE_LINUX_ADDON_COMPAT_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/source/linux/addon_compat.hpp")
+  set(RESHADE_LINUX_ADDON_ENTRYPOINT "${CMAKE_CURRENT_SOURCE_DIR}/source/linux/addon_entrypoint.cpp")
+
+  function(reshade_configure_linux_addon target output_name source_file)
+    cmake_parse_arguments(ARG "NO_ENTRYPOINT" "" "SOURCES;LIBRARIES" ${ARGN})
+
+    add_library(${target} MODULE ${source_file} ${ARG_SOURCES})
+    set_target_properties(
+      ${target}
+      PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "${output_name}"
+        SUFFIX ".addon${RESHADE_SUFFIX}"
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES
+        BUILD_RPATH "$<TARGET_FILE_DIR:ReShade>"
+        INSTALL_RPATH "$ORIGIN/../../${CMAKE_INSTALL_LIBDIR}/reshade"
+    )
+
+    target_include_directories(
+      ${target}
+      PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/source"
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/utils"
+        "${CMAKE_CURRENT_SOURCE_DIR}/deps/imgui"
+        "${CMAKE_CURRENT_SOURCE_DIR}/deps/stb"
+    )
+    target_compile_definitions(
+      ${target}
+      PRIVATE
+        RESHADE_API_LIBRARY=1
+        ImTextureID=ImU64
+    )
+    target_compile_options(${target} PRIVATE "-include${RESHADE_LINUX_ADDON_COMPAT_HEADER}" -Wno-changes-meaning -UBUILTIN_ADDON)
+    if(NOT ARG_NO_ENTRYPOINT)
+      target_sources(${target} PRIVATE ${RESHADE_LINUX_ADDON_ENTRYPOINT})
+      target_compile_definitions(${target} PRIVATE DllMain=ReShadeLinuxAddonDllMain)
+    endif()
+    target_link_libraries(${target} PRIVATE ReShade Threads::Threads ${ARG_LIBRARIES})
+    target_link_options(${target} PRIVATE -Wl,--no-undefined)
+
+    install(TARGETS ${target} LIBRARY DESTINATION "${CMAKE_INSTALL_DATADIR}/reshade")
+  endfunction()
+
+  reshade_configure_linux_addon(reshade_addon_fps_limit fps_limit examples/01-fps_limit/fps_limit_addon.cpp)
+  reshade_configure_linux_addon(reshade_addon_history_window history_window examples/03-history_window/history_window_addon.cpp)
+  reshade_configure_linux_addon(reshade_addon_api_trace api_trace examples/04-api_trace/api_trace_addon.cpp)
+  reshade_configure_linux_addon(reshade_addon_shader_dump shader_dump examples/05-shader_dump/shader_dump_addon.cpp)
+  reshade_configure_linux_addon(reshade_addon_shader_replace shader_replace examples/06-shader_replace/shader_replace_addon.cpp)
+  reshade_configure_linux_addon(
+    reshade_addon_texture_dump texture_dump examples/07-texture_dump/texture_dump_addon.cpp
+    SOURCES examples/utils/save_texture_image.cpp
+  )
+  reshade_configure_linux_addon(
+    reshade_addon_texture_replace texture_replace examples/08-texture_replace/texture_replace_addon.cpp
+    SOURCES examples/utils/load_texture_image.cpp
+  )
+  reshade_configure_linux_addon(reshade_addon_generic_depth generic_depth examples/09-depth/generic_depth_addon.cpp)
+  reshade_configure_linux_addon(
+    reshade_addon_texture_overlay texture_overlay examples/10-texture_overlay/texture_overlay_addon.cpp
+    SOURCES examples/utils/descriptor_tracking.cpp examples/utils/save_texture_image.cpp
+  )
+  reshade_configure_linux_addon(
+    reshade_addon_effects_during_frame effects_during_frame examples/13-effects_during_frame/effects_during_frame_addon.cpp
+    SOURCES examples/utils/state_tracking.cpp
+  )
+  reshade_configure_linux_addon(reshade_addon_runtime_sync runtime_sync examples/15-effect_runtime_sync/runtime_sync_addon.cpp)
+  reshade_configure_linux_addon(reshade_addon_swapchain_override swapchain_override examples/16-swapchain_override/swapchain_override_addon.cpp)
+
+  # Video capture has an optional FFmpeg dependency and already uses the
+  # AddonInit/AddOnUninit entry points, so do not add the DllMain shim.
+  pkg_check_modules(FFMPEG IMPORTED_TARGET libavcodec libavformat libavutil)
+  if(FFMPEG_FOUND)
+    reshade_configure_linux_addon(
+      reshade_addon_video_capture video_capture examples/12-video_capture/video_capture.cpp
+      NO_ENTRYPOINT
+      LIBRARIES PkgConfig::FFMPEG
+    )
+  else()
+    message(STATUS "Skipping Linux video capture add-on: FFmpeg development files were not found")
+  endif()
+
+  find_program(RESHADE_DXC_EXECUTABLE NAMES dxc)
+  if(RESHADE_DXC_EXECUTABLE)
+    set(RESHADE_RAY_TRACING_SHADER "${CMAKE_CURRENT_BINARY_DIR}/ray_tracing_shaders.spv")
+    add_custom_command(
+      OUTPUT "${RESHADE_RAY_TRACING_SHADER}"
+      COMMAND "${RESHADE_DXC_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/examples/14-ray_tracing/ray_tracing_shaders.hlsl"
+        -T lib_6_5 -Fo "${RESHADE_RAY_TRACING_SHADER}" -spirv -fspv-target-env=vulkan1.1spirv1.4
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/14-ray_tracing/ray_tracing_shaders.hlsl"
+      VERBATIM
+    )
+    add_custom_target(reshade_ray_tracing_shaders DEPENDS "${RESHADE_RAY_TRACING_SHADER}")
+    reshade_configure_linux_addon(reshade_addon_ray_tracing ray_tracing examples/14-ray_tracing/ray_tracing_addon.cpp)
+    add_dependencies(reshade_addon_ray_tracing reshade_ray_tracing_shaders)
+    install(FILES "${RESHADE_RAY_TRACING_SHADER}" DESTINATION "${CMAKE_INSTALL_DATADIR}/reshade")
+  else()
+    message(STATUS "Skipping Linux ray tracing add-on: DXC was not found (required for lib_6_5 shader compilation)")
+  endif()
+endif()

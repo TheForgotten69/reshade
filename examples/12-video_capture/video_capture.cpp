@@ -5,6 +5,7 @@
 
 #include <reshade.hpp>
 #include <chrono>
+#include <cstring>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
@@ -32,6 +33,9 @@ struct __declspec(uuid("0d7525f9-c4e1-426e-bc99-15bbd5fd51f2")) video_capture
 	bool init_format_ctx(const char *filename);
 	void destroy_format_ctx();
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(video_capture,
+	0xf9, 0x25, 0x75, 0x0d, 0xe1, 0xc4, 0x6e, 0x42,
+	0xbc, 0x99, 0x15, 0xbb, 0xd5, 0xfd, 0x51, 0xf2);
 
 bool video_capture::init_codec_ctx(const reshade::api::resource_desc &buffer_desc)
 {
@@ -43,9 +47,17 @@ bool video_capture::init_codec_ctx(const reshade::api::resource_desc &buffer_des
 			continue;
 
 		bool supports_rgb0 = false;
-		for (const AVPixelFormat *fmt = codec->pix_fmts; *fmt != AV_PIX_FMT_NONE; ++fmt)
-			if (*fmt == AV_PIX_FMT_0BGR32 || *fmt == AV_PIX_FMT_0RGB32)
-				supports_rgb0 = true;
+		const AVPixelFormat *pixel_formats = nullptr;
+#if defined(__linux__) && LIBAVCODEC_VERSION_MAJOR >= 61
+		if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, reinterpret_cast<const void **>(&pixel_formats), nullptr) < 0)
+			continue;
+#else
+		pixel_formats = codec->pix_fmts;
+#endif
+		if (pixel_formats != nullptr)
+			for (const AVPixelFormat *fmt = pixel_formats; *fmt != AV_PIX_FMT_NONE; ++fmt)
+				if (*fmt == AV_PIX_FMT_0BGR32 || *fmt == AV_PIX_FMT_0RGB32)
+					supports_rgb0 = true;
 
 		 if (supports_rgb0)
 			break; // Found a codec that passes requirements
