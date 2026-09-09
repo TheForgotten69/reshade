@@ -21,7 +21,7 @@ static std::filesystem::path make_shader_file_path(uint32_t shader_hash, const w
 	std::filesystem::path path = reshade_addon_utils::get_storage_directory(RESHADE_ADDON_SHADER_LOAD_DIR, false);
 	if (path.empty())
 		return {};
-	#else
+	#elif defined(_WIN32)
 	// Prepend executable file name to image files
 	wchar_t file_prefix[MAX_PATH] = L"";
 	GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
@@ -58,8 +58,12 @@ static bool load_shader_code(device_api device_type, shader_desc &desc, std::vec
 	const std::filesystem::path file_path = make_shader_file_path(shader_hash, extension);
 
 	// Check if a replacement file for this shader hash exists and if so, overwrite the shader code with its contents
+	#if defined(__linux__)
 	std::error_code ec;
 	if (file_path.empty() || !std::filesystem::exists(file_path, ec) || ec)
+	#elif defined(_WIN32)
+	if (!std::filesystem::exists(file_path))
+	#endif
 		return false;
 
 	std::ifstream file(file_path, std::ios::binary);
@@ -115,8 +119,8 @@ static void on_after_create_pipeline(device *, pipeline_layout, uint32_t, const 
 	s_data_to_delete.clear();
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Shader Replace";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that replaces shader binaries before they are used by the application with binaries from disk (\"" RESHADE_ADDON_SHADER_LOAD_DIR "\" directory).";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Shader Replace";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that replaces shader binaries before they are used by the application with binaries from disk (\"" RESHADE_ADDON_SHADER_LOAD_DIR "\" directory).";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

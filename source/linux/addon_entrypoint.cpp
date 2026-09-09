@@ -1,27 +1,18 @@
 #include "addon_compat.hpp"
+#include "reshade.hpp"
 
 #if defined(__linux__)
 
 BOOL ReShadeLinuxAddonDllMain(HMODULE module, DWORD reason, LPVOID reserved);
 
-namespace
+extern "C" RESHADE_ADDON_EXPORT bool AddonInit(HMODULE addon_module, HMODULE)
 {
-	void *get_module_handle()
-	{
-		Dl_info info = {};
-		struct link_map *map = nullptr;
-		return dladdr1(reinterpret_cast<const void *>(&get_module_handle), &info, reinterpret_cast<void **>(&map), RTLD_DL_LINKMAP) != 0 ? map : nullptr;
-	}
+	return ReShadeLinuxAddonDllMain(addon_module, DLL_PROCESS_ATTACH, nullptr) != FALSE;
+}
 
-	__attribute__((constructor)) void load_addon()
-	{
-		ReShadeLinuxAddonDllMain(get_module_handle(), DLL_PROCESS_ATTACH, nullptr);
-	}
-
-	__attribute__((destructor)) void unload_addon()
-	{
-		ReShadeLinuxAddonDllMain(get_module_handle(), DLL_PROCESS_DETACH, nullptr);
-	}
+extern "C" RESHADE_ADDON_EXPORT void AddonUninit(HMODULE addon_module, HMODULE)
+{
+	ReShadeLinuxAddonDllMain(addon_module, DLL_PROCESS_DETACH, nullptr);
 }
 
 #endif

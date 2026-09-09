@@ -12,14 +12,14 @@ using namespace reshade::api;
 
 static bool s_filter_width_and_height = true;
 
-struct __declspec(uuid("7251932A-ADAF-4DFC-B5CB-9A4E8CD5D6EB")) device_data
+struct RESHADE_API_UUID("7251932A-ADAF-4DFC-B5CB-9A4E8CD5D6EB") device_data
 {
 	effect_runtime *main_runtime = nullptr;
 	uint32_t offset_from_last_pass = 0;
 	uint32_t last_render_pass_count = std::numeric_limits<uint32_t>::max();
 	uint32_t current_render_pass_count = 0;
 };
-struct __declspec(uuid("036CD16B-E823-4D6C-A137-5C335D6FD3E6")) command_list_data
+struct RESHADE_API_UUID("036CD16B-E823-4D6C-A137-5C335D6FD3E6") command_list_data
 {
 	bool has_multiple_rtvs = false;
 	resource_view current_main_rtv = { 0 };

@@ -279,8 +279,8 @@ void unregister_addon_effect_runtime_sync()
 
 #ifndef BUILTIN_ADDON
 
-extern "C" __declspec(dllexport) const char *NAME = "Effect Runtime Sync";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Adds preset synchronization between different effect runtime instances, e.g. to have changes in a desktop window reflect in VR.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Effect Runtime Sync";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Adds preset synchronization between different effect runtime instances, e.g. to have changes in a desktop window reflect in VR.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

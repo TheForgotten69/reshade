@@ -14,7 +14,7 @@ using namespace reshade::api;
 
 static std::filesystem::path s_addon_path;
 
-struct __declspec(uuid("CF2A5A7D-FF11-434F-AA7B-811A2935A8FE")) runtime_data
+struct RESHADE_API_UUID("CF2A5A7D-FF11-434F-AA7B-811A2935A8FE") runtime_data
 {
 	pipeline_layout layout = {};
 	pipeline pipeline = {};

@@ -17,7 +17,7 @@
 /// <summary>
 /// An instance of this is automatically created for all devices and can be queried with <c>device->get_private_data&lt;descriptor_tracking&gt;()</c> (assuming descriptor tracking was registered via <see cref="descriptor_tracking::register_events"/>).
 /// </summary>
-class __declspec(uuid("f02b21ba-f5dd-44af-9e90-c54535a98ce3")) descriptor_tracking
+class RESHADE_API_UUID("f02b21ba-f5dd-44af-9e90-c54535a98ce3") descriptor_tracking
 {
 public:
 	/// <summary>

@@ -35,7 +35,7 @@ struct tex_hash
 	}
 };
 
-struct __declspec(uuid("0ce51b56-a973-4104-bcca-945686f50170")) device_data
+struct RESHADE_API_UUID("0ce51b56-a973-4104-bcca-945686f50170") device_data
 {
 	resource green_texture = {};
 	resource_view green_texture_srv = {};
@@ -49,7 +49,7 @@ struct __declspec(uuid("0ce51b56-a973-4104-bcca-945686f50170")) device_data
 	float scale = 1.0f;
 };
 
-struct __declspec(uuid("f326a1eb-5062-453e-9852-a787594a977a")) command_list_data
+struct RESHADE_API_UUID("f326a1eb-5062-453e-9852-a787594a977a") command_list_data
 {
 	std::unordered_set<resource_view, tex_hash> current_texture_list;
 };
@@ -423,8 +423,8 @@ static void draw_overlay(effect_runtime *runtime)
 		ImGui::NewLine(); // Reset ImGui::SameLine() so the following starts on a new line
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Texture Overlay";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that adds an overlay to inspect textures used by the application in-game and allows dumping individual ones to disk.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Texture Overlay";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that adds an overlay to inspect textures used by the application in-game and allows dumping individual ones to disk.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

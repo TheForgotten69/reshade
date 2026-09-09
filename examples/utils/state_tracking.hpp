@@ -40,7 +40,7 @@ struct state_block
 /// <summary>
 /// An instance of this is automatically created for all command lists and can be queried with <c>cmd_list->get_private_data&lt;state_tracking&gt;()</c> (assuming state tracking was registered via <see cref="state_tracking::register_events"/>).
 /// </summary>
-class __declspec(uuid("c9abddf0-f9c2-4a7b-af49-89d8d470e207")) state_tracking : public state_block
+class RESHADE_API_UUID("c9abddf0-f9c2-4a7b-af49-89d8d470e207") state_tracking : public state_block
 {
 public:
 	/// <summary>

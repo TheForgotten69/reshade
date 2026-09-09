@@ -43,7 +43,7 @@ struct history
 	bool confirmed = false;
 };
 
-struct __declspec(uuid("ee32daa4-6b5c-47e6-9409-f87cca0e5797")) history_context
+struct RESHADE_API_UUID("ee32daa4-6b5c-47e6-9409-f87cca0e5797") history_context
 {
 	bool was_updated = false;
 	size_t history_pos = 0;
@@ -369,8 +369,8 @@ static void draw_history_window(reshade::api::effect_runtime *runtime)
 	}
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "History Window";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that adds an overlay that keeps track of changes to techniques and uniform variables and allows reverting and redoing them.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "History Window";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that adds an overlay that keeps track of changes to techniques and uniform variables and allows reverting and redoing them.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

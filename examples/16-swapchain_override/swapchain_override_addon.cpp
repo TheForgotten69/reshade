@@ -124,8 +124,8 @@ static bool on_set_fullscreen_state(reshade::api::swapchain *, bool fullscreen, 
 	return false;
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Swap chain override";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Adds options to force the application into windowed or fullscreen mode, or force a specific resolution or the default refresh rate.\n\n"
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Swap chain override";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Adds options to force the application into windowed or fullscreen mode, or force a specific resolution or the default refresh rate.\n\n"
 	"These are controlled via ReShade.ini:\n"
 	"[APP]\n"
 	"ForceVsync=<0/1>\n"

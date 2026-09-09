@@ -35,7 +35,23 @@ The version option is only needed when the source tree has no reachable ReShade 
 RESHADE_ENABLE=1 /path/to/application
 ```
 
-Configuration and logs are stored below the XDG config and state directories (normally `~/.config/reshade` and `~/.local/state/reshade`). The built-in Generic Depth add-on is supported for Vulkan. Native Linux `.addon` and `.addon64` libraries are loaded from the XDG data directory (normally `~/.local/share/reshade`); Windows add-on binaries are listed as incompatible and are not loaded.
+Configuration is stored below the XDG config directory (normally `~/.config/reshade`), and logs below `$XDG_DATA_HOME/reshade/logs` (normally `~/.local/share/reshade/logs`). Generic Depth and Effect Runtime Sync are built in. Native Linux `.addon` and `.addon64` libraries are loaded from the user's XDG data directory and the installation's share directory; user copies take precedence by filename. Setting `[ADDON] AddonPath` explicitly restricts discovery to that directory. Windows add-on binaries are listed as incompatible and are not loaded.
+
+Configure with `-DRESHADE_BUILD_LINUX_ADDON_EXAMPLES=ON` to build the portable example add-ons. Generic Depth and Effect Runtime Sync are also built as standalone examples, but are not installed again because they are built into the host. Video capture requires FFmpeg development packages, and ray tracing requires DXC. These examples retain their individual behavior: Texture Replace reads `texreplace` beside the executable; shader/texture dumps and shader replacements use the user's ReShade data directory.
+
+The initial Linux port does not support Windows add-on binaries, OpenGL injection, VR overlays, gamepad navigation, screenshot sounds or post-save commands, or automatic update checks. FFmpeg-dependent add-ons may require compatible system libraries when the application bundles its own dependencies.
+
+On Linux/Vulkan, Generic Depth can infer normal versus reversed depth from matching clear values and depth-test comparisons for the selected buffer. It observes at most 600 rendered frames and requires 120 consecutive matching observations before applying a result. Missing or conflicting evidence leaves the setting unchanged. No GPU readback is used. An explicit `RESHADE_DEPTH_INPUT_IS_REVERSED` definition takes precedence; automatic results are saved in the active preset, so use separate presets for games with different depth conventions. DisplayDepth's live-preview controls do not change other effects' preprocessor definitions.
+
+Automatic depth-convention detection is best-effort and can be disabled with `AutoDetectReversedDepth=0` in the `[DEPTH]` section of `ReShade.ini`. It applies at most once per runtime; removing a saved definition and restarting the application allows a new detection attempt. It does not detect logarithmic depth or other custom depth encodings.
+
+Linux portability regression tests can be run without a game or compositor:
+
+```sh
+cmake -S . -B build-linux -DRESHADE_BUILD_LINUX_TESTS=ON
+cmake --build build-linux --target reshade_linux_tests
+ctest --test-dir build-linux --output-on-failure
+```
 
 A quick overview of what some of the source code files contain:
 

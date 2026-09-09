@@ -16,7 +16,6 @@
 #include <link.h>
 #include <unistd.h>
 
-#define __declspec(...) __attribute__((visibility("default")))
 #define APIENTRY
 #define WINAPI
 

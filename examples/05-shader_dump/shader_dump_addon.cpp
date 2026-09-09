@@ -14,43 +14,31 @@ using namespace reshade::api;
 
 constexpr uint32_t SPIRV_MAGIC = 0x07230203;
 
-static std::filesystem::path make_shader_file_path(uint32_t shader_hash, const wchar_t *extension) noexcept
+static std::filesystem::path make_shader_file_path(uint32_t shader_hash, const wchar_t *extension)
 {
-	try
-	{
 #if defined(__linux__)
-		std::filesystem::path path = reshade_addon_utils::get_storage_directory(RESHADE_ADDON_SHADER_SAVE_DIR, true);
-		if (path.empty())
-			return {};
-#else
-		// Prepend executable directory to image files
-		wchar_t file_prefix[MAX_PATH] = L"";
-		GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
+	return reshade_addon_utils::make_dump_path(RESHADE_ADDON_SHADER_SAVE_DIR, shader_hash, extension);
+#elif defined(_WIN32)
+	// Prepend executable directory to image files
+	wchar_t file_prefix[MAX_PATH] = L"";
+	GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
 
-		std::filesystem::path path = file_prefix;
-		path = path.parent_path();
-		path /= RESHADE_ADDON_SHADER_SAVE_DIR;
+	std::filesystem::path path = file_prefix;
+	path = path.parent_path();
+	path /= RESHADE_ADDON_SHADER_SAVE_DIR;
 
-		// Ensure target directory exists
-		std::error_code ec;
-		if (!std::filesystem::exists(path, ec))
-			std::filesystem::create_directory(path, ec);
-		if (ec)
-			return {};
+	// Ensure target directory exists
+	if (!std::filesystem::exists(path))
+		std::filesystem::create_directory(path);
+
+	wchar_t hash_string[11];
+	swprintf_s(hash_string, L"0x%08X", shader_hash);
+
+	path /= hash_string;
+	path += extension;
+
+	return path;
 #endif
-
-		wchar_t hash_string[11];
-		swprintf_s(hash_string, L"0x%08X", shader_hash);
-
-		path /= hash_string;
-		path += extension;
-
-		return path;
-	}
-	catch (...)
-	{
-		return {};
-	}
 }
 
 static void save_shader_code(device_api device_type, const shader_desc &desc)
@@ -70,15 +58,19 @@ static void save_shader_code(device_api device_type, const shader_desc &desc)
 	if (file_path.empty())
 		return;
 
+	#if defined(__linux__)
 	try
 	{
+	#endif
 		std::ofstream file(file_path, std::ios::binary);
 		file.write(static_cast<const char *>(desc.code), desc.code_size);
+	#if defined(__linux__)
 	}
 	catch (...)
 	{
 		// An add-on must never terminate the host when its optional dump path is unavailable.
 	}
+	#endif
 }
 
 static bool on_create_pipeline(device *device, pipeline_layout, uint32_t subobject_count, const pipeline_subobject *subobjects)
@@ -112,8 +104,8 @@ static bool on_create_pipeline(device *device, pipeline_layout, uint32_t subobje
 	return false;
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Shader Dump";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that dumps all shader binaries used by the application to disk (\"" RESHADE_ADDON_SHADER_SAVE_DIR "\" directory).";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Shader Dump";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that dumps all shader binaries used by the application to disk (\"" RESHADE_ADDON_SHADER_SAVE_DIR "\" directory).";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

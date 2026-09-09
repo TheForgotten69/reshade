@@ -13,7 +13,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 }
 
-struct __declspec(uuid("0d7525f9-c4e1-426e-bc99-15bbd5fd51f2")) video_capture
+struct RESHADE_API_UUID("0d7525f9-c4e1-426e-bc99-15bbd5fd51f2") video_capture
 {
 	AVCodecContext *codec_ctx = nullptr;
 	AVFormatContext *output_ctx = nullptr;
@@ -376,10 +376,10 @@ static void on_reshade_finish_effects(reshade::api::effect_runtime *runtime, res
 	encode_frame(data.codec_ctx, data.output_ctx, data.frame);
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Video Capture";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that captures the screen after effects were rendered and uses FFmpeg to create a video file from that.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Video Capture";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that captures the screen after effects were rendered and uses FFmpeg to create a video file from that.";
 
-extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE reshade_module)
+extern "C" RESHADE_ADDON_EXPORT bool AddonInit(HMODULE addon_module, HMODULE reshade_module)
 {
 	if (!reshade::register_addon(addon_module, reshade_module))
 		return false;
@@ -390,7 +390,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
 
 	return true;
 }
-extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE reshade_module)
+extern "C" RESHADE_ADDON_EXPORT void AddonUninit(HMODULE addon_module, HMODULE reshade_module)
 {
 	reshade::unregister_addon(addon_module, reshade_module);
 }

@@ -1070,8 +1070,8 @@ static void on_present(effect_runtime *runtime)
 	}
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "API Trace";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that logs the graphics API calls done by the application of the next frame after pressing a keyboard shortcut.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "API Trace";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that logs the graphics API calls done by the application of the next frame after pressing a keyboard shortcut.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

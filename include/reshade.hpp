@@ -12,6 +12,12 @@
 // Current version of the ReShade API
 #define RESHADE_API_VERSION 20
 
+#if defined(_WIN32)
+#define RESHADE_ADDON_EXPORT __declspec(dllexport)
+#elif defined(__linux__)
+#define RESHADE_ADDON_EXPORT __attribute__((visibility("default")))
+#endif
+
 // Optionally import ReShade API functions when 'RESHADE_API_LIBRARY' is defined instead of using header-only mode
 #if defined(RESHADE_API_LIBRARY) || defined(RESHADE_API_LIBRARY_EXPORT)
 
@@ -263,10 +269,9 @@ namespace reshade
 		if (!ReShadeRegisterAddon(addon_module, RESHADE_API_VERSION))
 			return false;
 
-#if defined(IMGUI_VERSION_NUM)
+#if defined(__linux__) && defined(IMGUI_VERSION_NUM)
 		// The function table keeps add-ons independent of ReShade's ImGui ABI.
-		const auto imgui_func = reinterpret_cast<const imgui_function_table *(*)(uint32_t)>(ReShadeGetImGuiFunctionTable);
-		if (imgui_func == nullptr || !(imgui_function_table_instance() = imgui_func(IMGUI_VERSION_NUM)))
+		if (!(imgui_function_table_instance() = static_cast<const imgui_function_table *>(ReShadeGetImGuiFunctionTable(IMGUI_VERSION_NUM))))
 		{
 			ReShadeUnregisterAddon(addon_module);
 			return false;
@@ -307,7 +312,7 @@ namespace reshade
 	inline void unregister_addon(void *addon_module, [[maybe_unused]] void *reshade_module = nullptr)
 	{
 #if defined(RESHADE_API_LIBRARY)
-	#if defined(IMGUI_VERSION_NUM)
+	#if defined(__linux__) && defined(IMGUI_VERSION_NUM)
 		imgui_function_table_instance() = nullptr;
 	#endif
 		ReShadeUnregisterAddon(addon_module);

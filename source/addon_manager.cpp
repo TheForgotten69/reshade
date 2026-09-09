@@ -19,16 +19,14 @@
 #include <dlfcn.h>
 #include <fstream>
 #include <link.h>
+#include "linux/paths.hpp"
+#include "linux/addon_paths.hpp"
 #endif
 
 extern void register_addon_depth();
-#if defined(_WIN32)
 extern void register_addon_effect_runtime_sync();
-#endif
 extern void unregister_addon_depth();
-#if defined(_WIN32)
 extern void unregister_addon_effect_runtime_sync();
-#endif
 
 #if defined(_WIN32)
 extern HMODULE g_module_handle;
@@ -216,10 +214,8 @@ std::filesystem::path reshade::get_default_addon_search_path()
 {
 #if defined(__linux__)
 	// Keep add-ons next to the shared shader installation, rather than per-application configuration.
-	if (const char *const data_home = std::getenv("XDG_DATA_HOME"); data_home != nullptr && data_home[0] != '\0')
-		return std::filesystem::u8path(data_home) / "reshade";
-	if (const char *const home = std::getenv("HOME"); home != nullptr && home[0] != '\0')
-		return std::filesystem::u8path(home) / ".local/share/reshade";
+	if (const std::filesystem::path root = utils::xdg_path("XDG_DATA_HOME", ".local/share"); !root.empty())
+		return root / "reshade";
 #endif
 	return g_reshade_base_path;
 }
@@ -260,7 +256,6 @@ void reshade::load_addons()
 			register_addon_depth();
 		}
 	}
-	#if defined(_WIN32)
 	{	addon_info &info = addon_loaded_info.emplace_back();
 		info.name = "Effect Runtime Sync";
 		info.description = "Adds preset synchronization between different effect runtime instances, e.g. to have changes in a desktop window reflect in VR.";
@@ -275,7 +270,6 @@ void reshade::load_addons()
 			register_addon_effect_runtime_sync();
 		}
 	}
-	#endif
 #endif
 
 	// Initialize any add-ons that were registered externally
@@ -301,7 +295,8 @@ void reshade::load_addons()
 
 	// Get directory from where to load add-ons from
 	std::filesystem::path addon_search_path = get_default_addon_search_path();
-	if (config.get("ADDON", "AddonPath", addon_search_path))
+	const bool custom_addon_path = config.get("ADDON", "AddonPath", addon_search_path);
+	if (custom_addon_path)
 		addon_search_path = g_reshade_base_path / addon_search_path;
 
 	log::message(log::level::info, "Searching for add-ons (*.addon"
@@ -312,8 +307,16 @@ void reshade::load_addons()
 #endif
 		") in '%s' ...", addon_search_path.u8string().c_str());
 
+	#if defined(__linux__)
+	const std::filesystem::path installed_addon_path = custom_addon_path ? std::filesystem::path() :
+		(g_reshade_dll_path.parent_path() / RESHADE_ADDON_INSTALL_RELATIVE_PATH).lexically_normal();
+	if (!installed_addon_path.empty())
+		log::message(log::level::info, "Also searching for installed add-ons in '%s' ...", installed_addon_path.u8string().c_str());
+	for (std::filesystem::path path : utils::find_addon_files(addon_search_path, installed_addon_path))
+	#elif defined(_WIN32)
 	std::error_code ec;
 	for (std::filesystem::path path : std::filesystem::directory_iterator(addon_search_path, std::filesystem::directory_options::skip_permission_denied, ec))
+	#endif
 	{
 		if (path.extension() != L".addon" &&
 #if INTPTR_MAX == INT32_MAX
@@ -453,8 +456,10 @@ void reshade::load_addons()
 #endif
 	}
 
+	#if defined(_WIN32)
 	if (ec)
 		log::message(log::level::warning, "Failed to iterate all files in '%s' with error code %d!", addon_search_path.u8string().c_str(), ec.value());
+	#endif
 }
 void reshade::unload_addons()
 {
@@ -513,9 +518,7 @@ void reshade::unload_addons()
 
 #if 1
 	unregister_addon_depth();
-	#if defined(_WIN32)
 	unregister_addon_effect_runtime_sync();
-	#endif
 #endif
 
 	// Remove all unloaded add-ons
