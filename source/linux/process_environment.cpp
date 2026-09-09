@@ -1,4 +1,5 @@
 #include "process_environment.hpp"
+#include "paths.hpp"
 #include "dll_log.hpp"
 #include "ini_file.hpp"
 #include "version.h"
@@ -23,21 +24,10 @@ namespace
 	std::filesystem::path s_config_path;
 	std::filesystem::path s_log_path;
 
-	std::filesystem::path xdg_path(const char *variable, const char *fallback)
-	{
-		if (const char *const value = std::getenv(variable); value != nullptr && value[0] != '\0')
-			return std::filesystem::u8path(value);
-
-		if (const char *const home = std::getenv("HOME"); home != nullptr && home[0] != '\0')
-			return std::filesystem::u8path(home) / fallback;
-
-		return {};
-	}
-
 	bool initialize_default_config(const std::filesystem::path &config_path, const std::filesystem::path &config_root)
 	{
-		const std::filesystem::path data_root = xdg_path("XDG_DATA_HOME", ".local/share");
-		const std::filesystem::path cache_root = xdg_path("XDG_CACHE_HOME", ".cache");
+		const std::filesystem::path data_root = reshade::utils::xdg_path("XDG_DATA_HOME", ".local/share");
+		const std::filesystem::path cache_root = reshade::utils::xdg_path("XDG_CACHE_HOME", ".cache");
 		if (data_root.empty() || cache_root.empty())
 			return false;
 
@@ -128,7 +118,7 @@ bool reshade::process::initialize()
 		else
 		{
 			ec.clear();
-			const std::filesystem::path config_root = xdg_path("XDG_CONFIG_HOME", ".config");
+			const std::filesystem::path config_root = reshade::utils::xdg_path("XDG_CONFIG_HOME", ".config");
 			if (config_root.empty())
 				return;
 			s_config_path = config_root / "reshade" / "apps" / s_application_id / "ReShade.ini";
@@ -155,7 +145,7 @@ bool reshade::process::initialize()
 		if (config.has("INSTALL", "Logging") && !config.get("INSTALL", "Logging"))
 			return;
 
-		const std::filesystem::path data_root = xdg_path("XDG_DATA_HOME", ".local/share");
+		const std::filesystem::path data_root = reshade::utils::xdg_path("XDG_DATA_HOME", ".local/share");
 		if (data_root.empty())
 			return;
 
