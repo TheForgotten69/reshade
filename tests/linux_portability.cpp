@@ -1,0 +1,186 @@
+// Exercise the real Wayland callbacks without a compositor or a Vulkan device.
+#include "../source/linux/input_linux.cpp"
+#include "../source/linux/paths.hpp"
+#include "../source/linux/addon_paths.hpp"
+#include "../examples/09-depth/generic_depth_detection.hpp"
+#include <cassert>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <sys/wait.h>
+
+static uint32_t pointer_version = 5;
+extern "C" uint32_t wl_proxy_get_version(wl_proxy *)
+{
+	return pointer_version;
+}
+
+void reshade::log::message(level, const char *, ...)
+{
+}
+
+static void test_clipboard()
+{
+	reshade::wayland_input_context context;
+	context.clipboard_text = "ReShade clipboard";
+	context.clipboard_source = reinterpret_cast<wl_data_source *>(&context);
+	assert(context.get_clipboard_text() == context.clipboard_text);
+	context.clipboard_source = nullptr;
+
+	// A closed receiver must not kill the process, even with default SIGPIPE behavior.
+	const pid_t child = fork();
+	assert(child >= 0);
+	if (child == 0)
+	{
+		signal(SIGPIPE, SIG_DFL);
+		sigset_t signals;
+		sigemptyset(&signals);
+		sigaddset(&signals, SIGPIPE);
+		pthread_sigmask(SIG_UNBLOCK, &signals, nullptr);
+		int fds[2];
+		assert(pipe(fds) == 0);
+		close(fds[0]);
+		std::thread([fd = fds[1]] { reshade::utils::write_clipboard_text(fd, "closed receiver"); }).join();
+		_exit(0);
+	}
+	int status = 0;
+	assert(waitpid(child, &status, 0) == child);
+	assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+	int fds[2];
+	assert(pipe(fds) == 0);
+	const std::string text(256 * 1024, 'x');
+	std::thread writer([fd = fds[1], &text] { reshade::utils::write_clipboard_text(fd, text); });
+	std::string received;
+	char buffer[4096];
+	for (ssize_t count; (count = read(fds[0], buffer, sizeof(buffer))) > 0;)
+		received.append(buffer, count);
+	close(fds[0]);
+	writer.join();
+	assert(received == text);
+}
+
+static void test_scroll()
+{
+	reshade::input input(nullptr);
+	reshade::wayland_input_context context;
+	context.owner = &input;
+	context.pointer_focused = true;
+	using callbacks = reshade::wayland_input_context;
+
+	callbacks::pointer_axis_discrete(&context, nullptr, WL_POINTER_AXIS_VERTICAL_SCROLL, 1);
+	callbacks::pointer_axis(&context, nullptr, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(10));
+	assert(input.mouse_wheel_delta() == 0);
+	callbacks::pointer_frame(&context, nullptr);
+	assert(input.mouse_wheel_delta() == -1);
+	input.next_frame();
+
+	callbacks::pointer_axis_discrete(&context, nullptr, WL_POINTER_AXIS_VERTICAL_SCROLL, -2);
+	callbacks::pointer_axis(&context, nullptr, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(-20));
+	callbacks::pointer_frame(&context, nullptr);
+	assert(input.mouse_wheel_delta() == 2);
+	input.next_frame();
+
+	callbacks::pointer_axis(&context, nullptr, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(5));
+	callbacks::pointer_frame(&context, nullptr);
+	assert(input.mouse_wheel_delta() == -1);
+	input.next_frame();
+	callbacks::pointer_frame(&context, nullptr);
+	assert(input.mouse_wheel_delta() == 0);
+
+	pointer_version = 4;
+	callbacks::pointer_axis(&context, nullptr, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(10));
+	assert(input.mouse_wheel_delta() == -1);
+}
+
+static void test_paths()
+{
+	using namespace reshade::utils;
+	setenv("RESHADE_TEST_XDG", "/tmp/reshade-xdg", 1);
+	assert(xdg_path("RESHADE_TEST_XDG", ".local/share") == "/tmp/reshade-xdg");
+	setenv("RESHADE_TEST_XDG", "relative", 1);
+	assert(xdg_path("RESHADE_TEST_XDG", ".local/share") == xdg_path("RESHADE_TEST_UNSET", ".local/share"));
+	unsetenv("RESHADE_TEST_XDG");
+
+	char directory[] = "/tmp/reshade-path-test.XXXXXX";
+	assert(mkdtemp(directory) != nullptr);
+	const std::filesystem::path root = directory;
+	const auto user = root / "user", installed = root / "prefix/share/reshade";
+	std::filesystem::create_directories(user);
+	std::filesystem::create_directories(installed);
+	std::ofstream(user / "same.addon64").put('x');
+	std::ofstream(installed / "same.addon64").put('x');
+	std::ofstream(installed / "installed.addon64").put('x');
+	std::ofstream(installed / "ignored.txt").put('x');
+	const auto files = find_addon_files(user, installed);
+	assert(files.size() == 2);
+	assert(std::find(files.begin(), files.end(), user / "same.addon64") != files.end());
+	assert(std::find(files.begin(), files.end(), installed / "installed.addon64") != files.end());
+	assert(find_addon_files(user, {}).size() == 1);
+	assert(find_addon_files(root / "missing", installed).size() == 2);
+	std::filesystem::remove_all(root);
+}
+
+static void test_depth_detection()
+{
+	using namespace depth_detection;
+	assert(clear_evidence(1.0f) == normal);
+	assert(clear_evidence(0.0f) == reversed);
+	assert(clear_evidence(0.5f) == unknown);
+	for (uint8_t convention : { uint8_t(normal), uint8_t(reversed) })
+	{
+		observation state;
+		for (uint64_t frame = 0; frame < 119; ++frame)
+		{
+			assert(state.observe(1, frame, convention, convention) == none);
+			assert(state.observe(1, frame, convention, convention) == none);
+		}
+		assert(state.frames == 119);
+		assert(state.observe(1, 119, convention, convention) == convention);
+		assert(state.finished);
+		assert(state.observe(1, 120, convention, convention) == none);
+	}
+	for (uint8_t clears : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown) })
+		for (uint8_t comparisons : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown) })
+		{
+			if ((clears == normal || clears == reversed) && clears == comparisons)
+				continue;
+			observation state;
+			for (uint64_t frame = 0; frame < 600; ++frame)
+				assert(state.observe(1, frame, clears, comparisons) == none);
+			assert(state.finished && state.frames == 600);
+		}
+	observation changing;
+	for (uint64_t frame = 0; frame < 600; ++frame)
+		assert(changing.observe(1 + frame / 100, frame, normal, normal) == none);
+	assert(changing.finished);
+	observation interrupted;
+	for (uint64_t frame = 0; frame < 119; ++frame)
+		assert(interrupted.observe(1, frame, normal, normal) == none);
+	assert(interrupted.observe(1, 119, unknown, normal) == none);
+	assert(interrupted.observe(1, 120, normal, normal) == none);
+	assert(interrupted.consistent_frames == 1);
+	observation alternating;
+	for (uint64_t frame = 0; frame < 600; ++frame)
+	{
+		const uint8_t vote = frame % 2 ? normal : reversed;
+		assert(alternating.observe(1, frame, vote, vote) == none);
+	}
+	assert(alternating.finished);
+	for (uint64_t frame = 600; frame < 800; ++frame)
+		assert(alternating.observe(1, frame, normal, normal) == none);
+	assert(alternating.frames == 600);
+	observation missing;
+	assert(missing.observe(0, 0, normal, normal) == none);
+	assert(missing.frames == 0);
+	assert(clear_evidence(std::numeric_limits<float>::quiet_NaN()) == unknown);
+}
+
+int main()
+{
+	test_depth_detection();
+	test_clipboard();
+	test_scroll();
+	test_paths();
+	std::cout << "Depth detection, clipboard, scroll and add-on path tests passed.\n";
+}

@@ -99,6 +99,10 @@ string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," RESHADE_IMGUI_PS_SPIRV "${RES
 configure_file(source/linux/resources_linux.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/resources_linux.hpp @ONLY)
 
 function(reshade_configure_linux_target target)
+  file(RELATIVE_PATH RESHADE_ADDON_INSTALL_RELATIVE_PATH
+    "${CMAKE_INSTALL_FULL_LIBDIR}/reshade"
+    "${CMAKE_INSTALL_FULL_DATADIR}/reshade")
+  target_compile_definitions(${target} PRIVATE RESHADE_ADDON_INSTALL_RELATIVE_PATH="${RESHADE_ADDON_INSTALL_RELATIVE_PATH}")
   set_target_properties(${target} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
   target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${RESHADE_GENERATED_INCLUDE_DIR}")
   target_sources(
@@ -153,6 +157,9 @@ function(reshade_configure_linux_target target)
   set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
   set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
   target_sources(${target} PRIVATE examples/09-depth/generic_depth_addon.cpp)
+  set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
+  set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
+  target_sources(${target} PRIVATE examples/15-effect_runtime_sync/runtime_sync_addon.cpp)
   target_link_libraries(
     ${target}
     PRIVATE
@@ -169,6 +176,19 @@ endfunction()
 
 option(RESHADE_BUILD_LINUX_ADDON_EXAMPLES "Build native Linux add-on examples" OFF)
 
+option(RESHADE_BUILD_LINUX_TESTS "Build Linux portability regression tests" OFF)
+if(RESHADE_BUILD_LINUX_TESTS)
+  enable_testing()
+  add_executable(reshade_linux_tests tests/linux_portability.cpp source/input.cpp
+    ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER} ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
+    ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER} ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE})
+  target_include_directories(reshade_linux_tests PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
+  target_compile_options(reshade_linux_tests PRIVATE -UNDEBUG $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
+  target_link_libraries(reshade_linux_tests PRIVATE Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON)
+  add_test(NAME linux_portability COMMAND reshade_linux_tests)
+  set_tests_properties(linux_portability PROPERTIES TIMEOUT 15)
+endif()
+
 if(RESHADE_BUILD_LINUX_ADDON_EXAMPLES)
   # Native add-ons use the same API-library ABI as Windows add-ons. The small
   # compatibility header only supplies the Win32 spellings still present in
@@ -177,7 +197,7 @@ if(RESHADE_BUILD_LINUX_ADDON_EXAMPLES)
   set(RESHADE_LINUX_ADDON_ENTRYPOINT "${CMAKE_CURRENT_SOURCE_DIR}/source/linux/addon_entrypoint.cpp")
 
   function(reshade_configure_linux_addon target output_name source_file)
-    cmake_parse_arguments(ARG "NO_ENTRYPOINT" "" "SOURCES;LIBRARIES" ${ARGN})
+    cmake_parse_arguments(ARG "NO_ENTRYPOINT;NO_INSTALL" "" "SOURCES;LIBRARIES" ${ARGN})
 
     add_library(${target} MODULE ${source_file} ${ARG_SOURCES})
     set_target_properties(
@@ -215,7 +235,9 @@ if(RESHADE_BUILD_LINUX_ADDON_EXAMPLES)
     target_link_libraries(${target} PRIVATE ReShade Threads::Threads ${ARG_LIBRARIES})
     target_link_options(${target} PRIVATE -Wl,--no-undefined)
 
-    install(TARGETS ${target} LIBRARY DESTINATION "${CMAKE_INSTALL_DATADIR}/reshade")
+    if(NOT ARG_NO_INSTALL)
+      install(TARGETS ${target} LIBRARY DESTINATION "${CMAKE_INSTALL_DATADIR}/reshade")
+    endif()
   endfunction()
 
   reshade_configure_linux_addon(reshade_addon_fps_limit fps_limit examples/01-fps_limit/fps_limit_addon.cpp)
@@ -231,7 +253,7 @@ if(RESHADE_BUILD_LINUX_ADDON_EXAMPLES)
     reshade_addon_texture_replace texture_replace examples/08-texture_replace/texture_replace_addon.cpp
     SOURCES examples/utils/load_texture_image.cpp
   )
-  reshade_configure_linux_addon(reshade_addon_generic_depth generic_depth examples/09-depth/generic_depth_addon.cpp)
+  reshade_configure_linux_addon(reshade_addon_generic_depth generic_depth examples/09-depth/generic_depth_addon.cpp NO_INSTALL)
   reshade_configure_linux_addon(
     reshade_addon_texture_overlay texture_overlay examples/10-texture_overlay/texture_overlay_addon.cpp
     SOURCES examples/utils/descriptor_tracking.cpp examples/utils/save_texture_image.cpp
@@ -240,7 +262,7 @@ if(RESHADE_BUILD_LINUX_ADDON_EXAMPLES)
     reshade_addon_effects_during_frame effects_during_frame examples/13-effects_during_frame/effects_during_frame_addon.cpp
     SOURCES examples/utils/state_tracking.cpp
   )
-  reshade_configure_linux_addon(reshade_addon_runtime_sync runtime_sync examples/15-effect_runtime_sync/runtime_sync_addon.cpp)
+  reshade_configure_linux_addon(reshade_addon_runtime_sync runtime_sync examples/15-effect_runtime_sync/runtime_sync_addon.cpp NO_INSTALL)
   reshade_configure_linux_addon(reshade_addon_swapchain_override swapchain_override examples/16-swapchain_override/swapchain_override_addon.cpp)
 
   # Video capture has an optional FFmpeg dependency and already uses the

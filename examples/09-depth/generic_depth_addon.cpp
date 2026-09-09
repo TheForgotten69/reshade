@@ -5,6 +5,7 @@
 
 #include <imgui.h>
 #include <reshade.hpp>
+#include "generic_depth_detection.hpp"
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
@@ -43,6 +44,13 @@ enum class aspect_ratio_heuristic : unsigned int
 static bool s_disable_intz = false;
 // Enable or disable the creation of backup copies at clear operations on the selected depth-stencil
 static unsigned int s_preserve_depth_buffers = 0;
+#if defined(__linux__)
+// Vulkan can use reversed-Z conventions that are not represented in the
+// context itself. Detect these from rendered state when no explicit setting
+// exists. This is deliberately Linux-only for now so existing Windows
+// behavior is unchanged.
+static bool s_auto_detect_reversed_depth = true;
+#endif
 // Choose impact of draw statistics in the detection heuristic
 static draw_stats_heuristic s_draw_stats_heuristic = draw_stats_heuristic::prefer_vertices;
 // Enable or disable the aspect ratio check from 'check_aspect_ratio' in the detection heuristic
@@ -92,7 +100,46 @@ struct depth_stencil_frame_stats
 	std::vector<clear_stats> clears;
 	bool copied_during_frame = false;
 	bool reversed_clear_value = false;
+	uint8_t clear_depth_evidence = depth_detection::none;
+	uint8_t depth_compare_evidence = depth_detection::none;
 };
+
+// The depth state may come from a static pipeline description or from dynamic
+// state commands recorded after binding the pipeline. Keep each field's
+// knownness separate so a missing dynamic command remains unknown rather than
+// silently inheriting an arbitrary API default.
+struct depth_pipeline_state
+{
+	bool depth_enable = false;
+	bool depth_write_mask = false;
+	compare_op depth_func = compare_op::never;
+	bool depth_enable_known = false;
+	bool depth_write_mask_known = false;
+	bool depth_func_known = false;
+};
+
+static uint8_t get_depth_compare_evidence(const depth_pipeline_state &state)
+{
+	// A known-disabled test or write mask proves that this draw cannot provide
+	// depth-order evidence, even when the other dynamic fields were not set.
+	if ((state.depth_enable_known && !state.depth_enable) ||
+		(state.depth_write_mask_known && !state.depth_write_mask))
+		return depth_detection::none;
+	if (!state.depth_enable_known || !state.depth_write_mask_known || !state.depth_func_known)
+		return depth_detection::unknown;
+
+	switch (state.depth_func)
+	{
+	case compare_op::less:
+	case compare_op::less_equal:
+		return depth_detection::normal;
+	case compare_op::greater:
+	case compare_op::greater_equal:
+		return depth_detection::reversed;
+	default:
+		return depth_detection::unknown;
+	}
+}
 
 struct resource_hash
 {
@@ -108,6 +155,11 @@ struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 	const bool is_queue;
 	viewport current_viewport = {};
 	resource current_depth_stencil = { 0 };
+	depth_pipeline_state current_depth_state;
+	// A compute-only bind must not invalidate the graphics pipeline state. Keep
+	// track of whether this command list actually changed graphics state so a
+	// secondary command list with no such bind does not clobber its caller.
+	bool graphics_pipeline_state_touched = false;
 	std::unordered_map<resource, depth_stencil_frame_stats, resource_hash> stats_per_used_depth_stencil;
 	bool first_draw_since_bind = true;
 	draw_stats best_copy_stats;
@@ -123,6 +175,8 @@ struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 		best_copy_stats = { 0, 0 };
 		stats_per_used_depth_stencil.clear();
 		current_depth_stencil = { 0 };
+		current_depth_state = {};
+		graphics_pipeline_state_touched = false;
 	}
 	void reset_on_present()
 	{
@@ -135,6 +189,11 @@ struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 	{
 		// Executing a command list in a different command list inherits state
 		current_depth_stencil = source.current_depth_stencil;
+		if (source.graphics_pipeline_state_touched)
+		{
+			current_depth_state = source.current_depth_state;
+			graphics_pipeline_state_touched = true;
+		}
 
 		if (source.best_copy_stats.vertices >= best_copy_stats.vertices)
 			best_copy_stats = source.best_copy_stats;
@@ -157,6 +216,8 @@ struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 
 			stats.copied_during_frame |= source_stats.copied_during_frame;
 			stats.reversed_clear_value = source_stats.reversed_clear_value;
+			stats.clear_depth_evidence |= source_stats.clear_depth_evidence;
+			stats.depth_compare_evidence |= source_stats.depth_compare_evidence;
 		}
 	}
 };
@@ -178,6 +239,21 @@ struct RESHADE_API_UUID("7c6363c7-f94e-437a-9160-141782c44a98") generic_depth_da
 
 	// True when the shader resource view was created from the backup resource, false when it was created from the original depth-stencil
 	bool using_backup_texture = false;
+
+#if defined(__linux__)
+	// Detection belongs to an effect runtime, not to the device: different
+	// runtimes can select different depth resources and can use different
+	// presets. The observation itself also supplies the bounded frame budget.
+	depth_detection::observation reversed_depth_detection;
+	bool reversed_depth_detection_disabled = false;
+	bool reversed_depth_detection_timeout_logged = false;
+	bool reversed_depth_detection_applied = false;
+	// Temporary diagnostics for the unvalidated auto-detect feature; remove
+	// once live behavior has been confirmed.
+	bool reversed_depth_detection_manual_disable_logged = false;
+	uint32_t reversed_depth_detection_debug_tick = 0;
+	uint32_t reversed_depth_detection_debug_skip_tick = 0;
+#endif
 };
 RESHADE_DEFINE_PRIVATE_DATA_TYPE(generic_depth_data,
 	0xc7, 0x63, 0x63, 0x7c, 0x4e, 0xf9, 0x7a, 0x43,
@@ -226,6 +302,11 @@ struct RESHADE_API_UUID("e006e162-33ac-4b9f-b10f-0e15335c7bdb") generic_depth_de
 
 	// List of all encountered depth-stencils of the last frame
 	std::unordered_map<resource, depth_stencil_resource, resource_hash> depth_stencil_resources;
+
+	// Static Vulkan pipeline depth state, keyed by the native pipeline handle.
+	// This is populated by 'init_pipeline' and copied into command-list state at
+	// bind time, so draw callbacks do not need to acquire another lock.
+	std::unordered_map<uint64_t, depth_pipeline_state> depth_pipeline_states;
 
 	// List of depth-stencils that should be tracked throughout each frame and potentially be backed up during clear operations
 	std::vector<depth_stencil_backup> depth_stencil_backups;
@@ -512,6 +593,10 @@ static void on_init_device(device *device)
 
 	reshade::get_config_value(nullptr, "DEPTH", "DisableINTZ", s_disable_intz);
 	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", s_preserve_depth_buffers);
+#if defined(__linux__)
+	s_auto_detect_reversed_depth = true;
+	reshade::get_config_value(nullptr, "DEPTH", "AutoDetectReversedDepth", s_auto_detect_reversed_depth);
+#endif
 	reshade::get_config_value(nullptr, "DEPTH", "DrawStatsHeuristic", reinterpret_cast<unsigned int &>(s_draw_stats_heuristic));
 	reshade::get_config_value(nullptr, "DEPTH", "UseAspectRatioHeuristics", reinterpret_cast<unsigned int &>(s_aspect_ratio_heuristic));
 
@@ -540,6 +625,193 @@ static void on_init_command_list(command_list *cmd_list)
 static void on_destroy_command_list(command_list *cmd_list)
 {
 	cmd_list->destroy_private_data<state_tracking>();
+}
+
+static void on_init_pipeline(device *device, pipeline_layout, uint32_t subobject_count, const pipeline_subobject *subobjects, pipeline pipeline)
+{
+#if defined(__linux__)
+	if (device->get_api() != device_api::vulkan || pipeline == 0)
+		return;
+
+	depth_pipeline_state state;
+	bool has_depth_stencil_state = false;
+	bool depth_enable_is_dynamic = false;
+	bool depth_write_mask_is_dynamic = false;
+	bool depth_func_is_dynamic = false;
+	bool dynamic_states_are_unknown = false;
+
+	for (uint32_t i = 0; subobjects != nullptr && i < subobject_count; ++i)
+	{
+		const pipeline_subobject &subobject = subobjects[i];
+
+		switch (subobject.type)
+		{
+		case pipeline_subobject_type::depth_stencil_state:
+			if (subobject.count != 0 && subobject.data != nullptr)
+			{
+				const auto &desc = *static_cast<const depth_stencil_desc *>(subobject.data);
+				state.depth_enable = desc.depth_enable;
+				state.depth_write_mask = desc.depth_write_mask;
+				state.depth_func = desc.depth_func;
+				state.depth_enable_known = true;
+				state.depth_write_mask_known = true;
+				state.depth_func_known = true;
+				has_depth_stencil_state = true;
+			}
+			break;
+		case pipeline_subobject_type::dynamic_pipeline_states:
+			if (subobject.data == nullptr)
+			{
+				dynamic_states_are_unknown = subobject.count != 0;
+				break;
+			}
+
+			for (uint32_t j = 0; j < subobject.count; ++j)
+			{
+				switch (static_cast<const dynamic_state *>(subobject.data)[j])
+				{
+				case dynamic_state::depth_enable:
+					depth_enable_is_dynamic = true;
+					break;
+				case dynamic_state::depth_write_mask:
+					depth_write_mask_is_dynamic = true;
+					break;
+				case dynamic_state::depth_func:
+					depth_func_is_dynamic = true;
+					break;
+				default:
+					break;
+				}
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	// Pipelines without a depth-stencil subobject (for example compute
+	// pipelines or incomplete pipeline-library pieces) remain fully unknown.
+	if (!has_depth_stencil_state)
+	{
+		state.depth_enable_known = false;
+		state.depth_write_mask_known = false;
+		state.depth_func_known = false;
+	}
+	else
+	{
+		// The dynamic-state sub-object is not required to appear before the
+		// depth-stencil sub-object. Apply its effects after the complete list has
+		// been scanned so the result is independent of sub-object ordering.
+		if (dynamic_states_are_unknown || depth_enable_is_dynamic)
+			state.depth_enable_known = false;
+		if (dynamic_states_are_unknown || depth_write_mask_is_dynamic)
+			state.depth_write_mask_known = false;
+		if (dynamic_states_are_unknown || depth_func_is_dynamic)
+			state.depth_func_known = false;
+	}
+
+	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
+	if (device_data == nullptr)
+		return;
+
+	const std::unique_lock<std::shared_mutex> lock(s_mutex);
+	device_data->depth_pipeline_states[pipeline.handle] = state;
+#else
+	(void)device;
+	(void)subobject_count;
+	(void)subobjects;
+	(void)pipeline;
+#endif
+}
+static void on_destroy_pipeline(device *device, pipeline pipeline)
+{
+#if defined(__linux__)
+	if (device->get_api() != device_api::vulkan || pipeline == 0)
+		return;
+
+	generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
+	if (device_data == nullptr)
+		return;
+
+	const std::unique_lock<std::shared_mutex> lock(s_mutex);
+	device_data->depth_pipeline_states.erase(pipeline.handle);
+#else
+	(void)device;
+	(void)pipeline;
+#endif
+}
+
+static void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipeline)
+{
+#if defined(__linux__)
+	device *const device = cmd_list->get_device();
+	if (device->get_api() != device_api::vulkan)
+		return;
+	if ((pipeline_stage::all_graphics & stages) == 0)
+		return; // A compute-only bind does not change graphics depth state
+
+	auto &state = *cmd_list->get_private_data<state_tracking>();
+	depth_pipeline_state pipeline_state;
+	if (pipeline != 0)
+	{
+		generic_depth_device_data *const device_data = device->get_private_data<generic_depth_device_data>();
+		if (device_data != nullptr)
+		{
+			const std::shared_lock<std::shared_mutex> lock(s_mutex);
+			if (const auto it = device_data->depth_pipeline_states.find(pipeline.handle);
+				it != device_data->depth_pipeline_states.end())
+				pipeline_state = it->second;
+		}
+	}
+	state.current_depth_state = pipeline_state;
+	state.graphics_pipeline_state_touched = true;
+#else
+	(void)cmd_list;
+	(void)pipeline;
+#endif
+}
+static void on_bind_pipeline_states(command_list *cmd_list, uint32_t count, const dynamic_state *states, const uint32_t *values)
+{
+#if defined(__linux__)
+	if (cmd_list->get_device()->get_api() != device_api::vulkan)
+		return;
+
+	auto &state = *cmd_list->get_private_data<state_tracking>();
+	if (count != 0 && (states == nullptr || values == nullptr))
+	{
+		// Treat malformed or unavailable dynamic state as unknown evidence.
+		state.current_depth_state = {};
+		state.graphics_pipeline_state_touched = true;
+		return;
+	}
+	if (count != 0)
+		state.graphics_pipeline_state_touched = true;
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		switch (states[i])
+		{
+		case dynamic_state::depth_enable:
+			state.current_depth_state.depth_enable = values[i] != 0;
+			state.current_depth_state.depth_enable_known = true;
+			break;
+		case dynamic_state::depth_write_mask:
+			state.current_depth_state.depth_write_mask = values[i] != 0;
+			state.current_depth_state.depth_write_mask_known = true;
+			break;
+		case dynamic_state::depth_func:
+			state.current_depth_state.depth_func = static_cast<compare_op>(values[i]);
+			state.current_depth_state.depth_func_known = true;
+			break;
+		default:
+			break;
+		}
+	}
+#else
+	(void)cmd_list;
+	(void)count;
+	(void)states;
+	(void)values;
+#endif
 }
 
 static void on_init_command_queue(command_queue *cmd_queue)
@@ -741,6 +1013,9 @@ static bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instance
 	state.first_draw_since_bind = false;
 
 	depth_stencil_frame_stats &stats = state.stats_per_used_depth_stencil[state.current_depth_stencil];
+	#if defined(__linux__)
+	stats.depth_compare_evidence |= get_depth_compare_evidence(state.current_depth_state);
+	#endif
 	stats.total.vertices += vertices * instances;
 	stats.total.drawcalls += 1;
 	stats.current.vertices += vertices * instances;
@@ -771,6 +1046,9 @@ static bool on_draw_indirect(command_list *cmd_list, indirect_command type, reso
 		lock.lock();
 
 	depth_stencil_frame_stats &stats = state.stats_per_used_depth_stencil[state.current_depth_stencil];
+	#if defined(__linux__)
+	stats.depth_compare_evidence |= get_depth_compare_evidence(state.current_depth_state);
+	#endif
 	stats.total.drawcalls += draw_count;
 	stats.total.drawcalls_indirect += draw_count;
 	stats.current.drawcalls += draw_count;
@@ -827,7 +1105,25 @@ static bool on_clear_depth_stencil(command_list *cmd_list, resource_view dsv, co
 			if (state.is_queue)
 				lock.lock();
 
-			state.stats_per_used_depth_stencil[depth_stencil].reversed_clear_value = true;
+			depth_stencil_frame_stats &stats = state.stats_per_used_depth_stencil[depth_stencil];
+			// Keep this legacy flag unchanged for the UI. It intentionally marks
+			// every non-one clear as potentially reversed, while automatic
+			// detection below only accepts exact zero/one values in combination
+			// with matching depth comparisons.
+			stats.reversed_clear_value = true;
+			#if defined(__linux__)
+			stats.clear_depth_evidence |= depth_detection::clear_evidence(*depth);
+			#endif
+		}
+		else
+		{
+			#if defined(__linux__)
+			std::shared_lock<std::shared_mutex> lock(s_mutex, std::defer_lock);
+			if (state.is_queue)
+				lock.lock();
+
+			state.stats_per_used_depth_stencil[depth_stencil].clear_depth_evidence |= depth_detection::clear_evidence(*depth);
+			#endif
 		}
 	}
 
@@ -880,7 +1176,13 @@ static void on_execute_secondary(command_list *cmd_list, command_list *secondary
 	{
 		target_state.current_viewport = source_state.current_viewport;
 
+		// The source did not expose a graphics depth state. Record the
+		// inherited-depth draw as unknown instead of allowing a caller's stale
+		// pipeline state to create a false convention vote.
+		const depth_pipeline_state inherited_depth_state = target_state.current_depth_state;
+		target_state.current_depth_state = {};
 		on_draw_indirect(cmd_list, indirect_command::draw, { 0 }, 0, 1, 0);
+		target_state.current_depth_state = inherited_depth_state;
 	}
 	else
 	{
@@ -955,6 +1257,104 @@ static void on_present(command_queue *, swapchain *swapchain, const rect *, cons
 	}
 }
 
+#if defined(__linux__)
+static constexpr char reversed_depth_definition[] = "RESHADE_DEPTH_INPUT_IS_REVERSED";
+
+static bool has_manual_reversed_depth_definition(effect_runtime *runtime)
+{
+	char value[32];
+	// The public getter with no effect name intentionally resolves the global
+	// and active-preset scopes. Either one is an explicit user choice and must
+	// win over automatic detection.
+	return runtime->get_preprocessor_definition(reversed_depth_definition, value);
+}
+
+// Temporary diagnostics for the unvalidated auto-detect feature; remove once
+// live behavior has been confirmed.
+static void log_reversed_depth_diagnostic(const char *reason, const generic_depth_data &data, device_api api,
+	resource selected_depth_stencil, resource_view selected_shader_resource, const depth_stencil_resource *info, uint64_t frame)
+{
+	char message[320];
+	std::snprintf(message, sizeof(message),
+		"[DEBUG-depth-auto] %s: enabled=%d api=%d depth_stencil=%p shader_resource=%p frame=%llu disabled=%d applied=%d finished=%d frames=%u consistent=%u candidate=%u clears=0x%x compares=0x%x.",
+		reason, s_auto_detect_reversed_depth, static_cast<int>(api),
+		reinterpret_cast<const void *>(selected_depth_stencil.handle), reinterpret_cast<const void *>(selected_shader_resource.handle),
+		static_cast<unsigned long long>(frame),
+		data.reversed_depth_detection_disabled, data.reversed_depth_detection_applied, data.reversed_depth_detection.finished,
+		data.reversed_depth_detection.frames, data.reversed_depth_detection.consistent_frames, data.reversed_depth_detection.candidate,
+		info != nullptr ? info->last_frame_stats.clear_depth_evidence : 0u,
+		info != nullptr ? info->last_frame_stats.depth_compare_evidence : 0u);
+	reshade::log::message(reshade::log::level::info, message);
+}
+
+static void observe_reversed_depth(effect_runtime *runtime, generic_depth_data &data, device *device,
+	resource selected_depth_stencil, const depth_stencil_resource *selected_depth_stencil_info, uint64_t frame)
+{
+	// Log roughly once per second (assuming ~60 present calls/s) so a single
+	// playtest shows progression without flooding the log.
+	if ((data.reversed_depth_detection_debug_tick++ % 60) == 0)
+		log_reversed_depth_diagnostic("tick", data, device->get_api(), selected_depth_stencil, data.selected_shader_resource, selected_depth_stencil_info, frame);
+
+	if (!s_auto_detect_reversed_depth || device->get_api() != device_api::vulkan || selected_depth_stencil == 0 || selected_depth_stencil_info == nullptr ||
+		data.reversed_depth_detection_disabled || data.reversed_depth_detection_applied ||
+		(data.reversed_depth_detection.finished && data.reversed_depth_detection_timeout_logged))
+		return;
+	if (selected_depth_stencil_info->last_used_in_frame != frame || selected_depth_stencil_info->last_frame_stats.total.drawcalls == 0)
+		return; // Do not spend the budget on a stale/manual override selection
+
+	if (has_manual_reversed_depth_definition(runtime))
+	{
+		data.reversed_depth_detection_disabled = true;
+		data.reversed_depth_detection.finished = true;
+		if (!data.reversed_depth_detection_manual_disable_logged)
+		{
+			data.reversed_depth_detection_manual_disable_logged = true;
+			reshade::log::message(reshade::log::level::info,
+				"[DEBUG-depth-auto] disabled: a manual RESHADE_DEPTH_INPUT_IS_REVERSED definition already exists.");
+		}
+		return;
+	}
+
+	const uint8_t result = data.reversed_depth_detection.observe(
+		selected_depth_stencil.handle,
+		frame,
+		selected_depth_stencil_info->last_frame_stats.clear_depth_evidence,
+		selected_depth_stencil_info->last_frame_stats.depth_compare_evidence);
+
+	if (result == depth_detection::normal || result == depth_detection::reversed)
+	{
+		// Check again immediately before the public setter. This keeps a manual
+		// definition authoritative even if another runtime changed the preset
+		// earlier in this frame.
+		if (has_manual_reversed_depth_definition(runtime))
+		{
+			data.reversed_depth_detection_disabled = true;
+			return;
+		}
+
+		const char *const value = result == depth_detection::reversed ? "1" : "0";
+		// The public setter writes a new definition to the active preset when no
+		// explicit global/preset definition exists. It updates the runtime cache
+		// and schedules the reload for the next frame; it does not hold the depth
+		// add-on mutex while doing so.
+		runtime->set_preprocessor_definition(reversed_depth_definition, value);
+		data.reversed_depth_detection_applied = true;
+		reshade::log::message(reshade::log::level::info,
+			result == depth_detection::reversed ?
+				"Generic Depth automatically selected reversed Vulkan depth convention." :
+				"Generic Depth automatically selected normal Vulkan depth convention.");
+	}
+
+	if (data.reversed_depth_detection.finished && !data.reversed_depth_detection_applied &&
+		!data.reversed_depth_detection_timeout_logged)
+	{
+		data.reversed_depth_detection_timeout_logged = true;
+		reshade::log::message(reshade::log::level::warning,
+			"Generic Depth could not determine the Vulkan depth convention within its observation budget; leaving the setting unchanged.");
+	}
+}
+#endif
+
 static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_list, resource_view, resource_view)
 {
 	device *const device = runtime->get_device();
@@ -973,6 +1373,7 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 
 	std::shared_lock<std::shared_mutex> lock(s_mutex);
 	const std::unordered_map<resource, depth_stencil_resource, resource_hash> current_depth_stencil_resources = device_data->depth_stencil_resources;
+	const uint64_t frame_index = device_data->frame_index;
 	// Unlock before calling into device below, since device may hold a lock itself and that then can deadlock another thread that calls into 'on_destroy_resource' from the device holding that lock
 	lock.unlock();
 
@@ -981,7 +1382,7 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 		if (info.last_frame_stats.total.drawcalls == 0 || (info.last_frame_stats.total.vertices <= 3 && info.last_frame_stats.total.drawcalls_indirect == 0))
 			continue; // Skip unused
 
-		if (info.last_used_in_frame < device_data->frame_index || device_data->frame_index <= (info.first_used_in_frame + 1))
+		if (info.last_used_in_frame < frame_index || frame_index <= (info.first_used_in_frame + 1))
 			continue; // Skip resources not used this frame or those that only just appeared for the first time
 
 		if (info.desc.texture.samples > 1 && !device->check_capability(device_caps::resolve_depth_stencil))
@@ -1144,6 +1545,24 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 			data.selected_shader_resource = { 0 };
 		}
 	} while (0);
+
+#if defined(__linux__)
+	// Observe only the resource that was successfully selected and exposed to
+	// this runtime. In particular, a failed view/backup creation must not
+	// consume the bounded observation budget.
+	if (data.selected_depth_stencil != 0 && data.selected_shader_resource != 0 && data.selected_depth_stencil == selected_depth_stencil)
+	{
+		observe_reversed_depth(runtime, data, device, data.selected_depth_stencil, selected_depth_stencil_info, frame_index);
+	}
+	// Temporary diagnostic for the unvalidated auto-detect feature: show why
+	// the call-site gate above is not letting observation run at all. Remove
+	// once live behavior has been confirmed.
+	else if (s_auto_detect_reversed_depth && !data.reversed_depth_detection_applied && !data.reversed_depth_detection_disabled &&
+		(data.reversed_depth_detection_debug_skip_tick++ % 60) == 0)
+	{
+		log_reversed_depth_diagnostic("skipped", data, device->get_api(), selected_depth_stencil, data.selected_shader_resource, selected_depth_stencil_info, frame_index);
+	}
+#endif
 
 	if (prev_shader_resource != data.selected_shader_resource)
 	{
@@ -1447,6 +1866,13 @@ void register_addon_depth()
 	reshade::register_event<reshade::addon_event::destroy_command_queue>(on_destroy_command_queue);
 	reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
 
+#if defined(__linux__)
+	reshade::register_event<reshade::addon_event::init_pipeline>(on_init_pipeline);
+	reshade::register_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);
+	reshade::register_event<reshade::addon_event::bind_pipeline>(on_bind_pipeline);
+	reshade::register_event<reshade::addon_event::bind_pipeline_states>(on_bind_pipeline_states);
+#endif
+
 	reshade::register_event<reshade::addon_event::create_resource>(on_create_resource);
 	reshade::register_event<reshade::addon_event::create_resource_view>(on_create_resource_view);
 	reshade::register_event<reshade::addon_event::init_resource>(on_init_resource);
@@ -1482,6 +1908,13 @@ void unregister_addon_depth()
 	reshade::unregister_event<reshade::addon_event::destroy_command_queue>(on_destroy_command_queue);
 	reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
 
+#if defined(__linux__)
+	reshade::unregister_event<reshade::addon_event::init_pipeline>(on_init_pipeline);
+	reshade::unregister_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);
+	reshade::unregister_event<reshade::addon_event::bind_pipeline>(on_bind_pipeline);
+	reshade::unregister_event<reshade::addon_event::bind_pipeline_states>(on_bind_pipeline_states);
+#endif
+
 	reshade::unregister_event<reshade::addon_event::create_resource>(on_create_resource);
 	reshade::unregister_event<reshade::addon_event::create_resource_view>(on_create_resource_view);
 	reshade::unregister_event<reshade::addon_event::init_resource>(on_init_resource);
@@ -1508,8 +1941,8 @@ void unregister_addon_depth()
 
 #ifndef BUILTIN_ADDON
 
-extern "C" __declspec(dllexport) const char *NAME = "Generic Depth";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Automatic depth buffer detection that works in the majority of games.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Generic Depth";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Automatic depth buffer detection that works in the majority of games.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {
