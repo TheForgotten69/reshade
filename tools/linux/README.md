@@ -29,6 +29,19 @@ RESHADE_ENABLE=1 /path/to/application
 
 Configurations are created under `${XDG_CONFIG_HOME:-~/.config}/reshade`; logs and add-ons live below `${XDG_DATA_HOME:-~/.local/share}/reshade`.
 
+## Shaders and add-ons
+
+The archive already installs the official standard shader collection. To add another shader pack, copy its `.fx` and `.fxh` files into the `Shaders` directory below the shader path printed by the installer, and its images into the matching `Textures` directory. With the default prefix, those are:
+
+```text
+~/.local/share/reshade/reshade-shaders/Shaders
+~/.local/share/reshade/reshade-shaders/Textures
+```
+
+New application configurations use those paths automatically. For an existing application configuration, set `EffectSearchPaths` and `TextureSearchPaths` in its `[GENERAL]` section to the corresponding `Shaders/**` and `Textures/**` paths, then reload effects in the ReShade editor.
+
+Select the portable example add-ons from the installer menu, or manually copy a native Linux `.addon` or `.addon64` module into the add-on path printed by the installer (normally `~/.local/share/reshade`). Restart the application after adding one. Windows `.addon64` binaries are not Linux modules and cannot be loaded by this build.
+
 ## Uninstall
 
 ```sh
