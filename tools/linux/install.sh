@@ -112,5 +112,8 @@ install_addon effects_during_frame 'Effects During Frame' 9
 install_addon swapchain_override 'Swapchain Override' 10
 
 printf '%s\n' \
-	"ReShade Linux Vulkan beta installed in $PREFIX." \
+	'ReShade Linux Vulkan beta installed.' \
+	"Host library: $PREFIX/lib/reshade/ReShade64.so" \
+	"Vulkan layer manifest: $PREFIX/share/vulkan/implicit_layer.d/ReShade64.json" \
+	"Shaders and native add-ons: $ADDON_DIR" \
 	'Launch a Vulkan application with: RESHADE_ENABLE=1 /path/to/application'

@@ -10,7 +10,7 @@ Extract the archive and run:
 ./install.sh
 ```
 
-The default prefix is `~/.local`; override it with `PREFIX=/custom/prefix ./install.sh`.
+The default prefix is `~/.local`; override it with `PREFIX=/custom/prefix ./install.sh`. The installer prints the full host-library, Vulkan-manifest, and shader/add-on paths when it finishes.
 The installer always installs the opt-in Vulkan layer and standard ReShade shaders. It presents one numbered add-on menu; enter the numbers to install (for example, `1,6`), `all`, or press Enter for none. Choosing an add-on installs it, which makes it load automatically when ReShade is enabled.
 
 For unattended installs, set `INSTALL_ADDONS` to `none`, `all`, or a comma-separated list such as:
@@ -42,3 +42,4 @@ This removes only the ReShade host and Vulkan layer manifest. It deliberately pr
 - Linux x86-64, Vulkan and Wayland
 - Native Linux add-ons only; Windows `.addon64` binaries are reported as incompatible and are not loaded
 - No Wine/Proton integration, OpenGL injection or gamepad navigation
+- Editor input is still experimental in non-fullscreen applications; Wayland cannot fully stop the application receiving input while the overlay is open
