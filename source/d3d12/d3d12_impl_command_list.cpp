@@ -494,7 +494,7 @@ void reshade::d3d12::command_list_impl::push_descriptors(api::shader_stage stage
 		_orig->SetGraphicsRootDescriptorTable(layout_param, base_handle_gpu);
 	}
 }
-void reshade::d3d12::command_list_impl::bind_descriptor_tables2(api::shader_stage stages, api::pipeline_layout layout, uint32_t first, uint32_t count, const api::descriptor_table *tables, uint32_t dynamic_offset_count, const uint32_t *dynamic_offsets)
+void reshade::d3d12::command_list_impl::bind_descriptor_tables2(api::shader_stage stages, api::pipeline_layout layout, uint32_t first, uint32_t count, const api::descriptor_table *tables, uint32_t, const uint32_t *)
 {
 	assert(tables != nullptr || count == 0);
 
