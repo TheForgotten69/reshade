@@ -1,0 +1,11 @@
+#pragma once
+
+#include <cstdint>
+
+alignas(uint32_t) inline constexpr unsigned char reshade_imgui_vs_spirv[] = {
+	@RESHADE_IMGUI_VS_SPIRV@
+};
+
+alignas(uint32_t) inline constexpr unsigned char reshade_imgui_ps_spirv[] = {
+	@RESHADE_IMGUI_PS_SPIRV@
+};

@@ -9,11 +9,16 @@
 #include "hook_manager.hpp"
 #endif
 #include "addon_manager.hpp"
+#include "input.hpp"
+#include "process_environment.hpp"
 #include "lockfree_linear_map.hpp"
 #include <cstring> // std::strncmp, std::strncpy
 #include <algorithm> // std::find_if
+#if defined(__linux__)
+#include <dlfcn.h>
+#endif
 
-lockfree_linear_map<VkSurfaceKHR, HWND, 16> g_vulkan_surfaces;
+lockfree_linear_map<VkSurfaceKHR, vulkan_surface, 16> g_vulkan_surfaces;
 lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
 
 struct VkLayerInstanceLink
@@ -34,6 +39,11 @@ struct VkLayerInstanceCreateInfo
 
 VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkInstance *pInstance)
 {
+#if defined(__linux__)
+	if (!reshade::process::initialize())
+		return VK_ERROR_INITIALIZATION_FAILED;
+#endif
+
 	reshade::log::message(reshade::log::level::info, "Redirecting vkCreateInstance(pCreateInfo = %p, pAllocator = %p, pInstance = %p) ...", pCreateInfo, pAllocator, pInstance);
 
 	assert(pCreateInfo != nullptr && pInstance != nullptr);
@@ -112,7 +122,9 @@ VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, co
 	// 'vkEnumerateInstanceExtensionProperties' is not included in the next 'vkGetInstanceProcAddr' from the call chain, so use global one instead
 	const auto enum_instance_extensions = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"), "vkEnumerateInstanceExtensionProperties"));
 #else
-	const auto enum_instance_extensions = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(get_instance_proc_addr(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties"));
+	// Global commands are not guaranteed to be exposed by the next layer's GIPA. Resolve this one from the loader itself.
+	void *const vulkan_loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+	const auto enum_instance_extensions = vulkan_loader != nullptr ? reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(dlsym(vulkan_loader, "vkEnumerateInstanceExtensionProperties")) : nullptr;
 #endif
 	if (enum_instance_extensions == nullptr)
 		return VK_ERROR_INITIALIZATION_FAILED;
@@ -160,6 +172,9 @@ VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, co
 		add_extension(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME, false);
 #endif
 	}
+#if defined(__linux__)
+	dlclose(vulkan_loader);
+#endif
 
 	VkInstanceCreateInfo create_info = *pCreateInfo;
 	create_info.pApplicationInfo = &app_info;
@@ -234,7 +249,25 @@ VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Su
 		return result;
 	}
 
-	g_vulkan_surfaces.emplace(*pSurface, pCreateInfo->hwnd);
+	g_vulkan_surfaces.emplace(*pSurface, vulkan_surface { pCreateInfo->hwnd, nullptr });
+
+	return VK_SUCCESS;
+}
+#endif
+#if VK_KHR_wayland_surface
+VkResult VKAPI_CALL vkCreateWaylandSurfaceKHR(VkInstance instance, const VkWaylandSurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface)
+{
+	reshade::log::message(reshade::log::level::info, "Redirecting vkCreateWaylandSurfaceKHR(instance = %p, pCreateInfo = %p, pAllocator = %p, pSurface = %p) ...", instance, pCreateInfo, pAllocator, pSurface);
+
+	RESHADE_VULKAN_GET_INSTANCE_DISPATCH_PTR(CreateWaylandSurfaceKHR, instance);
+	const VkResult result = trampoline(instance, pCreateInfo, pAllocator, pSurface);
+	if (result != VK_SUCCESS)
+	{
+		reshade::log::message(reshade::log::level::warning, "vkCreateWaylandSurfaceKHR failed with error code %d.", static_cast<int>(result));
+		return result;
+	}
+
+	g_vulkan_surfaces.emplace(*pSurface, vulkan_surface { pCreateInfo->surface, pCreateInfo->display });
 
 	return VK_SUCCESS;
 }
@@ -244,6 +277,11 @@ void     VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surfac
 {
 	reshade::log::message(reshade::log::level::info, "Redirecting vkDestroySurfaceKHR(instance = %p, surface = %p, pAllocator = %) ...", instance, surface, pAllocator);
 
+#if defined(__linux__)
+	const vulkan_surface surface_info = g_vulkan_surfaces.at(surface);
+	if (surface_info.display != nullptr)
+		reshade::input::unregister_wayland_surface(surface_info.window);
+#endif
 	g_vulkan_surfaces.erase(surface);
 
 	RESHADE_VULKAN_GET_INSTANCE_DISPATCH_PTR(DestroySurfaceKHR, instance);

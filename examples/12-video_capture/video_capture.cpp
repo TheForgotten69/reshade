@@ -5,6 +5,7 @@
 
 #include <reshade.hpp>
 #include <chrono>
+#include <cstring>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
@@ -12,7 +13,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 }
 
-struct __declspec(uuid("0d7525f9-c4e1-426e-bc99-15bbd5fd51f2")) video_capture
+struct RESHADE_API_UUID("0d7525f9-c4e1-426e-bc99-15bbd5fd51f2") video_capture
 {
 	AVCodecContext *codec_ctx = nullptr;
 	AVFormatContext *output_ctx = nullptr;
@@ -32,6 +33,9 @@ struct __declspec(uuid("0d7525f9-c4e1-426e-bc99-15bbd5fd51f2")) video_capture
 	bool init_format_ctx(const char *filename);
 	void destroy_format_ctx();
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(video_capture,
+	0xf9, 0x25, 0x75, 0x0d, 0xe1, 0xc4, 0x6e, 0x42,
+	0xbc, 0x99, 0x15, 0xbb, 0xd5, 0xfd, 0x51, 0xf2);
 
 bool video_capture::init_codec_ctx(const reshade::api::resource_desc &buffer_desc)
 {
@@ -43,9 +47,17 @@ bool video_capture::init_codec_ctx(const reshade::api::resource_desc &buffer_des
 			continue;
 
 		bool supports_rgb0 = false;
-		for (const AVPixelFormat *fmt = codec->pix_fmts; *fmt != AV_PIX_FMT_NONE; ++fmt)
-			if (*fmt == AV_PIX_FMT_0BGR32 || *fmt == AV_PIX_FMT_0RGB32)
-				supports_rgb0 = true;
+		const AVPixelFormat *pixel_formats = nullptr;
+#if defined(__linux__) && LIBAVCODEC_VERSION_MAJOR >= 61
+		if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, reinterpret_cast<const void **>(&pixel_formats), nullptr) < 0)
+			continue;
+#else
+		pixel_formats = codec->pix_fmts;
+#endif
+		if (pixel_formats != nullptr)
+			for (const AVPixelFormat *fmt = pixel_formats; *fmt != AV_PIX_FMT_NONE; ++fmt)
+				if (*fmt == AV_PIX_FMT_0BGR32 || *fmt == AV_PIX_FMT_0RGB32)
+					supports_rgb0 = true;
 
 		 if (supports_rgb0)
 			break; // Found a codec that passes requirements
@@ -364,10 +376,10 @@ static void on_reshade_finish_effects(reshade::api::effect_runtime *runtime, res
 	encode_frame(data.codec_ctx, data.output_ctx, data.frame);
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Video Capture";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that captures the screen after effects were rendered and uses FFmpeg to create a video file from that.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Video Capture";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that captures the screen after effects were rendered and uses FFmpeg to create a video file from that.";
 
-extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE reshade_module)
+extern "C" RESHADE_ADDON_EXPORT bool AddonInit(HMODULE addon_module, HMODULE reshade_module)
 {
 	if (!reshade::register_addon(addon_module, reshade_module))
 		return false;
@@ -378,7 +390,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
 
 	return true;
 }
-extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE reshade_module)
+extern "C" RESHADE_ADDON_EXPORT void AddonUninit(HMODULE addon_module, HMODULE reshade_module)
 {
 	reshade::unregister_addon(addon_module, reshade_module);
 }

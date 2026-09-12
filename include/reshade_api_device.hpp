@@ -6,9 +6,31 @@
 #pragma once
 
 #include "reshade_api_pipeline.hpp"
+#include <array>
+
+#ifdef _WIN32
+#define RESHADE_API_NOVTABLE __declspec(novtable)
+#define RESHADE_API_UUID(value) __declspec(uuid(value))
+#define RESHADE_DEFINE_PRIVATE_DATA_TYPE(type, ...)
+#elif defined(__linux__)
+#define RESHADE_API_NOVTABLE
+#define RESHADE_API_UUID(value)
+#define RESHADE_DEFINE_PRIVATE_DATA_TYPE(type, ...) \
+	template <> struct reshade::api::detail::type_guid<type> \
+	{ \
+		inline static constexpr std::array<uint8_t, 16> value = { __VA_ARGS__ }; \
+	}
+#endif
 
 namespace reshade::api
 {
+#if defined(__linux__)
+	namespace detail
+	{
+		template <typename T>
+		struct type_guid;
+	}
+#endif
 	/// <summary>
 	/// Underlying graphics API a device is using.
 	/// </summary>
@@ -261,7 +283,7 @@ namespace reshade::api
 	/// The base class for objects provided by the ReShade API.
 	/// <para>This lets you store and retrieve custom data with objects, e.g. to be able to communicate persistent information between event callbacks.</para>
 	/// </summary>
-	struct __declspec(novtable) api_object
+	struct RESHADE_API_NOVTABLE api_object
 	{
 		/// <summary>
 		/// Gets the underlying native object for this API object.
@@ -293,7 +315,11 @@ namespace reshade::api
 		T *get_private_data() const
 		{
 			uint64_t res;
+#ifdef _WIN32
 			get_private_data(reinterpret_cast<const uint8_t *>(&__uuidof(T)), &res);
+#elif defined(__linux__)
+			get_private_data(detail::type_guid<T>::value.data(), &res);
+#endif
 			return reinterpret_cast<T *>(static_cast<uintptr_t>(res));
 		}
 		/// <summary>
@@ -303,7 +329,11 @@ namespace reshade::api
 		T *create_private_data(Args &&... args)
 		{
 			uint64_t res = reinterpret_cast<uintptr_t>(new T(static_cast<Args &&>(args)...));
-			set_private_data(reinterpret_cast<const uint8_t *>(&__uuidof(T)),  res);
+#ifdef _WIN32
+			set_private_data(reinterpret_cast<const uint8_t *>(&__uuidof(T)), res);
+#elif defined(__linux__)
+			set_private_data(detail::type_guid<T>::value.data(), res);
+#endif
 			return reinterpret_cast<T *>(static_cast<uintptr_t>(res));
 		}
 		/// <summary>
@@ -313,7 +343,11 @@ namespace reshade::api
 		void destroy_private_data()
 		{
 			delete get_private_data<T>();
+#ifdef _WIN32
 			set_private_data(reinterpret_cast<const uint8_t *>(&__uuidof(T)), 0);
+#elif defined(__linux__)
+			set_private_data(detail::type_guid<T>::value.data(), 0);
+#endif
 		}
 	};
 
@@ -324,7 +358,7 @@ namespace reshade::api
 	/// <remarks>
 	/// This class is safe to use concurrently from multiple threads in D3D10+ and Vulkan.
 	/// </remarks>
-	struct __declspec(novtable) device : public api_object
+	struct RESHADE_API_NOVTABLE device : public api_object
 	{
 		/// <summary>
 		/// Gets the underlying graphics API used by this device.
@@ -656,7 +690,7 @@ namespace reshade::api
 	/// <summary>
 	/// The base class for objects that are children to a <see cref="device"/>.
 	/// </summary>
-	struct __declspec(novtable) device_object : public api_object
+	struct RESHADE_API_NOVTABLE device_object : public api_object
 	{
 		/// <summary>
 		/// Gets the parent device for this object.
@@ -685,7 +719,7 @@ namespace reshade::api
 	/// <remarks>
 	/// This class may NOT be used concurrently from multiple threads!
 	/// </remarks>
-	struct __declspec(novtable) command_list : public device_object
+	struct RESHADE_API_NOVTABLE command_list : public device_object
 	{
 		/// <summary>
 		/// Adds a barrier for the specified <paramref name="resource"/> to the command stream.
@@ -1210,7 +1244,7 @@ namespace reshade::api
 	/// <remarks>
 	/// This class may NOT be used concurrently from multiple threads!
 	/// </remarks>
-	struct __declspec(novtable) command_queue : public device_object
+	struct RESHADE_API_NOVTABLE command_queue : public device_object
 	{
 		/// <summary>
 		/// Gets the type of the command queue, which specifies what commands can be executed on it.
@@ -1332,7 +1366,7 @@ namespace reshade::api
 	/// A swap chain, used to present images to the screen.
 	/// <para>Functionally equivalent to a 'IDirect3DSwapChain9', 'IDXGISwapChain', 'HDC' or 'VkSwapchainKHR'.</para>
 	/// </summary>
-	struct __declspec(novtable) swapchain : public device_object
+	struct RESHADE_API_NOVTABLE swapchain : public device_object
 	{
 		/// <summary>
 		/// Gets the handle of the window this swap chain was created with, or <see langword="nullptr"/> if this is an offscreen swap chain.

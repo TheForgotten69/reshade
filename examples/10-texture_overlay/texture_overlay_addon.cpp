@@ -10,6 +10,7 @@
 #include <cassert>
 #include <algorithm>
 #include <filesystem>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -34,7 +35,7 @@ struct tex_hash
 	}
 };
 
-struct __declspec(uuid("0ce51b56-a973-4104-bcca-945686f50170")) device_data
+struct RESHADE_API_UUID("0ce51b56-a973-4104-bcca-945686f50170") device_data
 {
 	resource green_texture = {};
 	resource_view green_texture_srv = {};
@@ -48,10 +49,16 @@ struct __declspec(uuid("0ce51b56-a973-4104-bcca-945686f50170")) device_data
 	float scale = 1.0f;
 };
 
-struct __declspec(uuid("f326a1eb-5062-453e-9852-a787594a977a")) command_list_data
+struct RESHADE_API_UUID("f326a1eb-5062-453e-9852-a787594a977a") command_list_data
 {
 	std::unordered_set<resource_view, tex_hash> current_texture_list;
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(device_data,
+	0x56, 0x1b, 0xe5, 0x0c, 0x73, 0xa9, 0x04, 0x41,
+	0xbc, 0xca, 0x94, 0x56, 0x86, 0xf5, 0x01, 0x70);
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(command_list_data,
+	0xeb, 0xa1, 0x26, 0xf3, 0x62, 0x50, 0x3e, 0x45,
+	0x98, 0x52, 0xa7, 0x87, 0x59, 0x4a, 0x97, 0x7a);
 
 static std::mutex s_mutex;
 
@@ -416,8 +423,8 @@ static void draw_overlay(effect_runtime *runtime)
 		ImGui::NewLine(); // Reset ImGui::SameLine() so the following starts on a new line
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Texture Overlay";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that adds an overlay to inspect textures used by the application in-game and allows dumping individual ones to disk.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Texture Overlay";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that adds an overlay to inspect textures used by the application in-game and allows dumping individual ones to disk.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

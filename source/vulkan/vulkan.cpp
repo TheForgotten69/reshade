@@ -9,6 +9,7 @@
 #include "hook_manager.hpp"
 #endif
 #include "lockfree_linear_map.hpp"
+#include "process_environment.hpp"
 #include <cstring> // std::strcmp
 
 extern lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
@@ -93,6 +94,12 @@ PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *p
 	RESHADE_VULKAN_HOOK_PROC(CmdSetScissor);
 #endif
 #if RESHADE_ADDON >= 2
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthTestEnable, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthTestEnable, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthWriteEnable, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthWriteEnable, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthCompareOp, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthCompareOp, EXT);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetDepthBias);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetBlendConstants);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetStencilCompareMask);
@@ -345,6 +352,9 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 #if VK_KHR_win32_surface
 	RESHADE_VULKAN_HOOK_PROC(CreateWin32SurfaceKHR);
 #endif
+#if VK_KHR_wayland_surface
+	RESHADE_VULKAN_HOOK_PROC(CreateWaylandSurfaceKHR);
+#endif
 
 #if VK_KHR_surface
 	RESHADE_VULKAN_HOOK_PROC(DestroySurfaceKHR);
@@ -368,12 +378,17 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 	return trampoline(instance, pName);
 }
 
+#if defined(__linux__)
 enum VkNegotiateLayerStructType
 {
 	LAYER_NEGOTIATE_UNINTIALIZED = 0,
 	LAYER_NEGOTIATE_INTERFACE_STRUCT = 1,
 };
 
+constexpr uint32_t loader_layer_interface_version = 2;
+
+// ABI mirror of the Vulkan loader's 'vk_layer.h'. Keep this local to avoid making the
+// loader implementation headers a build dependency for the public Vulkan headers.
 struct VkNegotiateLayerInterface
 {
 	VkNegotiateLayerStructType sType;
@@ -384,16 +399,20 @@ struct VkNegotiateLayerInterface
 	PFN_vkGetInstanceProcAddr pfnGetPhysicalDeviceProcAddr;
 };
 
-extern "C" VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
+extern "C" __attribute__((visibility("default"))) VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
 {
 	if (pVersionStruct == nullptr ||
-		pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT)
+		pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT ||
+		pVersionStruct->loaderLayerInterfaceVersion < loader_layer_interface_version)
 		return VK_ERROR_INITIALIZATION_FAILED;
 
-	pVersionStruct->loaderLayerInterfaceVersion = 2; // Version 2 added 'vkNegotiateLoaderLayerInterfaceVersion'
+	// Version 2 added 'vkNegotiateLoaderLayerInterfaceVersion'. Do not perform process
+	// initialization until the loader ABI handshake has completed successfully.
+	pVersionStruct->loaderLayerInterfaceVersion = loader_layer_interface_version;
 	pVersionStruct->pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
 	pVersionStruct->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;
 	pVersionStruct->pfnGetPhysicalDeviceProcAddr = nullptr;
 
 	return VK_SUCCESS;
 }
+#endif

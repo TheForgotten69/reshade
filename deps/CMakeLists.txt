@@ -61,6 +61,12 @@ if(WIN32)
     PUBLIC
       VK_USE_PLATFORM_WIN32_KHR
   )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(
+    glad
+    PUBLIC
+      VK_USE_PLATFORM_WAYLAND_KHR
+  )
 endif()
 
 set(GLAD_APIS
@@ -71,6 +77,11 @@ set(GLAD_EXTENSIONS
   GL_ARB_texture_compression_bptc;GL_EXT_texture;GL_EXT_texture_compression_s3tc;GL_EXT_texture_storage;GL_EXT_memory_object;GL_EXT_semaphore
   VK_EXT_conservative_rasterization;VK_EXT_custom_border_color;VK_EXT_debug_utils;VK_EXT_descriptor_indexing;VK_EXT_extended_dynamic_state;VK_EXT_extended_dynamic_state2;VK_EXT_extended_dynamic_state3;VK_EXT_full_screen_exclusive;VK_EXT_graphics_pipeline_library;VK_EXT_host_image_copy;VK_EXT_host_query_reset;VK_EXT_index_type_uint8;VK_EXT_load_store_op_none;VK_EXT_mesh_shader;VK_EXT_multi_draw;VK_EXT_private_data;VK_EXT_swapchain_colorspace;VK_EXT_tooling_info;VK_EXT_transform_feedback;VK_KHR_acceleration_structure;VK_KHR_bind_memory2;VK_KHR_buffer_device_address;VK_KHR_copy_commands2;VK_KHR_create_renderpass2;VK_KHR_dedicated_allocation;VK_KHR_depth_stencil_resolve;VK_KHR_descriptor_update_template;VK_KHR_device_group;VK_KHR_display_swapchain;VK_KHR_draw_indirect_count;VK_KHR_dynamic_rendering;VK_KHR_external_memory_capabilities;VK_KHR_format_feature_flags2;VK_KHR_get_memory_requirements2;VK_KHR_get_physical_device_properties2;VK_KHR_image_format_list;VK_KHR_incremental_present;VK_KHR_maintenance4;VK_KHR_maintenance5;VK_KHR_maintenance9;VK_KHR_pipeline_library;VK_KHR_push_descriptor;VK_KHR_ray_tracing_maintenance1;VK_KHR_ray_tracing_pipeline;VK_KHR_surface;VK_KHR_swapchain;VK_KHR_swapchain_mutable_format;VK_KHR_synchronization2;VK_KHR_timeline_semaphore
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  list(APPEND GLAD_EXTENSIONS
+    VK_KHR_wayland_surface
+  )
+endif()
 set(GLAD_GENERATED_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/glad/target/src/gl.c
   ${CMAKE_CURRENT_SOURCE_DIR}/glad/target/src/vulkan.c
@@ -98,15 +109,22 @@ endif()
 string(REPLACE ";" "," GLAD_APIS "${GLAD_APIS}")
 string(REPLACE ";" "," GLAD_EXTENSIONS "${GLAD_EXTENSIONS}")
 file(GLOB GLAD_SPECIFICATIONS "khronos/*.xml")
+if(WIN32)
+  set(GLAD_PYTHON_EXECUTABLE python)
+  set(GLAD_DEPENDENCY_COMMAND COMMAND pip install -r requirements.txt)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  set(GLAD_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
+  set(GLAD_DEPENDENCY_COMMAND)
+endif()
 add_custom_command(
   OUTPUT
     ${GLAD_GENERATED_FILES}
+  ${GLAD_DEPENDENCY_COMMAND}
   COMMAND
-    pip install -r requirements.txt
-  COMMAND 
     ${CMAKE_COMMAND} -E copy ${GLAD_SPECIFICATIONS} ./
   COMMAND
-    python -m glad --out-path ./target --api ${GLAD_APIS} --extensions ${GLAD_EXTENSIONS} c --mx
+    ${GLAD_PYTHON_EXECUTABLE} -m glad --out-path ./target --api ${GLAD_APIS} --extensions ${GLAD_EXTENSIONS} c --mx
   COMMAND
     ${CMAKE_COMMAND} -E remove gl.xml vk.xml wgl.xml
   WORKING_DIRECTORY
@@ -154,7 +172,6 @@ target_compile_definitions(
     "$<$<CONFIG:Release>:IMGUI_DISABLE_DEBUG_TOOLS>"
     "$<$<CONFIG:Release>:IMGUI_DEBUG_PRINTF=((void)0)>"
 )
-
 # jxl
 
 add_library(jxl STATIC)

@@ -20,6 +20,9 @@ using namespace reshade::api;
 
 static std::filesystem::path make_texture_file_path(uint32_t texture_hash)
 {
+#if defined(__linux__)
+	return reshade_addon_utils::make_dump_path(RESHADE_ADDON_TEXTURE_SAVE_DIR, texture_hash, L"" RESHADE_ADDON_TEXTURE_SAVE_FORMAT);
+#elif defined(_WIN32)
 	// Prepend executable directory to image files
 	wchar_t file_prefix[MAX_PATH] = L"";
 	GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
@@ -39,6 +42,7 @@ static std::filesystem::path make_texture_file_path(uint32_t texture_hash)
 	path += RESHADE_ADDON_TEXTURE_SAVE_FORMAT;
 
 	return path;
+#endif
 }
 
 static void unpack_r5g6b5(uint16_t data, uint8_t rgb[3])
@@ -428,11 +432,24 @@ bool save_texture_image(const resource_desc &desc, const subresource_data &data)
 	}
 
 	const std::filesystem::path file_path = make_texture_file_path(hash);
-
-	if (file_path.extension() == L".bmp")
-		return stbi_write_bmp(file_path.u8string().c_str(), desc.texture.width, desc.texture.height, 4, rgba_pixel_data.data()) != 0;
-	else if (file_path.extension() == L".png")
-		return stbi_write_png(file_path.u8string().c_str(), desc.texture.width, desc.texture.height, 4, rgba_pixel_data.data(), desc.texture.width * 4) != 0;
-	else
+	if (file_path.empty())
 		return false;
+
+	#if defined(__linux__)
+	try
+	{
+	#endif
+		if (file_path.extension() == L".bmp")
+			return stbi_write_bmp(file_path.u8string().c_str(), desc.texture.width, desc.texture.height, 4, rgba_pixel_data.data()) != 0;
+		else if (file_path.extension() == L".png")
+			return stbi_write_png(file_path.u8string().c_str(), desc.texture.width, desc.texture.height, 4, rgba_pixel_data.data(), desc.texture.width * 4) != 0;
+		else
+			return false;
+	#if defined(__linux__)
+	}
+	catch (...)
+	{
+		return false;
+	}
+	#endif
 }

@@ -7,12 +7,13 @@
 
 #include "reshade_api_device.hpp"
 #include <cassert>
+#include <cstring>
 #include <unordered_map>
 
 namespace reshade::api
 {
 	template <typename T, typename... api_object_base>
-	class __declspec(novtable) api_object_impl : public api_object_base...
+	class RESHADE_API_NOVTABLE api_object_impl : public api_object_base...
 	{
 		static_assert(sizeof(T) <= sizeof(uint64_t));
 
@@ -48,6 +49,15 @@ namespace reshade::api
 #endif
 		};
 
+		static guid_t make_guid(const uint8_t guid[16])
+		{
+			// Public API GUIDs are byte arrays and do not promise 'guid_t' alignment.
+			// Copying avoids an unaligned load on Linux while preserving the existing key layout.
+			guid_t result;
+			std::memcpy(&result, guid, sizeof(result));
+			return result;
+		}
+
 	public:
 		api_object_impl(const api_object_impl &) = delete;
 		api_object_impl &operator=(const api_object_impl &) = delete;
@@ -62,7 +72,7 @@ namespace reshade::api
 				return;
 			}
 
-			if (const auto it = _private_data.find(*reinterpret_cast<const guid_t *>(guid));
+			if (const auto it = _private_data.find(make_guid(guid));
 				it != _private_data.end())
 				*data = it->second;
 			else
@@ -71,9 +81,9 @@ namespace reshade::api
 		void set_private_data(const uint8_t guid[16], const uint64_t data)  final
 		{
 			if (data != 0)
-				_private_data[*reinterpret_cast<const guid_t *>(guid)] = data;
+				_private_data[make_guid(guid)] = data;
 			else
-				_private_data.erase(*reinterpret_cast<const guid_t *>(guid));
+				_private_data.erase(make_guid(guid));
 		}
 
 		uint64_t get_native() const final { return (uint64_t)_orig; }
