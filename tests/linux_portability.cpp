@@ -1,5 +1,12 @@
-// Exercise the real Wayland callbacks without a compositor or a Vulkan device.
-#include "../source/linux/input_linux.cpp"
+// Exercise the real Wayland/X11 backend logic linked from the production translation units below
+// (see CMakeLists), without a compositor or a Vulkan device. Deliberately does not '#include' any
+// production '.cpp' - only the headers that declare the types and free functions under test - so
+// this stays a real link-time test of the shipped object code rather than a second copy of it.
+#include "../source/linux/wayland_input.hpp"
+#include "../source/linux/x11_input.hpp"
+#include "../source/linux/window_registry.hpp"
+#include "../source/linux/key_translation.hpp"
+#include "../source/linux/clipboard.hpp"
 #include "../source/linux/paths.hpp"
 #include "../source/linux/addon_paths.hpp"
 #include "../examples/09-depth/generic_depth_detection.hpp"
@@ -9,6 +16,8 @@
 #include <iostream>
 #include <limits>
 #include <sys/wait.h>
+
+using namespace reshade;
 
 #if !VK_KHR_wayland_surface || !VK_KHR_xcb_surface || !VK_KHR_xlib_surface
 #error "Linux builds must expose Wayland, XCB and Xlib Vulkan WSI entry points"
@@ -107,6 +116,45 @@ static void test_scroll()
 	pointer_version = 4;
 	callbacks::pointer_axis(&context, nullptr, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(10));
 	assert(input.mouse_wheel_delta() == -1);
+}
+
+static void test_key_translation()
+{
+	assert(virtual_key_from_keysym(XKB_KEY_a) == 'A');
+	assert(virtual_key_from_keysym(XKB_KEY_Z) == 'Z');
+	assert(virtual_key_from_keysym(XKB_KEY_5) == '5');
+	assert(virtual_key_from_keysym(XKB_KEY_F5) == input::key_f5);
+	assert(virtual_key_from_keysym(XKB_KEY_Control_L) == input::key_left_ctrl);
+	assert(virtual_key_from_keysym(XKB_KEY_Shift_R) == input::key_right_shift);
+	assert(virtual_key_from_keysym(XKB_KEY_Return) == input::key_return);
+	assert(virtual_key_from_keysym(XKB_KEY_KP_Home) == input::key_home);
+	assert(virtual_key_from_keysym(XKB_KEY_VoidSymbol) == 0);
+	assert(x11_input_context::keysym_to_utf32('a') == 'a');
+	assert(x11_input_context::keysym_to_utf32(0x010020acu) == 0x20ac);
+	assert(x11_input_context::keysym_to_utf32(XKB_KEY_Home) == 0);
+}
+
+// Regression test for the fractional-scale pointer desync (surface-local logical pointer
+// coordinates were passed straight through as if they were already physical framebuffer pixels):
+// 'to_framebuffer_pointer_position' must scale by the known output ratio, clamp to the
+// framebuffer extent, and fall back to passing coordinates through unscaled when no reliable
+// ratio is known rather than guessing one.
+static void test_pointer_coordinate_scaling()
+{
+	wayland_input_context context;
+
+	// Verified against a live KWin session: a client that never opts into a Wayland buffer scale
+	// (true of most Vulkan applications, e.g. vkcube) has a 1:1 logical/pixel surface, so
+	// coordinates must pass through unscaled regardless of 'output_scale' - multiplying by it
+	// previously clamped the cursor short of the real window edge on exactly this common case.
+	context.output_scale = 0.0;
+	assert(context.to_framebuffer_pointer_position(960.0, 1920) == 960.0);
+	context.output_scale = 1.5;
+	assert(context.to_framebuffer_pointer_position(960.0, 2880) == 960.0);
+
+	// Still clamped to the framebuffer extent.
+	assert(context.to_framebuffer_pointer_position(3000.0, 1920) == 1920.0);
+	assert(context.to_framebuffer_pointer_position(-10.0, 1920) == 0.0);
 }
 
 static void test_input_lifetime_follows_native_surface()
@@ -224,8 +272,10 @@ int main()
 	test_depth_detection();
 	test_clipboard();
 	test_scroll();
+	test_key_translation();
+	test_pointer_coordinate_scaling();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();
 	test_paths();
-	std::cout << "Depth detection, clipboard, scroll and add-on path tests passed.\n";
+	std::cout << "Depth detection, clipboard, scroll, key translation, pointer scaling and add-on path tests passed.\n";
 }

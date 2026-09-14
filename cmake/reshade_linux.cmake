@@ -36,9 +36,9 @@ file(WRITE "${RESHADE_GENERATED_INCLUDE_DIR}/version.h"
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
-pkg_check_modules(XKBCOMMON_X11 REQUIRED IMPORTED_TARGET xkbcommon-x11)
 pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
 pkg_check_modules(XCB_XINPUT REQUIRED IMPORTED_TARGET xcb-xinput)
+pkg_check_modules(XCB_XFIXES REQUIRED IMPORTED_TARGET xcb-xfixes)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -164,6 +164,8 @@ function(reshade_configure_linux_target target)
       source/imgui_widgets.cpp
       source/dll_log.cpp
       source/linux/input_linux.cpp
+      source/linux/key_translation.cpp
+      source/linux/window_registry.cpp
       source/linux/platform_utils.cpp
       source/linux/process_environment.cpp
       source/linux/runtime_platform.cpp
@@ -190,7 +192,7 @@ function(reshade_configure_linux_target target)
     ${target}
     PRIVATE
       ReShadeFX fpng glad ImGui jxl stb utfcpp VMA Threads::Threads ${CMAKE_DL_LIBS}
-      PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XKBCOMMON_X11 PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::FONTCONFIG
+      PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::FONTCONFIG
   )
   target_link_options(${target} PRIVATE -Wl,--no-undefined)
 
@@ -206,13 +208,15 @@ option(RESHADE_BUILD_LINUX_TESTS "Build Linux portability regression tests" OFF)
 if(RESHADE_BUILD_LINUX_TESTS)
   enable_testing()
   add_executable(reshade_linux_tests tests/linux_portability.cpp source/input.cpp
+    source/linux/input_linux.cpp source/linux/key_translation.cpp source/linux/window_registry.cpp
     ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER} ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
     ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER} ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
     ${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER} ${RESHADE_WAYLAND_CURSOR_SHAPE_SOURCE}
     ${RESHADE_WAYLAND_TABLET_SOURCE})
   target_include_directories(reshade_linux_tests PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
+  set_source_files_properties(source/linux/input_linux.cpp tests/linux_portability.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER};${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER};${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER}")
   target_compile_options(reshade_linux_tests PRIVATE -UNDEBUG $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
-  target_link_libraries(reshade_linux_tests PRIVATE glad Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XKBCOMMON_X11 PkgConfig::XCB PkgConfig::XCB_XINPUT)
+  target_link_libraries(reshade_linux_tests PRIVATE glad Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES)
   add_test(NAME linux_portability COMMAND reshade_linux_tests)
   set_tests_properties(linux_portability PROPERTIES TIMEOUT 15)
 endif()
