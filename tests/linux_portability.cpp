@@ -3,11 +3,16 @@
 #include "../source/linux/paths.hpp"
 #include "../source/linux/addon_paths.hpp"
 #include "../examples/09-depth/generic_depth_detection.hpp"
+#include <glad/vulkan.h>
 #include <cassert>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <sys/wait.h>
+
+#if !VK_KHR_wayland_surface || !VK_KHR_xcb_surface || !VK_KHR_xlib_surface
+#error "Linux builds must expose Wayland, XCB and Xlib Vulkan WSI entry points"
+#endif
 
 static uint32_t pointer_version = 5;
 extern "C" uint32_t wl_proxy_get_version(wl_proxy *)
@@ -22,6 +27,17 @@ void reshade::log::message(level, const char *, ...)
 static void test_clipboard()
 {
 	reshade::wayland_input_context context;
+	auto *const text_offer = reinterpret_cast<wl_data_offer *>(static_cast<uintptr_t>(0x100));
+	auto *const image_offer = reinterpret_cast<wl_data_offer *>(static_cast<uintptr_t>(0x200));
+	context.data_offers.try_emplace(text_offer);
+	context.data_offers.try_emplace(image_offer);
+	reshade::wayland_input_context::data_offer_offer(&context, text_offer, "text/plain;charset=utf-8");
+	reshade::wayland_input_context::data_offer_offer(&context, image_offer, "image/png");
+	assert(context.data_offers.at(text_offer).has_text);
+	assert(context.data_offers.at(text_offer).mime_type == "text/plain;charset=utf-8");
+	assert(!context.data_offers.at(image_offer).has_text);
+	context.data_offers.clear();
+
 	context.clipboard_text = "ReShade clipboard";
 	context.clipboard_source = reinterpret_cast<wl_data_source *>(&context);
 	assert(context.get_clipboard_text() == context.clipboard_text);
@@ -91,6 +107,33 @@ static void test_scroll()
 	pointer_version = 4;
 	callbacks::pointer_axis(&context, nullptr, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(10));
 	assert(input.mouse_wheel_delta() == -1);
+}
+
+static void test_input_lifetime_follows_native_surface()
+{
+	const reshade::input::window_handle window = reinterpret_cast<void *>(static_cast<uintptr_t>(0x1234));
+	auto instance = std::make_shared<reshade::input>(window);
+	const std::weak_ptr<reshade::input> observer = instance;
+
+	{
+		std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
+		s_x11_windows[window].input_instance = instance;
+	}
+	instance.reset();
+	assert(!observer.expired());
+
+	reshade::input::unregister_x11_window(window);
+	assert(observer.expired());
+}
+
+static void test_primary_input_handler_claim_transfers()
+{
+	reshade::input input(nullptr);
+	assert(input.try_acquire_primary_handler());
+	assert(!input.try_acquire_primary_handler());
+	input.release_primary_handler();
+	assert(input.try_acquire_primary_handler());
+	input.release_primary_handler();
 }
 
 static void test_paths()
@@ -181,6 +224,8 @@ int main()
 	test_depth_detection();
 	test_clipboard();
 	test_scroll();
+	test_input_lifetime_follows_native_surface();
+	test_primary_input_handler_claim_transfers();
 	test_paths();
 	std::cout << "Depth detection, clipboard, scroll and add-on path tests passed.\n";
 }

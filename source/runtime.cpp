@@ -566,7 +566,8 @@ bool reshade::runtime::on_init()
 		else
 			_input.reset();
 
-		_primary_input_handler = _input.use_count() == 1 || (_input == nullptr && _input_gamepad != nullptr);
+		_primary_input_handler = _input != nullptr ? _input->try_acquire_primary_handler() : _input_gamepad != nullptr;
+		log::message(log::level::info, "[DEBUG-input] Runtime %p attached input=%p primary=%d shared_owners=%ld.", this, _input.get(), _primary_input_handler, _input != nullptr ? static_cast<long>(_input.use_count()) : 0L);
 	}
 
 	// Reset frame count to zero so effects are loaded in 'update_effects'
@@ -694,6 +695,11 @@ void reshade::runtime::on_reset()
 #endif
 
 	log::message(log::level::info, "Destroyed runtime environment on runtime %p ('%s').", this, _config_path.u8string().c_str());
+
+	if (_primary_input_handler && _input != nullptr)
+		_input->release_primary_handler();
+	_primary_input_handler = false;
+	_input.reset();
 }
 void reshade::runtime::on_present()
 {
@@ -946,8 +952,17 @@ void reshade::runtime::on_present()
 	_effects_rendered_this_frame = false;
 
 	// Update input status
+	if (!_primary_input_handler && _input != nullptr && _input->try_acquire_primary_handler())
+	{
+		_primary_input_handler = true;
+		log::message(log::level::info, "[DEBUG-input] Runtime %p acquired primary input during present.", this);
+	}
 	if (_primary_input_handler && _input != nullptr)
+	{
 		_input->next_frame();
+		if (_input->last_key_pressed() != 0 || _input->last_key_released() != 0)
+			log::message(log::level::info, "[DEBUG-xi-crash] Runtime %p input poll returned with a key transition.", this);
+	}
 	if (_primary_input_handler && _input_gamepad != nullptr)
 		_input_gamepad->next_frame();
 

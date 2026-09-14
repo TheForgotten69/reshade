@@ -11,6 +11,16 @@ reshade::input::input(window_handle window)
 {
 }
 
+bool reshade::input::try_acquire_primary_handler()
+{
+	bool expected = false;
+	return _primary_handler_claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
+}
+void reshade::input::release_primary_handler()
+{
+	_primary_handler_claimed.store(false, std::memory_order_release);
+}
+
 bool reshade::input::is_key_down(unsigned int keycode) const
 {
 	assert(keycode < std::size(_keys));

@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <iterator>
@@ -17,9 +19,13 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <wayland-client.h>
+#include <xcb/xcb.h>
+#include <xcb/xinput.h>
 #include <xkbcommon/xkbcommon.h>
+#include <xkbcommon/xkbcommon-x11.h>
 #include "xdg-output-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
+#include "cursor-shape-v1-client-protocol.h"
 
 namespace
 {
@@ -34,9 +40,18 @@ namespace
 		wl_display *display;
 		unsigned int width;
 		unsigned int height;
-		std::weak_ptr<reshade::input> input_instance;
+		std::shared_ptr<reshade::input> input_instance;
 	};
 	std::unordered_map<void *, wayland_surface_info> s_wayland_surfaces;
+
+	std::mutex s_x11_windows_mutex;
+	struct x11_window_info
+	{
+		unsigned int width;
+		unsigned int height;
+		std::shared_ptr<reshade::input> input_instance;
+	};
+	std::unordered_map<void *, x11_window_info> s_x11_windows;
 
 	unsigned int virtual_key_from_keysym(xkb_keysym_t keysym)
 	{
@@ -172,6 +187,11 @@ struct reshade::wayland_input_context
 	uint32_t seat_global_name = 0;
 	wl_keyboard *keyboard = nullptr;
 	wl_pointer *pointer = nullptr;
+	wp_cursor_shape_manager_v1 *cursor_shape_manager = nullptr;
+	uint32_t cursor_shape_manager_global_name = 0;
+	wp_cursor_shape_device_v1 *cursor_shape_device = nullptr;
+	uint32_t pointer_serial = 0;
+	bool native_cursor_hidden = false;
 	zwp_relative_pointer_manager_v1 *relative_pointer_manager = nullptr;
 	zwp_relative_pointer_v1 *relative_pointer = nullptr;
 	xkb_context *xkb_context = nullptr;
@@ -201,12 +221,14 @@ struct reshade::wayland_input_context
 	// The selection source when this instance itself set the clipboard text.
 	wl_data_source *clipboard_source = nullptr;
 	std::string clipboard_text;
-	// The offer most recently announced by the compositor, and whether it exposes a plain text
-	// MIME type, tracked separately until it is confirmed as the active selection (see comment
-	// on 'data_device_data_offer').
-	wl_data_offer *pending_offer = nullptr;
-	bool pending_offer_has_text = false;
-	std::string pending_offer_mime_type;
+	struct data_offer_info
+	{
+		bool has_text = false;
+		std::string mime_type;
+	};
+	// A compositor may announce multiple selection and drag-and-drop offers before identifying
+	// their role. Keep every server-created proxy alive and tracked until it is selected or discarded.
+	std::unordered_map<wl_data_offer *, data_offer_info> data_offers;
 	// The offer backing the current clipboard contents, once confirmed via 'data_device_selection'.
 	wl_data_offer *clipboard_offer = nullptr;
 	bool clipboard_offer_has_text = false;
@@ -214,12 +236,15 @@ struct reshade::wayland_input_context
 
 	~wayland_input_context()
 	{
+		// Server-created proxies (notably wl_data_offer) are attached while messages are
+		// demarshaled, before their listener callback runs. Dispatch callbacks already queued
+		// for this context so every such proxy is accounted for before destroying the queue.
+		if (display != nullptr && queue != nullptr)
+			wl_display_dispatch_queue_pending(display, queue);
 		if (clipboard_source != nullptr)
 			wl_data_source_destroy(clipboard_source);
-		if (clipboard_offer != nullptr)
-			wl_data_offer_destroy(clipboard_offer);
-		if (pending_offer != nullptr && pending_offer != clipboard_offer)
-			wl_data_offer_destroy(pending_offer);
+		for (const auto &[offer, info] : data_offers)
+			wl_data_offer_destroy(offer);
 		if (data_device != nullptr)
 			wl_data_device_destroy(data_device);
 		if (data_device_manager != nullptr)
@@ -237,6 +262,10 @@ struct reshade::wayland_input_context
 			zwp_relative_pointer_v1_destroy(relative_pointer);
 		if (relative_pointer_manager != nullptr)
 			zwp_relative_pointer_manager_v1_destroy(relative_pointer_manager);
+		if (cursor_shape_device != nullptr)
+			wp_cursor_shape_device_v1_destroy(cursor_shape_device);
+		if (cursor_shape_manager != nullptr)
+			wp_cursor_shape_manager_v1_destroy(cursor_shape_manager);
 		if (pointer != nullptr)
 			wl_pointer_destroy(pointer);
 		if (keyboard != nullptr)
@@ -310,9 +339,8 @@ struct reshade::wayland_input_context
 		return result;
 	}
 
-	// Determines the output scale from 'xdg-output' geometry when every connected output agrees
-	// on it; otherwise leaves 'output_scale' at 0 so 'observed_max' is used instead, since there
-	// is no way to know which specific output a foreign surface is currently shown on.
+	// Kept for diagnostics only. Pointer coordinates are surface-local logical coordinates, and a
+	// compositor-wide output scale cannot safely convert them for a foreign Vulkan surface.
 	void compute_output_scale()
 	{
 		output_scale = 0.0;
@@ -346,6 +374,23 @@ struct reshade::wayland_input_context
 		for (const unsigned int key : keys)
 			if ((owner->_keys[key] & 0x80) != 0)
 				owner->_keys[key] = 0x08;
+	}
+	bool accepts_focus(wl_surface *focused_surface, const char *device)
+	{
+		const bool exact_match = focused_surface == surface;
+		bool single_surface_fallback = false;
+		if (!exact_match)
+		{
+			std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
+			unsigned int surface_count = 0;
+			for (const auto &[registered_surface, info] : s_wayland_surfaces)
+				if (info.display == display && ++surface_count > 1)
+					break;
+			single_surface_fallback = surface_count == 1;
+		}
+
+		reshade::log::message(reshade::log::level::info, "Wayland %s enter: focused_surface=%p vulkan_surface=%p exact_match=%d%s.", device, focused_surface, surface, exact_match, single_surface_fallback ? " fallback=single-surface" : "");
+		return exact_match || single_surface_fallback;
 	}
 
 	void set_key(uint32_t key, uint32_t key_state)
@@ -417,6 +462,17 @@ struct reshade::wayland_input_context
 				zwp_relative_pointer_v1_add_listener(context->relative_pointer, &relative_listener, context);
 			}
 		}
+		else if (std::strcmp(interface, wp_cursor_shape_manager_v1_interface.name) == 0 && context->cursor_shape_manager == nullptr)
+		{
+			context->cursor_shape_manager = static_cast<wp_cursor_shape_manager_v1 *>(wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, std::min(version, 1u)));
+			context->cursor_shape_manager_global_name = name;
+			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->cursor_shape_manager), context->queue);
+			if (context->pointer != nullptr)
+			{
+				context->cursor_shape_device = wp_cursor_shape_manager_v1_get_pointer(context->cursor_shape_manager, context->pointer);
+				wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->cursor_shape_device), context->queue);
+			}
+		}
 	}
 	static void registry_global_remove(void *data, wl_registry *, uint32_t name)
 	{
@@ -432,6 +488,11 @@ struct reshade::wayland_input_context
 			}
 			if (context->pointer != nullptr)
 			{
+				if (context->cursor_shape_device != nullptr)
+				{
+					wp_cursor_shape_device_v1_destroy(context->cursor_shape_device);
+					context->cursor_shape_device = nullptr;
+				}
 				wl_pointer_destroy(context->pointer);
 				context->pointer = nullptr;
 			}
@@ -447,6 +508,18 @@ struct reshade::wayland_input_context
 			}
 			context->keyboard_focused = context->pointer_focused = false;
 			context->seat_global_name = 0;
+		}
+		if (context->cursor_shape_manager_global_name == name)
+		{
+			if (context->cursor_shape_device != nullptr)
+			{
+				wp_cursor_shape_device_v1_destroy(context->cursor_shape_device);
+				context->cursor_shape_device = nullptr;
+			}
+			wp_cursor_shape_manager_v1_destroy(context->cursor_shape_manager);
+			context->cursor_shape_manager = nullptr;
+			context->cursor_shape_manager_global_name = 0;
+			context->native_cursor_hidden = false;
 		}
 		if (context->xdg_output_manager_global_name == name)
 		{
@@ -501,6 +574,11 @@ struct reshade::wayland_input_context
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->pointer), context->queue);
 			static const wl_pointer_listener listener = {pointer_enter, pointer_leave, pointer_motion, pointer_button, pointer_axis, pointer_frame, pointer_axis_source, pointer_axis_stop, pointer_axis_discrete};
 			wl_pointer_add_listener(context->pointer, &listener, context);
+			if (context->cursor_shape_manager != nullptr)
+			{
+				context->cursor_shape_device = wp_cursor_shape_manager_v1_get_pointer(context->cursor_shape_manager, context->pointer);
+				wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->cursor_shape_device), context->queue);
+			}
 			if (context->relative_pointer_manager != nullptr)
 			{
 				context->relative_pointer = zwp_relative_pointer_manager_v1_get_relative_pointer(context->relative_pointer_manager, context->pointer);
@@ -516,6 +594,11 @@ struct reshade::wayland_input_context
 			{
 				zwp_relative_pointer_v1_destroy(context->relative_pointer);
 				context->relative_pointer = nullptr;
+			}
+			if (context->cursor_shape_device != nullptr)
+			{
+				wp_cursor_shape_device_v1_destroy(context->cursor_shape_device);
+				context->cursor_shape_device = nullptr;
 			}
 			wl_pointer_destroy(context->pointer);
 			context->pointer = nullptr;
@@ -557,11 +640,19 @@ struct reshade::wayland_input_context
 		wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(offer), context->queue);
 		static const wl_data_offer_listener listener = {data_offer_offer, data_offer_source_actions, data_offer_action};
 		wl_data_offer_add_listener(offer, &listener, context);
-		context->pending_offer = offer;
-		context->pending_offer_has_text = false;
-		context->pending_offer_mime_type.clear();
+		context->data_offers.try_emplace(offer);
 	}
-	static void data_device_enter(void *, wl_data_device *, uint32_t, wl_surface *, wl_fixed_t, wl_fixed_t, wl_data_offer *) {}
+	static void data_device_enter(void *data, wl_data_device *, uint32_t, wl_surface *, wl_fixed_t, wl_fixed_t, wl_data_offer *offer)
+	{
+		// Drag-and-drop is not implemented, so release its offer as soon as the compositor
+		// identifies it. Selection offers are retained by 'data_device_selection' instead.
+		auto *context = static_cast<wayland_input_context *>(data);
+		if (offer != nullptr && offer != context->clipboard_offer)
+		{
+			context->data_offers.erase(offer);
+			wl_data_offer_destroy(offer);
+		}
+	}
 	static void data_device_leave(void *, wl_data_device *) {}
 	static void data_device_motion(void *, wl_data_device *, uint32_t, wl_fixed_t, wl_fixed_t) {}
 	static void data_device_drop(void *, wl_data_device *) {}
@@ -569,22 +660,26 @@ struct reshade::wayland_input_context
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
 		if (context->clipboard_offer != nullptr && context->clipboard_offer != offer)
+		{
+			context->data_offers.erase(context->clipboard_offer);
 			wl_data_offer_destroy(context->clipboard_offer);
+		}
 		context->clipboard_offer = offer;
-		context->clipboard_offer_has_text = offer != nullptr && offer == context->pending_offer && context->pending_offer_has_text;
-		context->clipboard_offer_mime_type = context->clipboard_offer_has_text ? std::move(context->pending_offer_mime_type) : std::string();
-		context->pending_offer = nullptr;
+		const auto it = context->data_offers.find(offer);
+		context->clipboard_offer_has_text = it != context->data_offers.end() && it->second.has_text;
+		context->clipboard_offer_mime_type = context->clipboard_offer_has_text ? it->second.mime_type : std::string();
 	}
 	static void data_offer_offer(void *data, wl_data_offer *offer, const char *mime_type)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
-		if (offer != context->pending_offer)
+		const auto it = context->data_offers.find(offer);
+		if (it == context->data_offers.end())
 			return;
 		if (std::strcmp(mime_type, "text/plain;charset=utf-8") == 0 || std::strcmp(mime_type, "text/plain") == 0 || std::strcmp(mime_type, "UTF8_STRING") == 0)
 		{
-			context->pending_offer_has_text = true;
-			if (context->pending_offer_mime_type.empty() || std::strcmp(mime_type, "text/plain;charset=utf-8") == 0)
-				context->pending_offer_mime_type = mime_type;
+			it->second.has_text = true;
+			if (it->second.mime_type.empty() || std::strcmp(mime_type, "text/plain;charset=utf-8") == 0)
+				it->second.mime_type = mime_type;
 		}
 	}
 	static void data_offer_source_actions(void *, wl_data_offer *, uint32_t) {}
@@ -653,17 +748,21 @@ struct reshade::wayland_input_context
 	static void keyboard_enter(void *data, wl_keyboard *, uint32_t, wl_surface *surface, wl_array *)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
-		context->keyboard_focused = surface == context->surface;
+		context->keyboard_focused = context->accepts_focus(surface, "keyboard");
 	}
 	static void keyboard_leave(void *data, wl_keyboard *, uint32_t, wl_surface *)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
+		reshade::log::message(reshade::log::level::info, "[DEBUG-input] Wayland keyboard leave surface=%p block_keyboard=%d.", context->surface, context->owner->_block_keyboard);
 		context->clear_keyboard_state();
 		context->keyboard_focused = false;
 	}
 	static void keyboard_key(void *data, wl_keyboard *, uint32_t serial, uint32_t, uint32_t key, uint32_t state)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
+		const xkb_keycode_t xkb_key = key + 8;
+		const xkb_keysym_t keysym = context->state != nullptr ? xkb_state_key_get_one_sym(context->state, xkb_key) : XKB_KEY_NoSymbol;
+		reshade::log::message(reshade::log::level::info, "[DEBUG-input] Wayland key raw=%u keysym=%#x vk=%u state=%s focused=%d block_keyboard=%d surface=%p serial=%u.", key, keysym, virtual_key_from_keysym(keysym), state == WL_KEYBOARD_KEY_STATE_PRESSED ? "pressed" : "released", context->keyboard_focused, context->owner->_block_keyboard, context->surface, serial);
 		if (context->keyboard_focused)
 		{
 			context->last_serial = serial;
@@ -682,16 +781,8 @@ struct reshade::wayland_input_context
 	static void keyboard_repeat_info(void *, wl_keyboard *, int32_t, int32_t) {}
 	void max_pointer_position(unsigned int position[2]) const
 	{
-		if (output_scale > 0.0)
-		{
-			position[0] = std::max(1u, static_cast<unsigned int>(width / output_scale));
-			position[1] = std::max(1u, static_cast<unsigned int>(height / output_scale));
-		}
-		else
-		{
-			position[0] = width;
-			position[1] = height;
-		}
+		position[0] = std::max(1u, width);
+		position[1] = std::max(1u, height);
 	}
 	void set_absolute_pointer_position(wl_fixed_t x, wl_fixed_t y)
 	{
@@ -701,17 +792,34 @@ struct reshade::wayland_input_context
 		owner->_mouse_position[0] = px;
 		owner->_mouse_position[1] = py;
 	}
-	static void pointer_enter(void *data, wl_pointer *, uint32_t, wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
+	void set_native_cursor_hidden(bool hidden)
+	{
+		if (!pointer_focused || pointer == nullptr || cursor_shape_device == nullptr || pointer_serial == 0 || native_cursor_hidden == hidden)
+			return;
+		reshade::log::message(reshade::log::level::info, "[DEBUG-input] Wayland native cursor hidden=%d surface=%p serial=%u.", hidden, surface, pointer_serial);
+		if (hidden)
+			wl_pointer_set_cursor(pointer, pointer_serial, nullptr, 0, 0);
+		else
+			wp_cursor_shape_device_v1_set_shape(cursor_shape_device, pointer_serial, WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
+		native_cursor_hidden = hidden;
+		wl_display_flush(display);
+	}
+	static void pointer_enter(void *data, wl_pointer *, uint32_t serial, wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
-		context->pointer_focused = surface == context->surface;
+		context->pointer_serial = serial;
+		context->pointer_focused = context->accepts_focus(surface, "pointer");
 		context->set_absolute_pointer_position(x, y);
+		context->set_native_cursor_hidden(context->owner->_block_cursor_warping);
 	}
 	static void pointer_leave(void *data, wl_pointer *, uint32_t, wl_surface *)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
+		reshade::log::message(reshade::log::level::info, "[DEBUG-input] Wayland pointer leave surface=%p block_mouse=%d cursor_block=%d.", context->surface, context->owner->_block_mouse, context->owner->_block_cursor_warping);
 		context->clear_pointer_state();
 		context->pointer_focused = false;
+		context->pointer_serial = 0;
+		context->native_cursor_hidden = false;
 	}
 	static void pointer_motion(void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y)
 	{
@@ -720,6 +828,7 @@ struct reshade::wayland_input_context
 	static void pointer_button(void *data, wl_pointer *, uint32_t serial, uint32_t, uint32_t button, uint32_t state)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
+		reshade::log::message(reshade::log::level::info, "[DEBUG-input] Wayland button raw=%#x state=%s focused=%d block_mouse=%d surface=%p serial=%u.", button, state == WL_POINTER_BUTTON_STATE_PRESSED ? "pressed" : "released", context->pointer_focused, context->owner->_block_mouse, context->surface, serial);
 		if (!context->pointer_focused)
 			return;
 		context->last_serial = serial;
@@ -799,6 +908,7 @@ struct reshade::wayland_input_context
 			static const wl_data_device_listener listener = {data_device_data_offer, data_device_enter, data_device_leave, data_device_motion, data_device_drop, data_device_selection};
 			wl_data_device_add_listener(data_device, &listener, this);
 		}
+
 		// Outputs and the xdg-output manager are both discovered in the roundtrip above, so
 		// only now can per-output xdg-output objects be requested (order of registry globals
 		// is unspecified, so this cannot be done from within 'registry_global' itself).
@@ -820,7 +930,385 @@ struct reshade::wayland_input_context
 		if (wl_display_roundtrip_queue(display, queue) < 0)
 			return false;
 		compute_output_scale();
-		return keyboard != nullptr && state != nullptr;
+		reshade::log::message(reshade::log::level::info, "Wayland input: wl_display=%p vulkan_surface=%p seat=%s keyboard=%s pointer=%s xkb_state=%s relative_pointer=%s xdg_output=%s.", display, surface, seat != nullptr ? "yes" : "no", keyboard != nullptr ? "yes" : "no", pointer != nullptr ? "yes" : "no", state != nullptr ? "yes" : "no", relative_pointer != nullptr ? "yes" : "no", xdg_output_manager != nullptr ? "yes" : "no");
+		reshade::log::message(reshade::log::level::info, "[DEBUG-input] Wayland backend ready surface=%p keyboard_focus=%d pointer_focus=%d cursor_shape=%s data_device=%s.", surface, keyboard_focused, pointer_focused, cursor_shape_device != nullptr ? "yes" : "no", data_device != nullptr ? "yes" : "no");
+		return seat != nullptr;
+	}
+	bool pump_events_nonblocking()
+	{
+		if (wl_display_dispatch_queue_pending(display, queue) < 0)
+			return false;
+
+		while (wl_display_prepare_read_queue(display, queue) != 0)
+		{
+			if (errno != EAGAIN)
+				return false;
+			if (wl_display_dispatch_queue_pending(display, queue) < 0)
+				return false;
+		}
+
+		if (wl_display_flush(display) < 0 && errno != EAGAIN)
+		{
+			wl_display_cancel_read(display);
+			return false;
+		}
+		pollfd pfd {wl_display_get_fd(display), POLLIN, 0};
+		int poll_result;
+		do
+			poll_result = poll(&pfd, 1, 0);
+		while (poll_result < 0 && errno == EINTR);
+		if (poll_result > 0 && (pfd.revents & POLLIN) != 0)
+		{
+			if (wl_display_read_events(display) < 0)
+				return false;
+		}
+		else
+		{
+			wl_display_cancel_read(display);
+		}
+		return wl_display_dispatch_queue_pending(display, queue) >= 0;
+	}
+};
+
+struct reshade::x11_input_context
+{
+	input *owner = nullptr;
+	xcb_window_t window = XCB_WINDOW_NONE;
+	xcb_window_t keyboard_window = XCB_WINDOW_NONE;
+	xcb_window_t root = XCB_WINDOW_NONE;
+	xcb_connection_t *connection = nullptr;
+	uint8_t xinput_opcode = 0;
+	xkb_context *xkb_context = nullptr;
+	xkb_keymap *keymap = nullptr;
+	xkb_state *state = nullptr;
+	bool keyboard_focused = false;
+	bool pointer_focused = false;
+	unsigned int width = 1;
+	unsigned int height = 1;
+
+	~x11_input_context()
+	{
+		if (state != nullptr)
+			xkb_state_unref(state);
+		if (keymap != nullptr)
+			xkb_keymap_unref(keymap);
+		if (xkb_context != nullptr)
+			xkb_context_unref(xkb_context);
+		if (connection != nullptr)
+			xcb_disconnect(connection);
+	}
+	void clear_keyboard_state()
+	{
+		for (unsigned int key = input::key_button_xbutton2 + 1; key < std::size(owner->_keys); ++key)
+			if ((owner->_keys[key] & 0x80) != 0)
+				owner->_keys[key] = 0x08;
+	}
+	void clear_pointer_state()
+	{
+		constexpr unsigned int keys[] = {input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2};
+		for (const unsigned int key : keys)
+			if ((owner->_keys[key] & 0x80) != 0)
+				owner->_keys[key] = 0x08;
+	}
+	void set_key(xcb_keycode_t key, bool pressed)
+	{
+		reshade::log::message(reshade::log::level::info, "[DEBUG-xi-crash] set_key begin owner=%p state=%p key=%u pressed=%d.", owner, state, key, pressed);
+		if (state == nullptr)
+			return;
+		const xkb_keysym_t keysym = xkb_state_key_get_one_sym(state, key);
+		const unsigned int virtual_key = virtual_key_from_keysym(keysym);
+		reshade::log::message(reshade::log::level::info, "[DEBUG-xi-crash] translated key=%u keysym=%#x virtual_key=%u.", key, keysym, virtual_key);
+		if (virtual_key != 0)
+		{
+			owner->_keys[virtual_key] = pressed ? 0x88 : 0x08;
+			if (virtual_key == input::key_left_ctrl || virtual_key == input::key_right_ctrl)
+				owner->_keys[input::key_ctrl] = (owner->_keys[input::key_left_ctrl] & 0x80) != 0 || (owner->_keys[input::key_right_ctrl] & 0x80) != 0 ? 0x88 : 0x08;
+			if (virtual_key == input::key_left_shift || virtual_key == input::key_right_shift)
+				owner->_keys[input::key_shift] = (owner->_keys[input::key_left_shift] & 0x80) != 0 || (owner->_keys[input::key_right_shift] & 0x80) != 0 ? 0x88 : 0x08;
+			if (virtual_key == input::key_left_alt || virtual_key == input::key_right_alt)
+				owner->_keys[input::key_alt] = (owner->_keys[input::key_left_alt] & 0x80) != 0 || (owner->_keys[input::key_right_alt] & 0x80) != 0 ? 0x88 : 0x08;
+		}
+		if (pressed)
+		{
+			const uint32_t utf32 = xkb_state_key_get_utf32(state, key);
+			if (utf32 != 0 && utf32 <= 0xffff)
+				owner->_text_input += static_cast<wchar_t>(utf32);
+		}
+		reshade::log::message(reshade::log::level::info, "[DEBUG-xi-crash] updating XKB state key=%u pressed=%d.", key, pressed);
+		xkb_state_update_key(state, key, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+		reshade::log::message(reshade::log::level::info, "[DEBUG-xi-crash] set_key complete key=%u virtual_key=%u.", key, virtual_key);
+	}
+	void set_pointer_position(const xcb_motion_notify_event_t &event)
+	{
+		if (!pointer_focused)
+			return;
+		owner->_mouse_position[0] = static_cast<unsigned int>(std::clamp<int>(event.event_x, 0, static_cast<int>(std::max(1u, width))));
+		owner->_mouse_position[1] = static_cast<unsigned int>(std::clamp<int>(event.event_y, 0, static_cast<int>(std::max(1u, height))));
+	}
+	void handle_button(const xcb_button_press_event_t &event, bool pressed)
+	{
+		if (!pointer_focused)
+			return;
+		unsigned int key = 0;
+		switch (event.detail)
+		{
+		case 1: key = input::key_button_left; break;
+		case 2: key = input::key_button_middle; break;
+		case 3: key = input::key_button_right; break;
+		case 8: key = input::key_button_xbutton1; break;
+		case 9: key = input::key_button_xbutton2; break;
+		case 4: if (pressed) ++owner->_mouse_wheel_delta; return;
+		case 5: if (pressed) --owner->_mouse_wheel_delta; return;
+		default: return;
+		}
+		owner->_keys[key] = pressed ? 0x88 : 0x08;
+	}
+	bool contains_window(xcb_window_t focused_window) const
+	{
+		// The Vulkan surface may belong to a parent of the actual X11 input window
+		// (this is common with Wine). Walk towards the root so late attachment works
+		// for both the surface window itself and one of its children.
+		while (focused_window != XCB_WINDOW_NONE && focused_window != XCB_INPUT_FOCUS_POINTER_ROOT)
+		{
+			if (focused_window == window)
+				return true;
+
+			xcb_query_tree_reply_t *const tree = xcb_query_tree_reply(connection, xcb_query_tree(connection, focused_window), nullptr);
+			if (tree == nullptr)
+				break;
+			const xcb_window_t parent = tree->parent;
+			free(tree);
+			if (parent == focused_window)
+				break;
+			focused_window = parent;
+		}
+		return false;
+	}
+	void query_initial_focus()
+	{
+		xcb_get_input_focus_reply_t *const focus = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), nullptr);
+		if (focus != nullptr)
+		{
+			const bool surface_related = contains_window(focus->focus);
+			keyboard_window = surface_related ? window : focus->focus;
+			keyboard_focused = keyboard_window != XCB_WINDOW_NONE && keyboard_window != XCB_INPUT_FOCUS_POINTER_ROOT;
+			reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 initial focus=%#x surface=%#x surface_related=%d keyboard_window=%#x focused=%d.", focus->focus, window, surface_related, keyboard_window, keyboard_focused);
+			free(focus);
+		}
+
+		xcb_query_pointer_reply_t *const pointer = xcb_query_pointer_reply(connection, xcb_query_pointer(connection, window), nullptr);
+		if (pointer != nullptr)
+		{
+			pointer_focused = pointer->same_screen && pointer->win_x >= 0 && pointer->win_y >= 0 &&
+				pointer->win_x < static_cast<int>(width) && pointer->win_y < static_cast<int>(height);
+			if (pointer_focused)
+			{
+				owner->_mouse_position[0] = static_cast<unsigned int>(pointer->win_x);
+				owner->_mouse_position[1] = static_cast<unsigned int>(pointer->win_y);
+			}
+			free(pointer);
+		}
+	}
+	bool refresh_keyboard_focus()
+	{
+		xcb_get_input_focus_reply_t *const focus = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), nullptr);
+		if (focus == nullptr)
+			return keyboard_focused;
+		keyboard_focused = focus->focus == keyboard_window || contains_window(focus->focus);
+		free(focus);
+		return keyboard_focused;
+	}
+	void query_pointer_position()
+	{
+		xcb_query_pointer_reply_t *const pointer = xcb_query_pointer_reply(connection, xcb_query_pointer(connection, window), nullptr);
+		if (pointer == nullptr)
+			return;
+		pointer_focused = pointer->same_screen && pointer->win_x >= 0 && pointer->win_y >= 0 &&
+			pointer->win_x < static_cast<int>(width) && pointer->win_y < static_cast<int>(height);
+		if (pointer_focused && !owner->_block_cursor_warping)
+		{
+			owner->_mouse_position[0] = static_cast<unsigned int>(pointer->win_x);
+			owner->_mouse_position[1] = static_cast<unsigned int>(pointer->win_y);
+		}
+		free(pointer);
+	}
+	void handle_raw_motion(const xcb_input_raw_motion_event_t &event)
+	{
+		query_pointer_position();
+		if (!pointer_focused || !owner->_block_cursor_warping)
+			return;
+		const auto *const raw_event = reinterpret_cast<const xcb_input_raw_key_press_event_t *>(&event);
+		const xcb_input_fp3232_t *const values = xcb_input_raw_key_press_axisvalues_raw(raw_event);
+		const uint32_t *const valuators = xcb_input_raw_key_press_valuator_mask(raw_event);
+		double delta[2] = {};
+		unsigned int value_index = 0;
+		for (unsigned int axis = 0; axis < event.valuators_len * 32; ++axis)
+		{
+			if ((valuators[axis / 32] & (1u << (axis % 32))) == 0)
+				continue;
+			if (axis < 2)
+				delta[axis] = values[value_index].integral + values[value_index].frac / 4294967296.0;
+			++value_index;
+		}
+		owner->_mouse_position[0] = static_cast<unsigned int>(std::clamp(static_cast<int>(std::lround(owner->_mouse_position[0] + delta[0])), 0, static_cast<int>(width)));
+		owner->_mouse_position[1] = static_cast<unsigned int>(std::clamp(static_cast<int>(std::lround(owner->_mouse_position[1] + delta[1])), 0, static_cast<int>(height)));
+	}
+	void next_frame()
+	{
+		bool processed_key_event = false;
+		while (xcb_generic_event_t *event = xcb_poll_for_event(connection))
+		{
+			if ((event->response_type & 0x7f) == XCB_GE_GENERIC)
+			{
+				auto *const generic = reinterpret_cast<xcb_ge_generic_event_t *>(event);
+				if (generic->extension == xinput_opcode)
+				{
+					auto *const raw = reinterpret_cast<xcb_input_raw_key_press_event_t *>(event);
+					switch (generic->event_type)
+					{
+					case XCB_INPUT_RAW_KEY_PRESS:
+					case XCB_INPUT_RAW_KEY_RELEASE:
+						processed_key_event = true;
+						reshade::log::message(reshade::log::level::info, "[DEBUG-input] XInput2 key raw=%u state=%s focused=%d block_keyboard=%d window=%#x.", raw->detail, generic->event_type == XCB_INPUT_RAW_KEY_PRESS ? "pressed" : "released", refresh_keyboard_focus(), owner->_block_keyboard, keyboard_window);
+						if (keyboard_focused)
+							set_key(static_cast<xcb_keycode_t>(raw->detail), generic->event_type == XCB_INPUT_RAW_KEY_PRESS);
+						break;
+					case XCB_INPUT_RAW_BUTTON_PRESS:
+					case XCB_INPUT_RAW_BUTTON_RELEASE:
+						query_pointer_position();
+						if (pointer_focused && refresh_keyboard_focus())
+						{
+							xcb_button_press_event_t button = {};
+							button.detail = static_cast<uint8_t>(raw->detail);
+							handle_button(button, generic->event_type == XCB_INPUT_RAW_BUTTON_PRESS);
+						}
+						break;
+					case XCB_INPUT_RAW_MOTION:
+						if (refresh_keyboard_focus())
+							handle_raw_motion(*reinterpret_cast<xcb_input_raw_motion_event_t *>(event));
+						break;
+					}
+				}
+				free(event);
+				continue;
+			}
+			switch (event->response_type & 0x7f)
+			{
+			case XCB_KEY_PRESS:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 key raw=%u state=pressed focused=%d block_keyboard=%d window=%#x.", reinterpret_cast<xcb_key_press_event_t *>(event)->detail, keyboard_focused, owner->_block_keyboard, window);
+				if (keyboard_focused)
+					set_key(reinterpret_cast<xcb_key_press_event_t *>(event)->detail, true);
+				break;
+			case XCB_KEY_RELEASE:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 key raw=%u state=released focused=%d block_keyboard=%d window=%#x.", reinterpret_cast<xcb_key_release_event_t *>(event)->detail, keyboard_focused, owner->_block_keyboard, window);
+				if (keyboard_focused)
+					set_key(reinterpret_cast<xcb_key_release_event_t *>(event)->detail, false);
+				break;
+			case XCB_BUTTON_PRESS:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 button raw=%u state=pressed focused=%d block_mouse=%d window=%#x.", reinterpret_cast<xcb_button_press_event_t *>(event)->detail, pointer_focused, owner->_block_mouse, window);
+				handle_button(*reinterpret_cast<xcb_button_press_event_t *>(event), true);
+				break;
+			case XCB_BUTTON_RELEASE:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 button raw=%u state=released focused=%d block_mouse=%d window=%#x.", reinterpret_cast<xcb_button_release_event_t *>(event)->detail, pointer_focused, owner->_block_mouse, window);
+				handle_button(*reinterpret_cast<xcb_button_release_event_t *>(event), false);
+				break;
+			case XCB_MOTION_NOTIFY:
+				set_pointer_position(*reinterpret_cast<xcb_motion_notify_event_t *>(event));
+				break;
+			case XCB_ENTER_NOTIFY:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 pointer enter window=%#x.", window);
+				pointer_focused = true;
+				set_pointer_position(*reinterpret_cast<xcb_motion_notify_event_t *>(event));
+				break;
+			case XCB_LEAVE_NOTIFY:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 pointer leave window=%#x.", window);
+				clear_pointer_state();
+				pointer_focused = false;
+				break;
+			case XCB_FOCUS_IN:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 keyboard focus in window=%#x.", window);
+				keyboard_focused = true;
+				break;
+			case XCB_FOCUS_OUT:
+				reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 keyboard focus out window=%#x.", window);
+				clear_keyboard_state();
+				keyboard_focused = false;
+				break;
+			case XCB_CONFIGURE_NOTIFY:
+				width = std::max(1u, static_cast<unsigned int>(reinterpret_cast<xcb_configure_notify_event_t *>(event)->width));
+				height = std::max(1u, static_cast<unsigned int>(reinterpret_cast<xcb_configure_notify_event_t *>(event)->height));
+				break;
+			}
+			free(event);
+		}
+		if (processed_key_event)
+			reshade::log::message(reshade::log::level::info, "[DEBUG-xi-crash] X11 key event poll complete frame=%llu.", static_cast<unsigned long long>(owner->_frame_count));
+	}
+	bool initialize()
+	{
+		int screen = 0;
+		connection = xcb_connect(nullptr, &screen);
+		if (connection == nullptr || xcb_connection_has_error(connection) != 0)
+			return false;
+
+		xcb_screen_iterator_t screen_iterator = xcb_setup_roots_iterator(xcb_get_setup(connection));
+		for (int i = 0; i < screen && screen_iterator.rem != 0; ++i)
+			xcb_screen_next(&screen_iterator);
+		if (screen_iterator.rem == 0)
+			return false;
+		root = screen_iterator.data->root;
+
+		const xcb_query_extension_reply_t *const extension = xcb_get_extension_data(connection, &xcb_input_id);
+		if (extension == nullptr || !extension->present)
+			return false;
+		xinput_opcode = extension->major_opcode;
+		xcb_input_xi_query_version_reply_t *const version = xcb_input_xi_query_version_reply(connection, xcb_input_xi_query_version(connection, 2, 0), nullptr);
+		if (version == nullptr || version->major_version < 2)
+		{
+			free(version);
+			return false;
+		}
+		free(version);
+
+		struct
+		{
+			xcb_input_event_mask_t header;
+			uint32_t mask;
+		} raw_events = {{XCB_INPUT_DEVICE_ALL_MASTER, 1},
+			XCB_INPUT_XI_EVENT_MASK_RAW_KEY_PRESS | XCB_INPUT_XI_EVENT_MASK_RAW_KEY_RELEASE |
+			XCB_INPUT_XI_EVENT_MASK_RAW_BUTTON_PRESS | XCB_INPUT_XI_EVENT_MASK_RAW_BUTTON_RELEASE |
+			XCB_INPUT_XI_EVENT_MASK_RAW_MOTION};
+		const xcb_void_cookie_t select_cookie = xcb_input_xi_select_events_checked(connection, root, 1, &raw_events.header);
+		xcb_generic_error_t *const select_error = xcb_request_check(connection, select_cookie);
+		if (select_error != nullptr)
+		{
+			reshade::log::message(reshade::log::level::warning, "[DEBUG-input] XInput2 raw event subscription failed root=%#x error=%u.", root, select_error->error_code);
+			free(select_error);
+			return false;
+		}
+		xcb_flush(connection);
+		// Focus may have been established before ReShade subscribed to events. X11
+		// does not replay the corresponding FocusIn/EnterNotify events to a new client.
+		query_initial_focus();
+
+		xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+		uint16_t major = XKB_X11_MIN_MAJOR_XKB_VERSION, minor = XKB_X11_MIN_MINOR_XKB_VERSION;
+		uint8_t base_event = 0, base_error = 0;
+		if (xkb_context != nullptr && xkb_x11_setup_xkb_extension(connection, major, minor, XKB_X11_SETUP_XKB_EXTENSION_NO_FLAGS, &major, &minor, &base_event, &base_error))
+		{
+			const int32_t device_id = xkb_x11_get_core_keyboard_device_id(connection);
+			if (device_id >= 0)
+			{
+				keymap = xkb_x11_keymap_new_from_device(xkb_context, connection, device_id, XKB_KEYMAP_COMPILE_NO_FLAGS);
+				if (keymap != nullptr)
+					// Own key state locally and update it from the passive XInput2 stream.
+					// The server-derived state is not safe in every Wine X11 environment.
+					state = xkb_state_new(keymap);
+			}
+		}
+		reshade::log::message(reshade::log::level::info, "X11 input: xcb_window=%#x keyboard=%s pointer=yes xkb_state=%s.", window, keymap != nullptr ? "yes" : "no", state != nullptr ? "yes" : "no");
+		reshade::log::message(reshade::log::level::info, "[DEBUG-input] X11 backend ready window=%#x keyboard_focus=%d pointer_focus=%d connection_error=%d.", window, keyboard_focused, pointer_focused, xcb_connection_has_error(connection));
+		return true;
 	}
 };
 
@@ -831,56 +1319,101 @@ bool reshade::input::is_keyboard_layout_german()
 std::shared_ptr<reshade::input> reshade::input::register_window(window_handle window)
 {
 	wayland_surface_info surface_info;
+	bool is_wayland_surface = false;
 	{
 		std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
 		const auto it = s_wayland_surfaces.find(window);
-		if (it == s_wayland_surfaces.end() || it->second.display == nullptr)
-			return nullptr;
-		if (const std::shared_ptr<input> existing = it->second.input_instance.lock())
+		if (it != s_wayland_surfaces.end() && it->second.display != nullptr)
 		{
+			is_wayland_surface = true;
+			if (const std::shared_ptr<input> existing = it->second.input_instance)
+			{
+				log::message(log::level::info, "[DEBUG-input] Reusing Wayland input surface=%p frame=%llu keyboard_focus=%d pointer_focus=%d block_keyboard=%d block_mouse=%d cursor_block=%d.", window, static_cast<unsigned long long>(existing->_frame_count), existing->_wayland->keyboard_focused, existing->_wayland->pointer_focused, existing->_block_keyboard, existing->_block_mouse, existing->_block_cursor_warping);
+				existing->_wayland->width = std::max(1u, it->second.width);
+				existing->_wayland->height = std::max(1u, it->second.height);
+				return existing;
+			}
+			surface_info = it->second;
+		}
+	}
+
+	if (is_wayland_surface)
+	{
+		// Wayland round trips may block. Do not hold the surface registry lock while creating
+		// the input context, so swapchain destruction and concurrent surface updates can proceed.
+		auto result = std::make_shared<input>(window);
+		result->_wayland = new wayland_input_context{result.get(), surface_info.display, static_cast<wl_surface *>(window)};
+		result->_wayland->width = std::max(1u, surface_info.width);
+		result->_wayland->height = std::max(1u, surface_info.height);
+		if (!result->_wayland->initialize())
+		{
+			log::message(log::level::warning, "Failed to initialize Wayland input for surface %p.", window);
+			delete result->_wayland;
+			result->_wayland = nullptr;
+			return nullptr;
+		}
+
+		std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
+		const auto it = s_wayland_surfaces.find(window);
+		if (it == s_wayland_surfaces.end() || it->second.display != surface_info.display)
+			return nullptr;
+		if (const std::shared_ptr<input> existing = it->second.input_instance)
+		{
+			log::message(log::level::info, "[DEBUG-input] Reusing Wayland input after initialization race surface=%p frame=%llu.", window, static_cast<unsigned long long>(existing->_frame_count));
 			existing->_wayland->width = std::max(1u, it->second.width);
 			existing->_wayland->height = std::max(1u, it->second.height);
 			return existing;
 		}
-		surface_info = it->second;
+
+		log::message(log::level::info, "Initialized Wayland input for surface %p.", window);
+		it->second.input_instance = result;
+		return result;
 	}
 
-	// Wayland round trips may block. Do not hold the surface registry lock while creating
-	// the input context, so swapchain destruction and concurrent surface updates can proceed.
+	x11_window_info x11_info;
+	{
+		std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
+		const auto it = s_x11_windows.find(window);
+		if (it == s_x11_windows.end())
+			return nullptr;
+		if (const std::shared_ptr<input> existing = it->second.input_instance)
+		{
+			log::message(log::level::info, "[DEBUG-input] Reusing X11 input window=%p frame=%llu keyboard_focus=%d pointer_focus=%d block_keyboard=%d block_mouse=%d cursor_block=%d.", window, static_cast<unsigned long long>(existing->_frame_count), existing->_x11->keyboard_focused, existing->_x11->pointer_focused, existing->_block_keyboard, existing->_block_mouse, existing->_block_cursor_warping);
+			existing->_x11->width = std::max(1u, it->second.width);
+			existing->_x11->height = std::max(1u, it->second.height);
+			return existing;
+		}
+		x11_info = it->second;
+	}
+
 	auto result = std::make_shared<input>(window);
-	result->_wayland = new wayland_input_context{result.get(), surface_info.display, static_cast<wl_surface *>(window)};
-	result->_wayland->width = std::max(1u, surface_info.width);
-	result->_wayland->height = std::max(1u, surface_info.height);
-	if (!result->_wayland->initialize())
+	result->_x11 = new x11_input_context{result.get(), static_cast<xcb_window_t>(reinterpret_cast<uintptr_t>(window))};
+	result->_x11->width = std::max(1u, x11_info.width);
+	result->_x11->height = std::max(1u, x11_info.height);
+	if (!result->_x11->initialize())
 	{
-		log::message(log::level::warning, "Failed to initialize Wayland input for surface %p.", window);
-		delete result->_wayland;
-		result->_wayland = nullptr;
+		log::message(log::level::warning, "Failed to initialize X11 input for window %p.", window);
+		delete result->_x11;
+		result->_x11 = nullptr;
 		return nullptr;
 	}
-
-	std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
-	const auto it = s_wayland_surfaces.find(window);
-	if (it == s_wayland_surfaces.end() || it->second.display != surface_info.display)
-	{
-		// The surface was replaced or destroyed while the initial round trips were pending.
-		// Leave it unregistered; a later runtime recreation can retry with the current surface.
+	std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
+	const auto it = s_x11_windows.find(window);
+	if (it == s_x11_windows.end())
 		return nullptr;
-	}
-	if (const std::shared_ptr<input> existing = it->second.input_instance.lock())
+	if (const std::shared_ptr<input> existing = it->second.input_instance)
 	{
-		existing->_wayland->width = std::max(1u, it->second.width);
-		existing->_wayland->height = std::max(1u, it->second.height);
+		log::message(log::level::info, "[DEBUG-input] Reusing X11 input after initialization race window=%p frame=%llu.", window, static_cast<unsigned long long>(existing->_frame_count));
 		return existing;
 	}
-
-	log::message(log::level::info, "Initialized Wayland input for surface %p.", window);
+	log::message(log::level::info, "Initialized X11 input for window %p.", window);
 	it->second.input_instance = result;
 	return result;
 }
 reshade::input::~input()
 {
 	delete _wayland;
+	delete _x11;
 }
 void reshade::input::register_wayland_surface(window_handle surface, void *display, unsigned int width, unsigned int height)
 {
@@ -894,6 +1427,18 @@ void reshade::input::unregister_wayland_surface(window_handle surface)
 {
 	std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
 	s_wayland_surfaces.erase(surface);
+}
+void reshade::input::register_x11_window(window_handle window, unsigned int width, unsigned int height)
+{
+	std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
+	auto [it, inserted] = s_x11_windows.try_emplace(window);
+	it->second.width = width;
+	it->second.height = height;
+}
+void reshade::input::unregister_x11_window(window_handle window)
+{
+	std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
+	s_x11_windows.erase(window);
 }
 const char *reshade::input::get_clipboard_text(void *user_data)
 {
@@ -921,21 +1466,40 @@ void reshade::input::next_frame()
 	_mouse_wheel_delta = 0;
 	_text_input.clear();
 	++_frame_count;
-	if (_wayland != nullptr)
-		wl_display_dispatch_queue_pending(_wayland->display, _wayland->queue);
+	if (_frame_count == 1 || (_frame_count % 600) == 0)
+	{
+		if (_wayland != nullptr)
+			log::message(log::level::info, "[DEBUG-input] heartbeat frame=%llu backend=Wayland surface=%p keyboard_focus=%d pointer_focus=%d block_keyboard=%d block_mouse=%d cursor_block=%d.", static_cast<unsigned long long>(_frame_count), _wayland->surface, _wayland->keyboard_focused, _wayland->pointer_focused, _block_keyboard, _block_mouse, _block_cursor_warping);
+		else if (_x11 != nullptr)
+			log::message(log::level::info, "[DEBUG-input] heartbeat frame=%llu backend=X11 window=%#x keyboard_focus=%d pointer_focus=%d block_keyboard=%d block_mouse=%d cursor_block=%d.", static_cast<unsigned long long>(_frame_count), _x11->window, _x11->keyboard_focused, _x11->pointer_focused, _block_keyboard, _block_mouse, _block_cursor_warping);
+		else
+			log::message(log::level::info, "[DEBUG-input] heartbeat frame=%llu backend=none.", static_cast<unsigned long long>(_frame_count));
+	}
+	if (_wayland != nullptr && !_wayland->pump_events_nonblocking())
+		log::message(log::level::warning, "Wayland input event pump failed for surface %p.", _wayland->surface);
+	if (_x11 != nullptr)
+		_x11->next_frame();
 }
 void reshade::input::max_mouse_position(unsigned int position[2]) const
 {
-	if (_wayland == nullptr)
+	if (_wayland != nullptr)
 	{
-		position[0] = position[1] = 1;
+		_wayland->max_pointer_position(position);
 		return;
 	}
-	_wayland->max_pointer_position(position);
+	if (_x11 != nullptr)
+	{
+		position[0] = _x11->width;
+		position[1] = _x11->height;
+		return;
+	}
+	position[0] = position[1] = 1;
 }
 void reshade::input::block_mouse_cursor_warping(bool enable)
 {
 	_block_cursor_warping = enable;
+	if (_wayland != nullptr)
+		_wayland->set_native_cursor_hidden(enable);
 }
 std::shared_ptr<reshade::input_gamepad> reshade::input_gamepad::load()
 {

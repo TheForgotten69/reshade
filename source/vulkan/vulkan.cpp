@@ -203,6 +203,7 @@ PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *p
 #if VK_KHR_swapchain
 	RESHADE_VULKAN_HOOK_PROC(CreateSwapchainKHR);
 	RESHADE_VULKAN_HOOK_PROC(DestroySwapchainKHR);
+	RESHADE_VULKAN_HOOK_PROC(GetSwapchainImagesKHR);
 	RESHADE_VULKAN_HOOK_PROC(QueuePresentKHR);
 #endif
 
@@ -354,6 +355,12 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 #endif
 #if VK_KHR_wayland_surface
 	RESHADE_VULKAN_HOOK_PROC(CreateWaylandSurfaceKHR);
+#endif
+#if VK_KHR_xcb_surface
+	RESHADE_VULKAN_HOOK_PROC(CreateXcbSurfaceKHR);
+#endif
+#if VK_KHR_xlib_surface
+	RESHADE_VULKAN_HOOK_PROC(CreateXlibSurfaceKHR);
 #endif
 
 #if VK_KHR_surface

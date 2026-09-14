@@ -14,6 +14,7 @@
 #include "input.hpp"
 #include "lockfree_linear_map.hpp"
 #include <algorithm> // std::fill_n, std::sort, std::unique
+#include <atomic>
 
 #define vk device_impl->_dispatch_table
 
@@ -26,6 +27,34 @@ extern lockfree_linear_map<void *, reshade::vulkan::device_impl *, 8> g_vulkan_d
 extern void create_default_view(reshade::vulkan::device_impl *device_impl, VkImage image);
 extern void destroy_default_view(reshade::vulkan::device_impl *device_impl, VkImage image);
 #endif
+
+static void destroy_proxy_images(reshade::vulkan::device_impl *device_impl, reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *swapchain_impl)
+{
+	for (const reshade::api::resource image : swapchain_impl->_proxy_images)
+		device_impl->destroy_resource(image);
+	for (const reshade::api::resource image : swapchain_impl->_proxy_srgb_images)
+		device_impl->destroy_resource(image);
+	swapchain_impl->_proxy_images.clear();
+	swapchain_impl->_proxy_srgb_images.clear();
+	swapchain_impl->_proxy_srgb_images_initialized.clear();
+}
+
+static void retire_swapchain(reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *swapchain_impl)
+{
+	if (swapchain_impl == nullptr || swapchain_impl->_retired)
+		return;
+
+	// Vulkan permits presenting an image acquired from the old swapchain after a replacement
+	// is created. Keep the object and image metadata alive until vkDestroySwapchainKHR, but
+	// release the effect runtime so ReShade never renders into a retired swapchain.
+	reshade::reset_effect_runtime(swapchain_impl);
+#if RESHADE_ADDON
+	reshade::invoke_addon_event<reshade::addon_event::destroy_swapchain>(swapchain_impl, false);
+#endif
+	reshade::destroy_effect_runtime(swapchain_impl);
+	swapchain_impl->_runtime_destroyed = true;
+	swapchain_impl->_retired = true;
+}
 
 #if VK_KHR_swapchain
 VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSwapchainKHR *pSwapchain)
@@ -184,6 +213,8 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	// Look up window handle from surface
 	const vulkan_surface surface_info = g_vulkan_surfaces.at(create_info.surface);
 	void *const hwnd = surface_info.window;
+	const VkSwapchainCreateInfoKHR application_create_info = create_info;
+	bool use_proxy_images = false;
 
 #if RESHADE_ADDON
 	reshade::api::swapchain_desc desc = {};
@@ -223,6 +254,13 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 
 	if (reshade::invoke_addon_event<reshade::addon_event::create_swapchain>(reshade::api::device_api::vulkan, desc, hwnd))
 	{
+		// A Vulkan application bakes the swap chain format into render passes and
+		// pipelines. Keep its original images when an add-on changes only the WSI
+		// output format, rather than exposing the new format to the application.
+		use_proxy_images =
+			desc.back_buffer.texture.format != reshade::vulkan::convert_format(application_create_info.imageFormat) ||
+			desc.color_space != reshade::vulkan::convert_color_space(application_create_info.imageColorSpace);
+
 		create_info.imageFormat = reshade::vulkan::convert_format(desc.back_buffer.texture.format);
 		create_info.imageColorSpace = reshade::vulkan::convert_color_space(desc.color_space);
 		create_info.imageExtent.width = desc.back_buffer.texture.width;
@@ -271,42 +309,28 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	}
 #endif
 
-	// Unregister object from old swap chain so that a call to 'vkDestroySwapchainKHR' won't reset the effect runtime again
-	reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *swapchain_impl = nullptr;
-	if (create_info.oldSwapchain != VK_NULL_HANDLE)
-		swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR>(create_info.oldSwapchain);
-
-	if (nullptr != swapchain_impl)
+	if (use_proxy_images)
 	{
-		// Reuse the existing effect runtime if this swap chain was not created from scratch, but reset it before initializing again below
-		reshade::reset_effect_runtime(swapchain_impl);
-
-		// Get back buffer images of old swap chain
-		uint32_t num_images = 0;
-		vk.GetSwapchainImagesKHR(device, swapchain_impl->_orig, &num_images, nullptr);
-		temp_mem<VkImage, 3> swapchain_images(num_images);
-		vk.GetSwapchainImagesKHR(device, swapchain_impl->_orig, &num_images, swapchain_images.p);
-
-#if RESHADE_ADDON
-		reshade::invoke_addon_event<reshade::addon_event::destroy_swapchain>(swapchain_impl, false);
-#endif
-
-		for (uint32_t i = 0; i < num_images; ++i)
-		{
-#if RESHADE_ADDON
-			destroy_default_view(device_impl, swapchain_images[i]);
-#endif
-
-			device_impl->unregister_object<VK_OBJECT_TYPE_IMAGE>(swapchain_images[i]);
-		}
-
-		device_impl->unregister_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, false>(swapchain_impl->_orig);
+		// ReShade copies the completed application image into the actual WSI image
+		// immediately before it renders effects and presents it.
+		create_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		reshade::log::message(reshade::log::level::info, "Using Vulkan proxy swapchain images to preserve the application's render format.");
 	}
+
+	// The old handle remains valid for presentation of previously acquired images. Do not
+	// unregister or reuse its object: both old and replacement handles can coexist.
+	reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *old_swapchain_impl = nullptr;
+	if (create_info.oldSwapchain != VK_NULL_HANDLE)
+		old_swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, true>(create_info.oldSwapchain);
 
 	assert(!g_in_dxgi_runtime);
 	g_in_dxgi_runtime = true;
 	const VkResult result = trampoline(device, &create_info, pAllocator, pSwapchain);
 	g_in_dxgi_runtime = false;
+
+	// The Vulkan specification retires 'oldSwapchain' whether creation succeeds or fails.
+	// Retire our matching runtime only after the driver has observed the replacement request.
+	retire_swapchain(old_swapchain_impl);
 	if (result < VK_SUCCESS)
 	{
 		reshade::log::message(reshade::log::level::warning, "vkCreateSwapchainKHR failed with error code %d.", static_cast<int>(result));
@@ -314,25 +338,17 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	}
 
 #if defined(__linux__)
-	if (surface_info.display != nullptr)
+	if (surface_info.kind == vulkan_wsi_kind::wayland)
 		reshade::input::register_wayland_surface(hwnd, surface_info.display, create_info.imageExtent.width, create_info.imageExtent.height);
+	else if (surface_info.kind == vulkan_wsi_kind::xcb || surface_info.kind == vulkan_wsi_kind::xlib)
+		reshade::input::register_x11_window(hwnd, create_info.imageExtent.width, create_info.imageExtent.height);
 #endif
 
-	if (nullptr == swapchain_impl)
-	{
-		swapchain_impl = new reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR>(device_impl, *pSwapchain, create_info, hwnd);
-
-		reshade::create_effect_runtime(swapchain_impl, device_impl->_primary_graphics_queue);
-	}
-	else
-	{
-		swapchain_impl->_orig = *pSwapchain;
-		swapchain_impl->_create_info = create_info;
-		swapchain_impl->_create_info.pNext = nullptr; // Clear out structure chain pointer, since it becomes invalid once leaving the current scope
-		swapchain_impl->_hwnd = hwnd;
-	}
+	auto *const swapchain_impl = new reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR>(device_impl, *pSwapchain, create_info, hwnd);
+	reshade::create_effect_runtime(swapchain_impl, device_impl->_primary_graphics_queue);
 
 	device_impl->register_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR>(swapchain_impl->_orig, swapchain_impl);
+	reshade::log::message(reshade::log::level::info, "Swapchain: handle=%p surface=%p oldSwapchain=%p extent=%ux%u presentMode=%d.", *pSwapchain, create_info.surface, create_info.oldSwapchain, create_info.imageExtent.width, create_info.imageExtent.height, static_cast<int>(create_info.presentMode));
 
 	// Get back buffer images of new swap chain
 	uint32_t num_images = 0;
@@ -364,6 +380,46 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 		if ((create_info.flags & VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR) != 0)
 			image_data.create_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
 #endif
+	}
+
+	if (use_proxy_images)
+	{
+		reshade::api::resource_desc proxy_desc = {};
+		proxy_desc.type = reshade::api::resource_type::texture_2d;
+		proxy_desc.texture.width = application_create_info.imageExtent.width;
+		proxy_desc.texture.height = application_create_info.imageExtent.height;
+		assert(application_create_info.imageArrayLayers <= std::numeric_limits<uint16_t>::max());
+		proxy_desc.texture.depth_or_layers = static_cast<uint16_t>(application_create_info.imageArrayLayers);
+		proxy_desc.texture.levels = 1;
+		proxy_desc.texture.format = reshade::vulkan::convert_format(application_create_info.imageFormat);
+		proxy_desc.texture.samples = 1;
+		proxy_desc.heap = reshade::api::memory_heap::default_;
+		reshade::vulkan::convert_image_usage_flags_to_usage(application_create_info.imageUsage, proxy_desc.usage);
+		proxy_desc.usage |= reshade::api::resource_usage::copy_source;
+
+		reshade::api::resource_desc srgb_desc = proxy_desc;
+		srgb_desc.texture.format = reshade::api::format_to_default_typed(proxy_desc.texture.format, 1);
+		srgb_desc.usage = reshade::api::resource_usage::copy_source | reshade::api::resource_usage::copy_dest;
+
+		swapchain_impl->_proxy_images.reserve(num_images);
+		swapchain_impl->_proxy_srgb_images.reserve(num_images);
+		swapchain_impl->_proxy_srgb_images_initialized.reserve(num_images);
+		for (uint32_t i = 0; i < num_images; ++i)
+		{
+			reshade::api::resource image, srgb_image;
+			if (!device_impl->create_resource(proxy_desc, nullptr, reshade::api::resource_usage::undefined, &image) ||
+				!device_impl->create_resource(srgb_desc, nullptr, reshade::api::resource_usage::undefined, &srgb_image))
+			{
+				reshade::log::message(reshade::log::level::error, "Failed to create a Vulkan proxy swapchain image.");
+				device_impl->destroy_resource(image);
+				device_impl->destroy_resource(srgb_image);
+				destroy_proxy_images(device_impl, swapchain_impl);
+				break;
+			}
+			swapchain_impl->_proxy_images.push_back(image);
+			swapchain_impl->_proxy_srgb_images.push_back(srgb_image);
+			swapchain_impl->_proxy_srgb_images_initialized.push_back(false);
+		}
 	}
 
 #if RESHADE_ADDON
@@ -406,17 +462,25 @@ void     VKAPI_CALL vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapch
 	reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *const swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, true>(swapchain);
 	if (swapchain_impl != nullptr)
 	{
-		reshade::reset_effect_runtime(swapchain_impl);
+		if (!swapchain_impl->_runtime_destroyed)
+		{
+			reshade::reset_effect_runtime(swapchain_impl);
 
-		// Get back buffer images of old swap chain
+		#if RESHADE_ADDON
+			reshade::invoke_addon_event<reshade::addon_event::destroy_swapchain>(swapchain_impl, false);
+		#endif
+			reshade::destroy_effect_runtime(swapchain_impl);
+			swapchain_impl->_runtime_destroyed = true;
+		}
+
+		// Image/private-data cleanup is deliberately delayed until the application's destroy
+		// call, because an old swapchain remains legal to present after recreation.
 		uint32_t num_images = 0;
 		vk.GetSwapchainImagesKHR(device, swapchain, &num_images, nullptr);
 		temp_mem<VkImage, 3> swapchain_images(num_images);
 		vk.GetSwapchainImagesKHR(device, swapchain, &num_images, swapchain_images.p);
 
-#if RESHADE_ADDON
-		reshade::invoke_addon_event<reshade::addon_event::destroy_swapchain>(swapchain_impl, false);
-#endif
+		destroy_proxy_images(device_impl, swapchain_impl);
 
 		for (uint32_t i = 0; i < num_images; ++i)
 		{
@@ -427,7 +491,6 @@ void     VKAPI_CALL vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapch
 			device_impl->unregister_object<VK_OBJECT_TYPE_IMAGE>(swapchain_images[i]);
 		}
 
-		reshade::destroy_effect_runtime(swapchain_impl);
 	}
 
 	device_impl->unregister_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, false>(swapchain);
@@ -435,6 +498,32 @@ void     VKAPI_CALL vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapch
 	delete swapchain_impl;
 
 	trampoline(device, swapchain, pAllocator);
+}
+
+VkResult VKAPI_CALL vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(GetSwapchainImagesKHR, device_impl);
+
+	if (const auto swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, true>(swapchain);
+		swapchain_impl != nullptr && !swapchain_impl->_proxy_images.empty())
+	{
+		assert(pSwapchainImageCount != nullptr);
+		const uint32_t image_count = static_cast<uint32_t>(swapchain_impl->_proxy_images.size());
+		if (pSwapchainImages == nullptr)
+		{
+			*pSwapchainImageCount = image_count;
+			return VK_SUCCESS;
+		}
+
+		const uint32_t returned_count = std::min(*pSwapchainImageCount, image_count);
+		for (uint32_t i = 0; i < returned_count; ++i)
+			pSwapchainImages[i] = reinterpret_cast<VkImage>(swapchain_impl->_proxy_images[i].handle);
+		*pSwapchainImageCount = returned_count;
+		return returned_count == image_count ? VK_SUCCESS : VK_INCOMPLETE;
+	}
+
+	return trampoline(device, swapchain, pSwapchainImageCount, pSwapchainImages);
 }
 
 VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
@@ -454,10 +543,49 @@ VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPr
 
 	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i)
 	{
-		reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *const swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR>(pPresentInfo->pSwapchains[i]);
+		reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *const swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, true>(pPresentInfo->pSwapchains[i]);
+		if (swapchain_impl == nullptr || swapchain_impl->_retired)
+		{
+			static std::atomic_uint skipped_retired_present_count = 0;
+			if (skipped_retired_present_count.fetch_add(1, std::memory_order_relaxed) < 8)
+				reshade::log::message(reshade::log::level::warning, "Skipping ReShade processing for untracked or retired Vulkan swapchain %p.", pPresentInfo->pSwapchains[i]);
+			continue;
+		}
 
 		// 'vkAcquireNextImageKHR' may be called for the next frame before this frame was presented (e.g. in DOOM Eternal), so correct swap index must be obtained from the present info
 		swapchain_impl->_swap_index = pPresentInfo->pImageIndices[i];
+
+		if (!swapchain_impl->_proxy_images.empty())
+		{
+			const uint32_t image_index = pPresentInfo->pImageIndices[i];
+			if (image_index >= swapchain_impl->_proxy_images.size() || image_index >= swapchain_impl->_proxy_srgb_images.size() || device_impl->_primary_graphics_queue == nullptr)
+			{
+				reshade::log::message(reshade::log::level::error, "Cannot copy a Vulkan proxy swapchain image for presentation.");
+			}
+			else if (auto *const command_list = device_impl->_primary_graphics_queue->get_immediate_command_list())
+			{
+				const reshade::api::resource source = swapchain_impl->_proxy_images[image_index];
+				const reshade::api::resource srgb_source = swapchain_impl->_proxy_srgb_images[image_index];
+				const reshade::api::resource destination = swapchain_impl->get_back_buffer(image_index);
+				command_list->barrier(source, reshade::api::resource_usage::present, reshade::api::resource_usage::copy_source);
+				command_list->barrier(srgb_source,
+					swapchain_impl->_proxy_srgb_images_initialized[image_index] ? reshade::api::resource_usage::copy_dest : reshade::api::resource_usage::undefined,
+					reshade::api::resource_usage::copy_dest);
+				command_list->copy_texture_region(source, 0, nullptr, srgb_source, 0, nullptr, reshade::api::filter_mode::min_mag_mip_point);
+				command_list->barrier(destination, reshade::api::resource_usage::present, reshade::api::resource_usage::copy_dest);
+
+				// A non-null destination box forces a blit even when the formats have the
+				// same byte size (e.g. BGRA8 to RGB10A2). This applies the sRGB decode
+				// before the final HDR format conversion rather than copying raw bits.
+				const reshade::api::subresource_box destination_box = { 0, 0, 0, swapchain_impl->_create_info.imageExtent.width, swapchain_impl->_create_info.imageExtent.height, 1 };
+				command_list->barrier(srgb_source, reshade::api::resource_usage::copy_dest, reshade::api::resource_usage::copy_source);
+				command_list->copy_texture_region(srgb_source, 0, nullptr, destination, 0, &destination_box, reshade::api::filter_mode::min_mag_mip_linear);
+				command_list->barrier(source, reshade::api::resource_usage::copy_source, reshade::api::resource_usage::present);
+				command_list->barrier(srgb_source, reshade::api::resource_usage::copy_source, reshade::api::resource_usage::copy_dest);
+				command_list->barrier(destination, reshade::api::resource_usage::copy_dest, reshade::api::resource_usage::present);
+				swapchain_impl->_proxy_srgb_images_initialized[image_index] = true;
+			}
+		}
 
 #if RESHADE_ADDON
 #if VK_KHR_incremental_present
@@ -593,9 +721,8 @@ VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPr
 	{
 		for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i)
 		{
-			reshade::vulkan::swapchain_impl *const swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR>(pPresentInfo->pSwapchains[i]);
-
-			reshade::invoke_addon_event<reshade::addon_event::finish_present>(queue_impl, swapchain_impl);
+			if (reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *const swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, true>(pPresentInfo->pSwapchains[i]); swapchain_impl != nullptr && !swapchain_impl->_retired)
+				reshade::invoke_addon_event<reshade::addon_event::finish_present>(queue_impl, swapchain_impl);
 		}
 	}
 #endif

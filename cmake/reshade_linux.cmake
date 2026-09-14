@@ -36,6 +36,9 @@ file(WRITE "${RESHADE_GENERATED_INCLUDE_DIR}/version.h"
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
+pkg_check_modules(XKBCOMMON_X11 REQUIRED IMPORTED_TARGET xkbcommon-x11)
+pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
+pkg_check_modules(XCB_XINPUT REQUIRED IMPORTED_TARGET xcb-xinput)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -74,7 +77,27 @@ add_custom_command(
   COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}" "${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}"
   DEPENDS "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}"
 )
-set_source_files_properties(source/linux/input_linux.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER};${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}")
+set(RESHADE_WAYLAND_CURSOR_SHAPE_XML "${WAYLAND_PROTOCOLS_DIR}/staging/cursor-shape/cursor-shape-v1.xml")
+set(RESHADE_WAYLAND_CURSOR_SHAPE_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/cursor-shape-v1-client-protocol.h")
+set(RESHADE_WAYLAND_CURSOR_SHAPE_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/cursor-shape-v1-protocol.c")
+add_custom_command(
+  OUTPUT "${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER}"
+  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${RESHADE_WAYLAND_CURSOR_SHAPE_XML}" "${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER}"
+  DEPENDS "${RESHADE_WAYLAND_CURSOR_SHAPE_XML}"
+)
+add_custom_command(
+  OUTPUT "${RESHADE_WAYLAND_CURSOR_SHAPE_SOURCE}"
+  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_CURSOR_SHAPE_XML}" "${RESHADE_WAYLAND_CURSOR_SHAPE_SOURCE}"
+  DEPENDS "${RESHADE_WAYLAND_CURSOR_SHAPE_XML}"
+)
+set(RESHADE_WAYLAND_TABLET_XML "${WAYLAND_PROTOCOLS_DIR}/stable/tablet/tablet-v2.xml")
+set(RESHADE_WAYLAND_TABLET_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/tablet-v2-protocol.c")
+add_custom_command(
+  OUTPUT "${RESHADE_WAYLAND_TABLET_SOURCE}"
+  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_TABLET_XML}" "${RESHADE_WAYLAND_TABLET_SOURCE}"
+  DEPENDS "${RESHADE_WAYLAND_TABLET_XML}"
+)
+set_source_files_properties(source/linux/input_linux.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER};${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER};${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER}")
 
 # Generate a native lookup table from the same localization resources used by Windows.
 file(GLOB RESHADE_LOCALIZATION_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/lang_*.rc2")
@@ -132,6 +155,9 @@ function(reshade_configure_linux_target target)
       ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
       ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}
       ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
+      ${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER}
+      ${RESHADE_WAYLAND_CURSOR_SHAPE_SOURCE}
+      ${RESHADE_WAYLAND_TABLET_SOURCE}
       ${RESHADE_LOCALIZATION_HEADER}
       ${RESHADE_LOCALIZATION_SOURCE}
       source/imgui_code_editor.cpp
@@ -164,7 +190,7 @@ function(reshade_configure_linux_target target)
     ${target}
     PRIVATE
       ReShadeFX fpng glad ImGui jxl stb utfcpp VMA Threads::Threads ${CMAKE_DL_LIBS}
-      PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::FONTCONFIG
+      PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XKBCOMMON_X11 PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::FONTCONFIG
   )
   target_link_options(${target} PRIVATE -Wl,--no-undefined)
 
@@ -181,10 +207,12 @@ if(RESHADE_BUILD_LINUX_TESTS)
   enable_testing()
   add_executable(reshade_linux_tests tests/linux_portability.cpp source/input.cpp
     ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER} ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
-    ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER} ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE})
+    ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER} ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
+    ${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER} ${RESHADE_WAYLAND_CURSOR_SHAPE_SOURCE}
+    ${RESHADE_WAYLAND_TABLET_SOURCE})
   target_include_directories(reshade_linux_tests PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
   target_compile_options(reshade_linux_tests PRIVATE -UNDEBUG $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
-  target_link_libraries(reshade_linux_tests PRIVATE Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON)
+  target_link_libraries(reshade_linux_tests PRIVATE glad Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XKBCOMMON_X11 PkgConfig::XCB PkgConfig::XCB_XINPUT)
   add_test(NAME linux_portability COMMAND reshade_linux_tests)
   set_tests_properties(linux_portability PROPERTIES TIMEOUT 15)
 endif()

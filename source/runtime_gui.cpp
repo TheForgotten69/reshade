@@ -821,10 +821,16 @@ void reshade::runtime::draw_gui()
 
 	if (_input != nullptr)
 	{
+		const unsigned int pressed_key = _input->last_key_pressed();
+		const unsigned int released_key = _input->last_key_released();
+		const bool overlay_key_pressed = _input->is_key_pressed(_overlay_key_data, _force_shortcut_modifiers);
+		if (pressed_key != 0 || released_key != 0)
+			log::message(log::level::info, "[DEBUG-input] Runtime %p key transition pressed=%u(%s) released=%u(%s) overlay_key=%u match=%d show_overlay=%d ignore_shortcuts=%d active_id=%u block_keyboard=%d block_mouse=%d cursor_block=%d.", this, pressed_key, input::key_name(pressed_key).c_str(), released_key, input::key_name(released_key).c_str(), _overlay_key_data[0], overlay_key_pressed, _show_overlay, _ignore_shortcuts, _imgui_context->ActiveId, _input->is_blocking_keyboard_input(), _input->is_blocking_mouse_input(), _input->is_blocking_mouse_cursor_warping());
+
 		if (_show_overlay && !_ignore_shortcuts && _input->is_key_pressed(input::key_escape) &&
 			(_input_processing_mode == 2 || (_input_processing_mode == 1 && (_imgui_context->IO.WantCaptureMouse || _imgui_context->IO.WantCaptureKeyboard))) && !_imgui_context->IO.NavVisible)
 			show_overlay = false; // Close when pressing the escape button, input focus is on the overlay and not currently navigating with the keyboard
-		else if (!_ignore_shortcuts && _input->is_key_pressed(_overlay_key_data, _force_shortcut_modifiers) && _imgui_context->ActiveId == 0)
+		else if (!_ignore_shortcuts && overlay_key_pressed && _imgui_context->ActiveId == 0)
 			show_overlay = !_show_overlay;
 
 		if (!_ignore_shortcuts)
@@ -5180,15 +5186,20 @@ void reshade::runtime::destroy_imgui_resources()
 
 bool reshade::runtime::open_overlay(bool open, api::input_source source)
 {
+	log::message(log::level::info, "[DEBUG-input] Runtime %p open_overlay request open=%d source=%u current=%d.", this, open, static_cast<unsigned int>(source), _show_overlay);
 #if RESHADE_ADDON
 	if (invoke_addon_event<addon_event::reshade_open_overlay>(this, open, source))
+	{
+		log::message(log::level::info, "[DEBUG-input] Runtime %p open_overlay request vetoed by add-on.", this);
 		return false;
+	}
 #endif
 
 	_show_overlay = open;
 
 	if (open)
 		_imgui_context->NavInputSource = static_cast<ImGuiInputSource>(source);
+	log::message(log::level::info, "[DEBUG-input] Runtime %p open_overlay applied show_overlay=%d.", this, _show_overlay);
 
 	return true;
 }

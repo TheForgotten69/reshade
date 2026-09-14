@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <memory>
@@ -14,6 +15,7 @@ namespace reshade
 {
 	#if defined(__linux__)
 	struct wayland_input_context;
+	struct x11_input_context;
 	#endif
 
 	class input
@@ -134,9 +136,13 @@ namespace reshade
 		/// <param name="window">Window handle of the target window.</param>
 		/// <returns>Pointer to the input manager registered for this <paramref name="window"/>.</returns>
 		static std::shared_ptr<input> register_window(window_handle window);
+		bool try_acquire_primary_handler();
+		void release_primary_handler();
 #if defined(__linux__)
 		static void register_wayland_surface(window_handle surface, void *display, unsigned int width, unsigned int height);
 		static void unregister_wayland_surface(window_handle surface);
+		static void register_x11_window(window_handle window, unsigned int width, unsigned int height);
+		static void unregister_x11_window(window_handle window);
 
 		// Wayland clipboard integration; 'user_data' is expected to be the 'reshade::input'
 		// instance owning the Wayland connection, matching the shape ImGui's clipboard
@@ -233,6 +239,7 @@ namespace reshade
 		bool _block_mouse = false;
 		bool _block_keyboard = false;
 		bool _block_cursor_warping = false;
+		std::atomic_bool _primary_handler_claimed = false;
 		uint8_t _keys[256] = {};
 		uint8_t _last_keys[256] = {};
 		unsigned int _keys_time[256] = {};
@@ -243,8 +250,10 @@ namespace reshade
 		std::wstring _text_input;
 	#if defined(__linux__)
 		wayland_input_context *_wayland = nullptr;
+		x11_input_context *_x11 = nullptr;
 
 		friend struct wayland_input_context;
+		friend struct x11_input_context;
 	#endif
 	};
 
