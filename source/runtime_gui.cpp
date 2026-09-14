@@ -129,7 +129,10 @@ void reshade::runtime::init_gui()
 	ImGuiIO &imgui_io = _imgui_context->IO;
 	imgui_io.IniFilename = nullptr;
 	imgui_io.ConfigFlags = ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
-	imgui_io.BackendFlags = ImGuiBackendFlags_HasMouseCursors | ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
+	imgui_io.BackendFlags = ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
+#if !defined(__linux__)
+	imgui_io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
+#endif
 #if defined(__linux__)
 	// Dear ImGui's built-in clipboard default implementation only has native support for
 	// Windows and macOS; wire up the Wayland data-device based implementation here instead

@@ -26,7 +26,6 @@
 #include <wayland-client.h>
 #include "xdg-output-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
-#include "cursor-shape-v1-client-protocol.h"
 
 // Owns one Wayland connection's worth of input state for a single ReShade-hooked Vulkan surface:
 // registry/seat discovery, keyboard and pointer state, output-scale tracking for pointer coordinate
@@ -55,13 +54,18 @@ struct reshade::wayland_input_context
 	uint32_t seat_global_name = 0;
 	wl_keyboard *keyboard = nullptr;
 	wl_pointer *pointer = nullptr;
-	wp_cursor_shape_manager_v1 *cursor_shape_manager = nullptr;
-	uint32_t cursor_shape_manager_global_name = 0;
-	wp_cursor_shape_device_v1 *cursor_shape_device = nullptr;
-	uint32_t pointer_serial = 0;
-	bool native_cursor_hidden = false;
 	zwp_relative_pointer_manager_v1 *relative_pointer_manager = nullptr;
 	zwp_relative_pointer_v1 *relative_pointer = nullptr;
+	// ImGui renders its own cursor while the overlay is active. Wayland remains an input-only
+	// adapter. Once relative events arrive, use them for the whole overlay/focus session so
+	// host recenter events cannot overwrite the virtual cursor between render batches.
+	bool software_cursor_active = false;
+	bool pointer_event_batch_active = false;
+	bool absolute_pointer_motion_in_batch = false;
+	bool relative_cursor_active = false;
+	double absolute_pointer_position[2] = {};
+	double virtual_pointer_position[2] = {};
+	double relative_pointer_delta[2] = {};
 	xkb_context *xkb_context = nullptr;
 	xkb_keymap *keymap = nullptr;
 	xkb_state *state = nullptr;
@@ -133,10 +137,6 @@ struct reshade::wayland_input_context
 			zwp_relative_pointer_v1_destroy(relative_pointer);
 		if (relative_pointer_manager != nullptr)
 			zwp_relative_pointer_manager_v1_destroy(relative_pointer_manager);
-		if (cursor_shape_device != nullptr)
-			wp_cursor_shape_device_v1_destroy(cursor_shape_device);
-		if (cursor_shape_manager != nullptr)
-			wp_cursor_shape_manager_v1_destroy(cursor_shape_manager);
 		if (pointer != nullptr)
 			wl_pointer_destroy(pointer);
 		if (keyboard != nullptr)
@@ -276,6 +276,9 @@ struct reshade::wayland_input_context
 	}
 	void clear_pointer_state()
 	{
+		relative_cursor_active = false;
+		absolute_pointer_motion_in_batch = false;
+		relative_pointer_delta[0] = relative_pointer_delta[1] = 0.0;
 		scroll_steps = 0;
 		has_scroll_steps = false;
 		scroll_distance = 0.0;
@@ -372,17 +375,6 @@ struct reshade::wayland_input_context
 				zwp_relative_pointer_v1_add_listener(context->relative_pointer, &relative_listener, context);
 			}
 		}
-		else if (std::strcmp(interface, wp_cursor_shape_manager_v1_interface.name) == 0 && context->cursor_shape_manager == nullptr)
-		{
-			context->cursor_shape_manager = static_cast<wp_cursor_shape_manager_v1 *>(wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, std::min(version, 1u)));
-			context->cursor_shape_manager_global_name = name;
-			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->cursor_shape_manager), context->queue);
-			if (context->pointer != nullptr)
-			{
-				context->cursor_shape_device = wp_cursor_shape_manager_v1_get_pointer(context->cursor_shape_manager, context->pointer);
-				wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->cursor_shape_device), context->queue);
-			}
-		}
 	}
 	static void registry_global_remove(void *data, wl_registry *, uint32_t name)
 	{
@@ -398,11 +390,6 @@ struct reshade::wayland_input_context
 			}
 			if (context->pointer != nullptr)
 			{
-				if (context->cursor_shape_device != nullptr)
-				{
-					wp_cursor_shape_device_v1_destroy(context->cursor_shape_device);
-					context->cursor_shape_device = nullptr;
-				}
 				wl_pointer_destroy(context->pointer);
 				context->pointer = nullptr;
 			}
@@ -418,18 +405,6 @@ struct reshade::wayland_input_context
 			}
 			context->keyboard_focused = context->pointer_focused = false;
 			context->seat_global_name = 0;
-		}
-		if (context->cursor_shape_manager_global_name == name)
-		{
-			if (context->cursor_shape_device != nullptr)
-			{
-				wp_cursor_shape_device_v1_destroy(context->cursor_shape_device);
-				context->cursor_shape_device = nullptr;
-			}
-			wp_cursor_shape_manager_v1_destroy(context->cursor_shape_manager);
-			context->cursor_shape_manager = nullptr;
-			context->cursor_shape_manager_global_name = 0;
-			context->native_cursor_hidden = false;
 		}
 		if (context->xdg_output_manager_global_name == name)
 		{
@@ -484,11 +459,6 @@ struct reshade::wayland_input_context
 			wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->pointer), context->queue);
 			static const wl_pointer_listener listener = {pointer_enter, pointer_leave, pointer_motion, pointer_button, pointer_axis, pointer_frame, pointer_axis_source, pointer_axis_stop, pointer_axis_discrete};
 			wl_pointer_add_listener(context->pointer, &listener, context);
-			if (context->cursor_shape_manager != nullptr)
-			{
-				context->cursor_shape_device = wp_cursor_shape_manager_v1_get_pointer(context->cursor_shape_manager, context->pointer);
-				wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(context->cursor_shape_device), context->queue);
-			}
 			if (context->relative_pointer_manager != nullptr)
 			{
 				context->relative_pointer = zwp_relative_pointer_manager_v1_get_relative_pointer(context->relative_pointer_manager, context->pointer);
@@ -504,11 +474,6 @@ struct reshade::wayland_input_context
 			{
 				zwp_relative_pointer_v1_destroy(context->relative_pointer);
 				context->relative_pointer = nullptr;
-			}
-			if (context->cursor_shape_device != nullptr)
-			{
-				wp_cursor_shape_device_v1_destroy(context->cursor_shape_device);
-				context->cursor_shape_device = nullptr;
 			}
 			wl_pointer_destroy(context->pointer);
 			context->pointer = nullptr;
@@ -701,7 +666,7 @@ struct reshade::wayland_input_context
 	}
 	void set_absolute_pointer_position(wl_fixed_t x, wl_fixed_t y)
 	{
-		if (!pointer_focused || (owner->_block_cursor_warping && relative_pointer != nullptr))
+		if (!pointer_focused || relative_cursor_active)
 			return;
 		const double logical_x = wl_fixed_to_double(x), logical_y = wl_fixed_to_double(y);
 		const double framebuffer_x = to_framebuffer_pointer_position(logical_x, std::max(1u, width));
@@ -712,31 +677,79 @@ struct reshade::wayland_input_context
 		// buffer-scale-aware client can compare it against the observed cursor behavior.
 		reshade::log::message(reshade::log::level::debug, "Wayland pointer motion logical=(%.2f, %.2f) output_scale=%.3f would_be_scaled=(%.2f, %.2f).", logical_x, logical_y, output_scale, logical_x * (output_scale > 0.0 ? output_scale : 1.0), logical_y * (output_scale > 0.0 ? output_scale : 1.0));
 #endif
-		owner->_mouse_position[0] = static_cast<unsigned int>(framebuffer_x);
-		owner->_mouse_position[1] = static_cast<unsigned int>(framebuffer_y);
+		if (pointer_event_batch_active)
+		{
+			absolute_pointer_motion_in_batch = true;
+			absolute_pointer_position[0] = framebuffer_x;
+			absolute_pointer_position[1] = framebuffer_y;
+		}
+		else
+		{
+			owner->_mouse_position[0] = static_cast<unsigned int>(framebuffer_x);
+			owner->_mouse_position[1] = static_cast<unsigned int>(framebuffer_y);
+			virtual_pointer_position[0] = framebuffer_x;
+			virtual_pointer_position[1] = framebuffer_y;
+		}
 	}
-	void set_native_cursor_hidden(bool hidden)
+	void set_software_cursor_active(bool active)
 	{
-		// ReShade is injected and does not own the host application's cursor surface. Unlike a
-		// normal ImGui platform backend, it cannot restore the cursor that was replaced by a
-		// wl_pointer.set_cursor request, so leave cursor visibility entirely to the host.
-		(void)hidden;
+		if (software_cursor_active == active)
+			return;
+		software_cursor_active = active;
+		relative_cursor_active = false;
+		virtual_pointer_position[0] = owner->_mouse_position[0];
+		virtual_pointer_position[1] = owner->_mouse_position[1];
+		relative_pointer_delta[0] = relative_pointer_delta[1] = 0.0;
 	}
-	static void pointer_enter(void *data, wl_pointer *, uint32_t serial, wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
+	void begin_pointer_event_batch()
+	{
+		pointer_event_batch_active = true;
+		absolute_pointer_motion_in_batch = false;
+		relative_pointer_delta[0] = relative_pointer_delta[1] = 0.0;
+	}
+	void finish_pointer_event_batch()
+	{
+		if (pointer_focused && relative_cursor_active)
+		{
+			unsigned int maximum[2];
+			max_pointer_position(maximum);
+			for (unsigned int axis = 0; axis < 2; ++axis)
+			{
+				virtual_pointer_position[axis] = std::clamp(virtual_pointer_position[axis] + relative_pointer_delta[axis], 0.0, static_cast<double>(maximum[axis]));
+				owner->_mouse_position[axis] = static_cast<unsigned int>(std::lround(virtual_pointer_position[axis]));
+			}
+		}
+		else if (pointer_focused && absolute_pointer_motion_in_batch)
+		{
+			for (unsigned int axis = 0; axis < 2; ++axis)
+			{
+				virtual_pointer_position[axis] = absolute_pointer_position[axis];
+				owner->_mouse_position[axis] = static_cast<unsigned int>(absolute_pointer_position[axis]);
+			}
+		}
+		pointer_event_batch_active = false;
+		relative_pointer_delta[0] = relative_pointer_delta[1] = 0.0;
+	}
+	static void pointer_enter(void *data, wl_pointer *, uint32_t, wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
-		context->pointer_serial = serial;
+		context->clear_pointer_state();
 		context->pointer_focused = context->accepts_focus(surface, "pointer");
 		context->set_absolute_pointer_position(x, y);
-		context->set_native_cursor_hidden(context->owner->_block_cursor_warping);
+		// Seed the new focus session before a relative event from this same batch arrives.
+		if (context->pointer_focused && context->pointer_event_batch_active)
+			for (unsigned int axis = 0; axis < 2; ++axis)
+			{
+				context->virtual_pointer_position[axis] = context->absolute_pointer_position[axis];
+				context->owner->_mouse_position[axis] = static_cast<unsigned int>(context->absolute_pointer_position[axis]);
+			}
 	}
 	static void pointer_leave(void *data, wl_pointer *, uint32_t, wl_surface *)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
 		context->clear_pointer_state();
 		context->pointer_focused = false;
-		context->pointer_serial = 0;
-		context->native_cursor_hidden = false;
+		context->relative_pointer_delta[0] = context->relative_pointer_delta[1] = 0.0;
 	}
 	static void pointer_motion(void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y)
 	{
@@ -796,16 +809,11 @@ struct reshade::wayland_input_context
 	static void relative_pointer_motion(void *data, zwp_relative_pointer_v1 *, uint32_t, uint32_t, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t, wl_fixed_t)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
-		if (!context->pointer_focused || !context->owner->_block_cursor_warping)
+		if (!context->pointer_focused || !context->software_cursor_active)
 			return;
-		// Unaccelerated deltas are reported in the same surface-local logical units as absolute
-		// pointer coordinates (see 'to_framebuffer_pointer_position'), so the virtual cursor they
-		// accumulate into is likewise left unscaled, to stay in the same coordinate space as
-		// 'set_absolute_pointer_position'.
-		unsigned int maximum[2];
-		context->max_pointer_position(maximum);
-		context->owner->_mouse_position[0] = static_cast<unsigned int>(std::clamp(static_cast<int>(std::lround(context->owner->_mouse_position[0] + wl_fixed_to_double(dx))), 0, static_cast<int>(maximum[0])));
-		context->owner->_mouse_position[1] = static_cast<unsigned int>(std::clamp(static_cast<int>(std::lround(context->owner->_mouse_position[1] + wl_fixed_to_double(dy))), 0, static_cast<int>(maximum[1])));
+		context->relative_cursor_active = true;
+		context->relative_pointer_delta[0] += wl_fixed_to_double(dx);
+		context->relative_pointer_delta[1] += wl_fixed_to_double(dy);
 	}
 
 	bool initialize()
@@ -866,7 +874,7 @@ struct reshade::wayland_input_context
 		compute_output_scale();
 		reshade::log::message(reshade::log::level::info, "Wayland input: wl_display=%p vulkan_surface=%p seat=%s keyboard=%s pointer=%s xkb_state=%s relative_pointer=%s xdg_output=%s.", display, surface, seat != nullptr ? "yes" : "no", keyboard != nullptr ? "yes" : "no", pointer != nullptr ? "yes" : "no", state != nullptr ? "yes" : "no", relative_pointer != nullptr ? "yes" : "no", xdg_output_manager != nullptr ? "yes" : "no");
 #if RESHADE_VERBOSE_LOG
-		reshade::log::message(reshade::log::level::debug, "Wayland backend ready surface=%p keyboard_focus=%d pointer_focus=%d cursor_shape=%s data_device=%s.", surface, keyboard_focused, pointer_focused, cursor_shape_device != nullptr ? "yes" : "no", data_device != nullptr ? "yes" : "no");
+		reshade::log::message(reshade::log::level::debug, "Wayland backend ready surface=%p keyboard_focus=%d pointer_focus=%d data_device=%s.", surface, keyboard_focused, pointer_focused, data_device != nullptr ? "yes" : "no");
 #endif
 		return seat != nullptr;
 	}
@@ -875,6 +883,9 @@ struct reshade::wayland_input_context
 	// only dispatches events that libwayland has already routed to this private queue.
 	bool dispatch_pending_events()
 	{
-		return wl_display_dispatch_queue_pending(display, queue) >= 0;
+		begin_pointer_event_batch();
+		const int result = wl_display_dispatch_queue_pending(display, queue);
+		finish_pointer_event_batch();
+		return result >= 0;
 	}
 };

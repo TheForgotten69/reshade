@@ -24,19 +24,9 @@ using namespace reshade;
 #endif
 
 static uint32_t pointer_version = 5;
-static unsigned int wayland_marshal_calls = 0;
 extern "C" uint32_t wl_proxy_get_version(wl_proxy *)
 {
 	return pointer_version;
-}
-extern "C" wl_proxy *wl_proxy_marshal_flags(wl_proxy *proxy, uint32_t, const wl_interface *, uint32_t, uint32_t, ...)
-{
-	++wayland_marshal_calls;
-	return proxy;
-}
-extern "C" int wl_display_flush(wl_display *)
-{
-	return 0;
 }
 
 void reshade::log::message(level, const char *, ...)
@@ -202,20 +192,97 @@ static void test_pointer_coordinate_scaling()
 	assert(context.to_framebuffer_pointer_position(-10.0, 1920) == 0.0);
 }
 
-static void test_injected_wayland_backend_does_not_override_host_cursor()
+static void test_wayland_pointer_source_stays_stable()
 {
 	reshade::input input(nullptr);
 	wayland_input_context context;
 	context.owner = &input;
-	context.pointer = reinterpret_cast<wl_pointer *>(static_cast<uintptr_t>(0x100));
-	context.cursor_shape_device = reinterpret_cast<wp_cursor_shape_device_v1 *>(static_cast<uintptr_t>(0x200));
 	context.pointer_focused = true;
-	context.pointer_serial = 1;
-	wayland_marshal_calls = 0;
-	context.set_native_cursor_hidden(true);
-	assert(wayland_marshal_calls == 0);
-	context.pointer = nullptr;
-	context.cursor_shape_device = nullptr;
+	context.width = 200;
+	context.height = 100;
+	context.set_absolute_pointer_position(wl_fixed_from_int(20), wl_fixed_from_int(30));
+	context.set_software_cursor_active(true);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(5), wl_fixed_from_int(7), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 25 && input.mouse_position_y() == 37);
+
+	// A locked host may keep reporting the same absolute anchor together with relative deltas.
+	// The anchor must not snap ImGui's software cursor back on every motion event.
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(20), wl_fixed_from_int(30));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(5), wl_fixed_from_int(7), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 30 && input.mouse_position_y() == 44);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(20), wl_fixed_from_int(30));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(5), wl_fixed_from_int(7), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 35 && input.mouse_position_y() == 51);
+
+	// A recenter event may arrive in its own render batch. It must not reset the virtual cursor.
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(20), wl_fixed_from_int(30));
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 35 && input.mouse_position_y() == 51);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(10), 0, 0);
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(80), wl_fixed_from_int(60));
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 45 && input.mouse_position_y() == 61);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(40), wl_fixed_from_int(50));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(10), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 55 && input.mouse_position_y() == 71);
+
+	context.set_software_cursor_active(false);
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(40), wl_fixed_from_int(50));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(10), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 40 && input.mouse_position_y() == 50);
+
+	context.set_software_cursor_active(true);
+	// Servers without relative motion keep working with absolute input.
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(60), wl_fixed_from_int(70));
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 60 && input.mouse_position_y() == 70);
+
+	for (unsigned int frame = 0; frame < 4; ++frame)
+	{
+		context.set_software_cursor_active(true); // Called every frame, must not reset the accumulator.
+		context.begin_pointer_event_batch();
+		wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_double(0.25), 0, 0, 0);
+		context.finish_pointer_event_batch();
+	}
+	assert(input.mouse_position_x() == 61 && input.mouse_position_y() == 70);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(500), wl_fixed_from_int(-500), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 200 && input.mouse_position_y() == 0);
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(-1), wl_fixed_from_int(1), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 199 && input.mouse_position_y() == 1);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(-20), 0, 0, 0);
+	wayland_input_context::pointer_leave(&context, nullptr, 0, nullptr);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 199 && input.mouse_position_y() == 1);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_enter(&context, nullptr, 0, nullptr, wl_fixed_from_int(10), wl_fixed_from_int(20));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(2), wl_fixed_from_int(3), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 12 && input.mouse_position_y() == 23);
 }
 
 static void test_input_lifetime_follows_native_surface()
@@ -340,7 +407,7 @@ int main()
 	test_x11_keyboard_focus_selection();
 	test_polled_button_transitions();
 	test_pointer_coordinate_scaling();
-	test_injected_wayland_backend_does_not_override_host_cursor();
+	test_wayland_pointer_source_stays_stable();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();
 	test_paths();

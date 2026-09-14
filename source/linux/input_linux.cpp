@@ -219,7 +219,7 @@ void reshade::input::block_mouse_cursor_warping(bool enable)
 {
 	_block_cursor_warping = enable;
 	if (_wayland != nullptr)
-		_wayland->set_native_cursor_hidden(enable);
+		_wayland->set_software_cursor_active(enable);
 	if (_x11 != nullptr)
 		_x11->set_native_cursor_hidden(enable);
 }
