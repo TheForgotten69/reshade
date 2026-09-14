@@ -166,6 +166,7 @@ function(reshade_configure_linux_target target)
       source/linux/input_linux.cpp
       source/linux/key_translation.cpp
       source/linux/window_registry.cpp
+	  source/linux/wine_input_bridge.cpp
       source/linux/platform_utils.cpp
       source/linux/process_environment.cpp
       source/linux/runtime_platform.cpp
@@ -208,7 +209,7 @@ option(RESHADE_BUILD_LINUX_TESTS "Build Linux portability regression tests" OFF)
 if(RESHADE_BUILD_LINUX_TESTS)
   enable_testing()
   add_executable(reshade_linux_tests tests/linux_portability.cpp source/input.cpp
-    source/linux/input_linux.cpp source/linux/key_translation.cpp source/linux/window_registry.cpp
+    source/linux/input_linux.cpp source/linux/key_translation.cpp source/linux/window_registry.cpp source/linux/wine_input_bridge.cpp
     ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER} ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
     ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER} ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
     ${RESHADE_WAYLAND_CURSOR_SHAPE_HEADER} ${RESHADE_WAYLAND_CURSOR_SHAPE_SOURCE}

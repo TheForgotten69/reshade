@@ -3,11 +3,11 @@
 #include "input.hpp"
 #include "dll_log.hpp"
 #include "key_translation.hpp"
+#include "wine_input_bridge.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <dlfcn.h>
 #include <unistd.h>
 
 #include <xcb/xcb.h>
@@ -33,24 +33,7 @@ struct reshade::x11_input_context
 	bool wine_input_available = false;
 	bool xfixes_cursor_hiding = false;
 	bool native_cursor_hidden = false;
-	struct wine_point
-	{
-		int32_t x;
-		int32_t y;
-	};
-	using wine_get_cursor_pos_fn = int (*)(wine_point *);
-	using wine_get_foreground_window_fn = void *(*)();
-	using wine_call_hwnd_param_fn = uintptr_t (*)(void *, uintptr_t, uint32_t);
-	using wine_get_async_key_state_fn = int16_t (*)(int);
-	using wine_get_cursor_fn = void *(*)();
-	using wine_set_cursor_fn = void *(*)(void *);
-	wine_get_cursor_pos_fn wine_get_cursor_pos = nullptr;
-	wine_get_foreground_window_fn wine_get_foreground_window = nullptr;
-	wine_call_hwnd_param_fn wine_call_hwnd_param = nullptr;
-	wine_get_async_key_state_fn wine_get_async_key_state = nullptr;
-	wine_get_cursor_fn wine_get_cursor = nullptr;
-	wine_set_cursor_fn wine_set_cursor = nullptr;
-	void *saved_wine_cursor = nullptr;
+	wine_input_bridge wine_input;
 	struct cached_key
 	{
 		xcb_keysym_t keysym = XKB_KEY_NoSymbol;
@@ -121,35 +104,15 @@ struct reshade::x11_input_context
 			return keysym & 0x00ffffffu;
 		return 0;
 	}
-	bool initialize_wine_input_bridge()
-	{
-		void *const module = dlopen("win32u.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-		auto lookup = [module](const char *name) { return dlsym(module != nullptr ? module : RTLD_DEFAULT, name); };
-		wine_get_cursor_pos = reinterpret_cast<wine_get_cursor_pos_fn>(lookup("NtUserGetCursorPos"));
-		wine_get_foreground_window = reinterpret_cast<wine_get_foreground_window_fn>(lookup("NtUserGetForegroundWindow"));
-		wine_call_hwnd_param = reinterpret_cast<wine_call_hwnd_param_fn>(lookup("NtUserCallHwndParam"));
-		wine_get_async_key_state = reinterpret_cast<wine_get_async_key_state_fn>(lookup("NtUserGetAsyncKeyState"));
-		wine_get_cursor = reinterpret_cast<wine_get_cursor_fn>(lookup("NtUserGetCursor"));
-		wine_set_cursor = reinterpret_cast<wine_set_cursor_fn>(lookup("NtUserSetCursor"));
-		if (module != nullptr)
-			dlclose(module);
-		return wine_get_cursor_pos != nullptr && wine_get_foreground_window != nullptr && wine_call_hwnd_param != nullptr;
-	}
 	bool query_wine_pointer_position()
 	{
-		if (wine_get_cursor_pos == nullptr || wine_get_foreground_window == nullptr || wine_call_hwnd_param == nullptr)
-			return false;
-
-		wine_point position = {};
-		void *const foreground_window = wine_get_foreground_window();
-		// NtUserCallHwndParam_ScreenToClient is Wine internal operation 23. Resolve the
-		// function dynamically and use it only when running inside Wine's win32u module.
-		if (foreground_window == nullptr || !wine_get_cursor_pos(&position) ||
-			wine_call_hwnd_param(foreground_window, reinterpret_cast<uintptr_t>(&position), 23) == 0)
+		wine_input_bridge::point position = {};
+		bool focused = false;
+		if (!wine_input.query_pointer_position(position, width, height, focused))
 			return false;
 
 		const bool was_focused = pointer_focused;
-		pointer_focused = position.x >= 0 && position.y >= 0 && position.x < static_cast<int32_t>(width) && position.y < static_cast<int32_t>(height);
+		pointer_focused = focused;
 		if (was_focused && !pointer_focused)
 			clear_pointer_state();
 		if (pointer_focused)
@@ -161,30 +124,21 @@ struct reshade::x11_input_context
 	}
 	void poll_wine_mouse_buttons()
 	{
-		if (wine_get_async_key_state == nullptr || !keyboard_focused)
+		if (!wine_input.available() || !keyboard_focused)
 			return;
 		constexpr std::pair<int, unsigned int> buttons[] = {
 			{0x01, input::key_button_left}, {0x02, input::key_button_right}, {0x04, input::key_button_middle},
 			{0x05, input::key_button_xbutton1}, {0x06, input::key_button_xbutton2}};
 		for (const auto &[virtual_key, input_key] : buttons)
-			owner->_keys[input_key] = (wine_get_async_key_state(virtual_key) & 0x8000) != 0 ? 0x88 : 0x08;
+			owner->_keys[input_key] = wine_input.button_down(virtual_key) ? 0x88 : 0x08;
 	}
 	void set_native_cursor_hidden(bool hidden)
 	{
 		if (native_cursor_hidden == hidden)
 			return;
-		if (wine_get_cursor != nullptr && wine_set_cursor != nullptr)
+		if (wine_input.cursor_hiding_available())
 		{
-			if (hidden)
-			{
-				saved_wine_cursor = wine_get_cursor();
-				wine_set_cursor(nullptr);
-			}
-			else if (saved_wine_cursor != nullptr)
-			{
-				wine_set_cursor(saved_wine_cursor);
-				saved_wine_cursor = nullptr;
-			}
+			wine_input.set_cursor_hidden(hidden);
 			native_cursor_hidden = hidden;
 			return;
 		}
@@ -390,8 +344,8 @@ struct reshade::x11_input_context
 		if (wine_input_available)
 		{
 			poll_wine_mouse_buttons();
-			if (native_cursor_hidden && wine_set_cursor != nullptr)
-				wine_set_cursor(nullptr);
+			if (native_cursor_hidden)
+				wine_input.maintain_hidden_cursor();
 		}
 		while (xcb_generic_event_t *event = xcb_poll_for_event(connection))
 		{
@@ -488,7 +442,7 @@ struct reshade::x11_input_context
 			return false;
 		}
 		xcb_flush(connection);
-		wine_input_available = initialize_wine_input_bridge();
+		wine_input_available = wine_input.initialize();
 		if (wine_input_available)
 		{
 			const char atom_name[] = "_NET_WM_PID";
@@ -504,7 +458,7 @@ struct reshade::x11_input_context
 		query_initial_focus();
 
 		const bool keyboard_ready = cache_key_translation();
-		reshade::log::message(reshade::log::level::info, "X11 input: xcb_window=%#x keyboard=%s pointer=%s cursor_hiding=%s translation=xcb-cached.", window, keyboard_ready ? "yes" : "no", wine_input_available ? "wine-win32u" : "xinput2", wine_set_cursor != nullptr ? "wine-win32u" : (xfixes_cursor_hiding ? "xfixes" : "no"));
+		reshade::log::message(reshade::log::level::info, "X11 input: xcb_window=%#x keyboard=%s pointer=%s cursor_hiding=%s translation=xcb-cached.", window, keyboard_ready ? "yes" : "no", wine_input_available ? "wine-win32u" : "xinput2", wine_input.cursor_hiding_available() ? "wine-win32u" : (xfixes_cursor_hiding ? "xfixes" : "no"));
 #if RESHADE_VERBOSE_LOG
 		reshade::log::message(reshade::log::level::debug, "X11 backend ready window=%#x keyboard_focus=%d pointer_focus=%d connection_error=%d.", window, keyboard_focused, pointer_focused, xcb_connection_has_error(connection));
 #endif
