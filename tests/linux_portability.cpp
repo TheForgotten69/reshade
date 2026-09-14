@@ -161,6 +161,15 @@ static void test_x11_keyboard_focus_selection()
 	assert(input.text_input().back() == static_cast<wchar_t>(0x1f600));
 }
 
+static void test_polled_button_transitions()
+{
+	assert(x11_input_context::update_polled_button_state(0, false) == 0);
+	assert(x11_input_context::update_polled_button_state(0, true) == 0x88);
+	assert(x11_input_context::update_polled_button_state(0x88, true) == 0x80);
+	assert(x11_input_context::update_polled_button_state(0x80, false) == 0x08);
+	assert(x11_input_context::update_polled_button_state(0x08, false) == 0);
+}
+
 // Regression test for the fractional-scale pointer desync (surface-local logical pointer
 // coordinates were passed straight through as if they were already physical framebuffer pixels):
 // 'to_framebuffer_pointer_position' must preserve the surface-local 1:1 mapping and clamp to the
@@ -303,6 +312,7 @@ int main()
 	test_scroll();
 	test_key_translation();
 	test_x11_keyboard_focus_selection();
+	test_polled_button_transitions();
 	test_pointer_coordinate_scaling();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();

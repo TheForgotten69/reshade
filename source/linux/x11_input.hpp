@@ -8,7 +8,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <unistd.h>
 
 #include <xcb/xcb.h>
 #include <xcb/xfixes.h>
@@ -29,7 +28,6 @@ struct reshade::x11_input_context
 	xcb_window_t root = XCB_WINDOW_NONE;
 	xcb_connection_t *connection = nullptr;
 	uint8_t xinput_opcode = 0;
-	xcb_atom_t net_wm_pid_atom = XCB_ATOM_NONE;
 	bool wine_input_available = false;
 	bool xfixes_cursor_hiding = false;
 	bool native_cursor_hidden = false;
@@ -130,7 +128,14 @@ struct reshade::x11_input_context
 			{0x01, input::key_button_left}, {0x02, input::key_button_right}, {0x04, input::key_button_middle},
 			{0x05, input::key_button_xbutton1}, {0x06, input::key_button_xbutton2}};
 		for (const auto &[virtual_key, input_key] : buttons)
-			owner->_keys[input_key] = wine_input.button_down(virtual_key) ? 0x88 : 0x08;
+			owner->_keys[input_key] = update_polled_button_state(owner->_keys[input_key], wine_input.button_down(virtual_key));
+	}
+	static uint8_t update_polled_button_state(uint8_t current, bool down)
+	{
+		const bool was_down = (current & 0x80) != 0;
+		if (down == was_down)
+			return down ? 0x80 : 0;
+		return down ? 0x88 : 0x08;
 	}
 	void set_native_cursor_hidden(bool hidden)
 	{
@@ -228,35 +233,6 @@ struct reshade::x11_input_context
 		}
 		return false;
 	}
-	bool belongs_to_current_process(xcb_window_t candidate) const
-	{
-		if (net_wm_pid_atom == XCB_ATOM_NONE)
-			return false;
-		while (candidate != XCB_WINDOW_NONE && candidate != XCB_INPUT_FOCUS_POINTER_ROOT)
-		{
-			xcb_get_property_reply_t *const property = xcb_get_property_reply(connection,
-				xcb_get_property(connection, false, candidate, net_wm_pid_atom, XCB_ATOM_CARDINAL, 0, 1), nullptr);
-			if (property != nullptr)
-			{
-				const bool matches = property->type == XCB_ATOM_CARDINAL && property->format == 32 &&
-					xcb_get_property_value_length(property) == sizeof(uint32_t) &&
-					*static_cast<const uint32_t *>(xcb_get_property_value(property)) == static_cast<uint32_t>(getpid());
-				free(property);
-				if (matches)
-					return true;
-			}
-
-			xcb_query_tree_reply_t *const tree = xcb_query_tree_reply(connection, xcb_query_tree(connection, candidate), nullptr);
-			if (tree == nullptr)
-				break;
-			const xcb_window_t parent = tree->parent;
-			free(tree);
-			if (parent == candidate)
-				break;
-			candidate = parent;
-		}
-		return false;
-	}
 	static xcb_window_t select_keyboard_window(xcb_window_t surface_window, xcb_window_t focused_window, bool surface_related, bool wine_related)
 	{
 		if (focused_window == XCB_WINDOW_NONE || focused_window == XCB_INPUT_FOCUS_POINTER_ROOT)
@@ -267,11 +243,10 @@ struct reshade::x11_input_context
 	}
 	bool resolve_keyboard_focus(xcb_window_t focused_window)
 	{
-		if (focused_window == last_observed_focus)
-			return keyboard_focused;
+		const bool focus_changed = focused_window != last_observed_focus;
+		const bool surface_related = focus_changed ? contains_window(focused_window) : keyboard_window == window;
 		last_observed_focus = focused_window;
-		const bool surface_related = contains_window(focused_window);
-		const bool wine_related = wine_input_available && belongs_to_current_process(focused_window);
+		const bool wine_related = wine_input_available && wine_input.is_foreground_process();
 		keyboard_window = select_keyboard_window(window, focused_window, surface_related, wine_related);
 		return keyboard_window != XCB_WINDOW_NONE;
 	}
@@ -443,16 +418,6 @@ struct reshade::x11_input_context
 		}
 		xcb_flush(connection);
 		wine_input_available = wine_input.initialize();
-		if (wine_input_available)
-		{
-			const char atom_name[] = "_NET_WM_PID";
-			xcb_intern_atom_reply_t *const atom = xcb_intern_atom_reply(connection, xcb_intern_atom(connection, true, sizeof(atom_name) - 1, atom_name), nullptr);
-			if (atom != nullptr)
-			{
-				net_wm_pid_atom = atom->atom;
-				free(atom);
-			}
-		}
 		// Focus may have been established before ReShade subscribed to events. X11
 		// does not replay the corresponding FocusIn/EnterNotify events to a new client.
 		query_initial_focus();

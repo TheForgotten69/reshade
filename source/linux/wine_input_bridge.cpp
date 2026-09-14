@@ -9,12 +9,23 @@ bool reshade::wine_input_bridge::initialize()
 	_get_cursor_pos = reinterpret_cast<get_cursor_pos_fn>(lookup("NtUserGetCursorPos"));
 	_get_foreground_window = reinterpret_cast<get_foreground_window_fn>(lookup("NtUserGetForegroundWindow"));
 	_call_hwnd_param = reinterpret_cast<call_hwnd_param_fn>(lookup("NtUserCallHwndParam"));
+	_call_hwnd = reinterpret_cast<call_hwnd_fn>(lookup("NtUserCallHwnd"));
 	_get_async_key_state = reinterpret_cast<get_async_key_state_fn>(lookup("NtUserGetAsyncKeyState"));
 	_get_cursor = reinterpret_cast<get_cursor_fn>(lookup("NtUserGetCursor"));
 	_set_cursor = reinterpret_cast<set_cursor_fn>(lookup("NtUserSetCursor"));
 	if (module != nullptr)
 		dlclose(module);
 	return available();
+}
+
+bool reshade::wine_input_bridge::is_foreground_process() const
+{
+	if (_get_foreground_window == nullptr || _call_hwnd == nullptr)
+		return false;
+	void *const foreground_window = _get_foreground_window();
+	// NtUserIsCurrentProcessWindow is Wine internal NtUserCallHwnd operation 16. Keeping the
+	// unstable operation number inside this adapter is why generic X11 code does not use it.
+	return foreground_window != nullptr && _call_hwnd(foreground_window, 16) != 0;
 }
 
 bool reshade::wine_input_bridge::available() const
