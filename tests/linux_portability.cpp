@@ -24,9 +24,19 @@ using namespace reshade;
 #endif
 
 static uint32_t pointer_version = 5;
+static unsigned int wayland_marshal_calls = 0;
 extern "C" uint32_t wl_proxy_get_version(wl_proxy *)
 {
 	return pointer_version;
+}
+extern "C" wl_proxy *wl_proxy_marshal_flags(wl_proxy *proxy, uint32_t, const wl_interface *, uint32_t, uint32_t, ...)
+{
+	++wayland_marshal_calls;
+	return proxy;
+}
+extern "C" int wl_display_flush(wl_display *)
+{
+	return 0;
 }
 
 void reshade::log::message(level, const char *, ...)
@@ -192,6 +202,22 @@ static void test_pointer_coordinate_scaling()
 	assert(context.to_framebuffer_pointer_position(-10.0, 1920) == 0.0);
 }
 
+static void test_injected_wayland_backend_does_not_override_host_cursor()
+{
+	reshade::input input(nullptr);
+	wayland_input_context context;
+	context.owner = &input;
+	context.pointer = reinterpret_cast<wl_pointer *>(static_cast<uintptr_t>(0x100));
+	context.cursor_shape_device = reinterpret_cast<wp_cursor_shape_device_v1 *>(static_cast<uintptr_t>(0x200));
+	context.pointer_focused = true;
+	context.pointer_serial = 1;
+	wayland_marshal_calls = 0;
+	context.set_native_cursor_hidden(true);
+	assert(wayland_marshal_calls == 0);
+	context.pointer = nullptr;
+	context.cursor_shape_device = nullptr;
+}
+
 static void test_input_lifetime_follows_native_surface()
 {
 	const reshade::input::window_handle window = reinterpret_cast<void *>(static_cast<uintptr_t>(0x1234));
@@ -314,6 +340,7 @@ int main()
 	test_x11_keyboard_focus_selection();
 	test_polled_button_transitions();
 	test_pointer_coordinate_scaling();
+	test_injected_wayland_backend_does_not_override_host_cursor();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();
 	test_paths();

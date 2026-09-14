@@ -717,16 +717,10 @@ struct reshade::wayland_input_context
 	}
 	void set_native_cursor_hidden(bool hidden)
 	{
-		if (!pointer_focused || pointer == nullptr || pointer_serial == 0 || native_cursor_hidden == hidden)
-			return;
-		if (hidden)
-			wl_pointer_set_cursor(pointer, pointer_serial, nullptr, 0, 0);
-		else if (cursor_shape_device != nullptr)
-			wp_cursor_shape_device_v1_set_shape(cursor_shape_device, pointer_serial, WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
-		else
-			return;
-		native_cursor_hidden = hidden;
-		wl_display_flush(display);
+		// ReShade is injected and does not own the host application's cursor surface. Unlike a
+		// normal ImGui platform backend, it cannot restore the cursor that was replaced by a
+		// wl_pointer.set_cursor request, so leave cursor visibility entirely to the host.
+		(void)hidden;
 	}
 	static void pointer_enter(void *data, wl_pointer *, uint32_t serial, wl_surface *surface, wl_fixed_t x, wl_fixed_t y)
 	{
