@@ -187,8 +187,8 @@ void reshade::input::next_frame()
 			log::message(log::level::debug, "Input heartbeat frame=%llu backend=none.", static_cast<unsigned long long>(_frame_count));
 	}
 #endif
-	if (_wayland != nullptr && !_wayland->pump_events_nonblocking())
-		log::message(log::level::warning, "Wayland input event pump failed for surface %p.", _wayland->surface);
+	if (_wayland != nullptr && !_wayland->dispatch_pending_events())
+		log::message(log::level::warning, "Wayland input pending-event dispatch failed for surface %p.", _wayland->surface);
 	if (_x11 != nullptr)
 		_x11->next_frame();
 }

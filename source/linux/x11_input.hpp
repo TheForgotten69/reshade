@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <xcb/xcb.h>
 #include <xcb/xfixes.h>
@@ -22,9 +23,12 @@ struct reshade::x11_input_context
 	input *owner = nullptr;
 	xcb_window_t window = XCB_WINDOW_NONE;
 	xcb_window_t keyboard_window = XCB_WINDOW_NONE;
+	xcb_window_t last_observed_focus = XCB_WINDOW_NONE;
 	xcb_window_t root = XCB_WINDOW_NONE;
 	xcb_connection_t *connection = nullptr;
 	uint8_t xinput_opcode = 0;
+	xcb_atom_t net_wm_pid_atom = XCB_ATOM_NONE;
+	bool wine_input_available = false;
 	bool xfixes_cursor_hiding = false;
 	bool native_cursor_hidden = false;
 	struct wine_point
@@ -102,6 +106,11 @@ struct reshade::x11_input_context
 				owner->_text_input += static_cast<wchar_t>(utf32);
 		}
 	}
+	void handle_raw_key(xcb_keycode_t key, bool pressed)
+	{
+		if (keyboard_focused)
+			set_key(key, pressed);
+	}
 	static uint32_t keysym_to_utf32(xcb_keysym_t keysym)
 	{
 		if ((keysym >= 0x20 && keysym <= 0x7e) || (keysym >= 0xa0 && keysym <= 0xff))
@@ -137,7 +146,10 @@ struct reshade::x11_input_context
 			wine_call_hwnd_param(foreground_window, reinterpret_cast<uintptr_t>(&position), 23) == 0)
 			return false;
 
+		const bool was_focused = pointer_focused;
 		pointer_focused = position.x >= 0 && position.y >= 0 && position.x < static_cast<int32_t>(width) && position.y < static_cast<int32_t>(height);
+		if (was_focused && !pointer_focused)
+			clear_pointer_state();
 		if (pointer_focused)
 		{
 			owner->_mouse_position[0] = static_cast<unsigned int>(position.x);
@@ -260,29 +272,60 @@ struct reshade::x11_input_context
 		}
 		return false;
 	}
+	bool belongs_to_current_process(xcb_window_t candidate) const
+	{
+		if (net_wm_pid_atom == XCB_ATOM_NONE)
+			return false;
+		while (candidate != XCB_WINDOW_NONE && candidate != XCB_INPUT_FOCUS_POINTER_ROOT)
+		{
+			xcb_get_property_reply_t *const property = xcb_get_property_reply(connection,
+				xcb_get_property(connection, false, candidate, net_wm_pid_atom, XCB_ATOM_CARDINAL, 0, 1), nullptr);
+			if (property != nullptr)
+			{
+				const bool matches = property->type == XCB_ATOM_CARDINAL && property->format == 32 &&
+					xcb_get_property_value_length(property) == sizeof(uint32_t) &&
+					*static_cast<const uint32_t *>(xcb_get_property_value(property)) == static_cast<uint32_t>(getpid());
+				free(property);
+				if (matches)
+					return true;
+			}
+
+			xcb_query_tree_reply_t *const tree = xcb_query_tree_reply(connection, xcb_query_tree(connection, candidate), nullptr);
+			if (tree == nullptr)
+				break;
+			const xcb_window_t parent = tree->parent;
+			free(tree);
+			if (parent == candidate)
+				break;
+			candidate = parent;
+		}
+		return false;
+	}
+	static xcb_window_t select_keyboard_window(xcb_window_t surface_window, xcb_window_t focused_window, bool surface_related, bool wine_related)
+	{
+		if (focused_window == XCB_WINDOW_NONE || focused_window == XCB_INPUT_FOCUS_POINTER_ROOT)
+			return XCB_WINDOW_NONE;
+		if (surface_related)
+			return surface_window;
+		return wine_related ? focused_window : XCB_WINDOW_NONE;
+	}
+	bool resolve_keyboard_focus(xcb_window_t focused_window)
+	{
+		if (focused_window == last_observed_focus)
+			return keyboard_focused;
+		last_observed_focus = focused_window;
+		const bool surface_related = contains_window(focused_window);
+		const bool wine_related = wine_input_available && belongs_to_current_process(focused_window);
+		keyboard_window = select_keyboard_window(window, focused_window, surface_related, wine_related);
+		return keyboard_window != XCB_WINDOW_NONE;
+	}
 	void query_initial_focus()
 	{
 		xcb_get_input_focus_reply_t *const focus = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), nullptr);
 		if (focus != nullptr)
 		{
-			const bool surface_related = contains_window(focus->focus);
-			keyboard_window = surface_related ? window : focus->focus;
-			keyboard_focused = keyboard_window != XCB_WINDOW_NONE && keyboard_window != XCB_INPUT_FOCUS_POINTER_ROOT;
+			keyboard_focused = resolve_keyboard_focus(focus->focus);
 			free(focus);
-		}
-
-		const xcb_window_t pointer_window = pointer_query_window();
-		xcb_query_pointer_reply_t *const pointer = xcb_query_pointer_reply(connection, xcb_query_pointer(connection, pointer_window), nullptr);
-		if (pointer != nullptr)
-		{
-			pointer_focused = pointer->same_screen && pointer->win_x >= 0 && pointer->win_y >= 0 &&
-				pointer->win_x < static_cast<int>(width) && pointer->win_y < static_cast<int>(height);
-			if (pointer_focused)
-			{
-				owner->_mouse_position[0] = static_cast<unsigned int>(pointer->win_x);
-				owner->_mouse_position[1] = static_cast<unsigned int>(pointer->win_y);
-			}
-			free(pointer);
 		}
 	}
 	bool refresh_keyboard_focus()
@@ -290,8 +333,11 @@ struct reshade::x11_input_context
 		xcb_get_input_focus_reply_t *const focus = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), nullptr);
 		if (focus == nullptr)
 			return keyboard_focused;
-		keyboard_focused = focus->focus == keyboard_window || contains_window(focus->focus);
+		const bool was_focused = keyboard_focused;
+		keyboard_focused = resolve_keyboard_focus(focus->focus);
 		free(focus);
+		if (was_focused && !keyboard_focused)
+			clear_keyboard_state();
 		return keyboard_focused;
 	}
 	void query_pointer_position()
@@ -301,8 +347,11 @@ struct reshade::x11_input_context
 		xcb_query_pointer_reply_t *const pointer = xcb_query_pointer_reply(connection, xcb_query_pointer(connection, pointer_query_window()), nullptr);
 		if (pointer == nullptr)
 			return;
+		const bool was_focused = pointer_focused;
 		pointer_focused = pointer->same_screen && pointer->win_x >= 0 && pointer->win_y >= 0 &&
 			pointer->win_x < static_cast<int>(width) && pointer->win_y < static_cast<int>(height);
+		if (was_focused && !pointer_focused)
+			clear_pointer_state();
 		if (pointer_focused && !owner->_block_cursor_warping)
 		{
 			owner->_mouse_position[0] = static_cast<unsigned int>(pointer->win_x);
@@ -312,12 +361,11 @@ struct reshade::x11_input_context
 	}
 	void handle_raw_motion(const xcb_input_raw_motion_event_t &event)
 	{
-		query_pointer_position();
 		if (!pointer_focused || !owner->_block_cursor_warping)
 			return;
-		const auto *const raw_event = reinterpret_cast<const xcb_input_raw_key_press_event_t *>(&event);
-		const xcb_input_fp3232_t *const values = xcb_input_raw_key_press_axisvalues_raw(raw_event);
-		const uint32_t *const valuators = xcb_input_raw_key_press_valuator_mask(raw_event);
+		// xcb_input_raw_motion_event_t is an alias of the generated raw-button event type.
+		const xcb_input_fp3232_t *const values = xcb_input_raw_button_press_axisvalues_raw(&event);
+		const uint32_t *const valuators = xcb_input_raw_button_press_valuator_mask(&event);
 		double delta[2] = {};
 		unsigned int value_index = 0;
 		for (unsigned int axis = 0; axis < event.valuators_len * 32; ++axis)
@@ -333,9 +381,12 @@ struct reshade::x11_input_context
 	}
 	void next_frame()
 	{
-		if (wine_get_cursor_pos != nullptr)
+		// XI2 raw events are global, so establish ownership once before draining this frame's
+		// batch. This bounds synchronous X requests independently of mouse polling rate.
+		refresh_keyboard_focus();
+		query_pointer_position();
+		if (wine_input_available)
 		{
-			query_wine_pointer_position();
 			poll_wine_mouse_buttons();
 			if (native_cursor_hidden && wine_set_cursor != nullptr)
 				wine_set_cursor(nullptr);
@@ -352,16 +403,11 @@ struct reshade::x11_input_context
 					{
 					case XCB_INPUT_RAW_KEY_PRESS:
 					case XCB_INPUT_RAW_KEY_RELEASE:
-						// Raw XInput2 events are not confined to the focused window, so focus must be
-						// re-queried on every key event rather than relying on FocusIn/FocusOut, which a
-						// foreign (e.g. Wine) window hierarchy is not guaranteed to deliver reliably.
-						if (refresh_keyboard_focus())
-							set_key(static_cast<xcb_keycode_t>(raw->detail), generic->event_type == XCB_INPUT_RAW_KEY_PRESS);
+						handle_raw_key(static_cast<xcb_keycode_t>(raw->detail), generic->event_type == XCB_INPUT_RAW_KEY_PRESS);
 						break;
 					case XCB_INPUT_RAW_BUTTON_PRESS:
 					case XCB_INPUT_RAW_BUTTON_RELEASE:
-						query_pointer_position();
-						if (pointer_focused && refresh_keyboard_focus())
+						if (pointer_focused && keyboard_focused)
 						{
 							xcb_button_press_event_t button = {};
 							button.detail = static_cast<uint8_t>(raw->detail);
@@ -369,7 +415,7 @@ struct reshade::x11_input_context
 						}
 						break;
 					case XCB_INPUT_RAW_MOTION:
-						if (refresh_keyboard_focus())
+						if (keyboard_focused)
 							handle_raw_motion(*reinterpret_cast<xcb_input_raw_motion_event_t *>(event));
 						break;
 					}
@@ -377,51 +423,8 @@ struct reshade::x11_input_context
 				free(event);
 				continue;
 			}
-			switch (event->response_type & 0x7f)
-			{
-			case XCB_KEY_PRESS:
-				if (keyboard_focused)
-					set_key(reinterpret_cast<xcb_key_press_event_t *>(event)->detail, true);
-				break;
-			case XCB_KEY_RELEASE:
-				if (keyboard_focused)
-					set_key(reinterpret_cast<xcb_key_release_event_t *>(event)->detail, false);
-				break;
-			case XCB_BUTTON_PRESS:
-				handle_button(*reinterpret_cast<xcb_button_press_event_t *>(event), true);
-				break;
-			case XCB_BUTTON_RELEASE:
-				handle_button(*reinterpret_cast<xcb_button_release_event_t *>(event), false);
-				break;
-			case XCB_MOTION_NOTIFY:
-				set_pointer_position(*reinterpret_cast<xcb_motion_notify_event_t *>(event));
-				break;
-			case XCB_ENTER_NOTIFY:
-				pointer_focused = true;
-				set_pointer_position(*reinterpret_cast<xcb_motion_notify_event_t *>(event));
-				break;
-			case XCB_LEAVE_NOTIFY:
-				clear_pointer_state();
-				pointer_focused = false;
-				break;
-			case XCB_FOCUS_IN:
-#if RESHADE_VERBOSE_LOG
-				reshade::log::message(reshade::log::level::debug, "X11 keyboard focus in window=%#x.", window);
-#endif
-				keyboard_focused = true;
-				break;
-			case XCB_FOCUS_OUT:
-#if RESHADE_VERBOSE_LOG
-				reshade::log::message(reshade::log::level::debug, "X11 keyboard focus out window=%#x.", window);
-#endif
-				clear_keyboard_state();
-				keyboard_focused = false;
-				break;
-			case XCB_CONFIGURE_NOTIFY:
-				width = std::max(1u, static_cast<unsigned int>(reinterpret_cast<xcb_configure_notify_event_t *>(event)->width));
-				height = std::max(1u, static_cast<unsigned int>(reinterpret_cast<xcb_configure_notify_event_t *>(event)->height));
-				break;
-			}
+			// This private connection subscribes only to XI2 raw events. Core events would require
+			// selecting masks on the application's window and are intentionally not consumed here.
 			free(event);
 		}
 	}
@@ -476,13 +479,23 @@ struct reshade::x11_input_context
 			return false;
 		}
 		xcb_flush(connection);
-		const bool wine_input = initialize_wine_input_bridge();
+		wine_input_available = initialize_wine_input_bridge();
+		if (wine_input_available)
+		{
+			const char atom_name[] = "_NET_WM_PID";
+			xcb_intern_atom_reply_t *const atom = xcb_intern_atom_reply(connection, xcb_intern_atom(connection, true, sizeof(atom_name) - 1, atom_name), nullptr);
+			if (atom != nullptr)
+			{
+				net_wm_pid_atom = atom->atom;
+				free(atom);
+			}
+		}
 		// Focus may have been established before ReShade subscribed to events. X11
 		// does not replay the corresponding FocusIn/EnterNotify events to a new client.
 		query_initial_focus();
 
 		const bool keyboard_ready = cache_key_translation();
-		reshade::log::message(reshade::log::level::info, "X11 input: xcb_window=%#x keyboard=%s pointer=%s cursor_hiding=%s translation=xcb-cached.", window, keyboard_ready ? "yes" : "no", wine_input ? "wine-win32u" : "xinput2", wine_set_cursor != nullptr ? "wine-win32u" : (xfixes_cursor_hiding ? "xfixes" : "no"));
+		reshade::log::message(reshade::log::level::info, "X11 input: xcb_window=%#x keyboard=%s pointer=%s cursor_hiding=%s translation=xcb-cached.", window, keyboard_ready ? "yes" : "no", wine_input_available ? "wine-win32u" : "xinput2", wine_set_cursor != nullptr ? "wine-win32u" : (xfixes_cursor_hiding ? "xfixes" : "no"));
 #if RESHADE_VERBOSE_LOG
 		reshade::log::message(reshade::log::level::debug, "X11 backend ready window=%#x keyboard_focus=%d pointer_focus=%d connection_error=%d.", window, keyboard_focused, pointer_focused, xcb_connection_has_error(connection));
 #endif

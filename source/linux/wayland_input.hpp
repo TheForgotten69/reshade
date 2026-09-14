@@ -29,7 +29,7 @@
 
 // Owns one Wayland connection's worth of input state for a single ReShade-hooked Vulkan surface:
 // registry/seat discovery, keyboard and pointer state, output-scale tracking for pointer coordinate
-// mapping, and clipboard integration. See 'pump_events_nonblocking' for the event-ingestion
+// mapping, and clipboard integration. See 'dispatch_pending_events' for the event-ingestion
 // invariant this depends on, and 'to_framebuffer_pointer_position' for the coordinate-mapping one.
 struct reshade::wayland_input_context
 {
@@ -815,8 +815,17 @@ struct reshade::wayland_input_context
 		xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 		if (queue == nullptr || xkb_context == nullptr)
 			return false;
-		registry = wl_display_get_registry(display);
-		wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(registry), queue);
+
+		// Assign the private queue before the registry proxy is created. Creating the proxy on the
+		// default queue and moving it afterwards races other dispatchers on this foreign display.
+		void *const display_wrapper = wl_proxy_create_wrapper(display);
+		if (display_wrapper == nullptr)
+			return false;
+		wl_proxy_set_queue(static_cast<wl_proxy *>(display_wrapper), queue);
+		registry = wl_display_get_registry(static_cast<wl_display *>(display_wrapper));
+		wl_proxy_wrapper_destroy(display_wrapper);
+		if (registry == nullptr)
+			return false;
 		static const wl_registry_listener registry_listener = {registry_global, registry_global_remove};
 		wl_registry_add_listener(registry, &registry_listener, this);
 		if (wl_display_roundtrip_queue(display, queue) < 0 || seat == nullptr)
@@ -857,43 +866,11 @@ struct reshade::wayland_input_context
 #endif
 		return seat != nullptr;
 	}
-	// Non-blocking pump for this context's private event queue. libwayland requires every
-	// successful 'wl_display_prepare_read_queue' to be paired with either 'wl_display_read_events'
-	// or 'wl_display_cancel_read'; this follows that protocol with a zero-timeout poll so it never
-	// waits for data on the render thread, and dispatches whatever was already pending (from other
-	// queues sharing this display, including the application's own) before preparing another read.
-	bool pump_events_nonblocking()
+	// The display belongs to the host application, which remains its only socket reader. Reading it
+	// here can block behind another prepared reader even after a zero-timeout poll. Present therefore
+	// only dispatches events that libwayland has already routed to this private queue.
+	bool dispatch_pending_events()
 	{
-		if (wl_display_dispatch_queue_pending(display, queue) < 0)
-			return false;
-
-		while (wl_display_prepare_read_queue(display, queue) != 0)
-		{
-			if (errno != EAGAIN)
-				return false;
-			if (wl_display_dispatch_queue_pending(display, queue) < 0)
-				return false;
-		}
-
-		if (wl_display_flush(display) < 0 && errno != EAGAIN)
-		{
-			wl_display_cancel_read(display);
-			return false;
-		}
-		pollfd pfd {wl_display_get_fd(display), POLLIN, 0};
-		int poll_result;
-		do
-			poll_result = poll(&pfd, 1, 0);
-		while (poll_result < 0 && errno == EINTR);
-		if (poll_result > 0 && (pfd.revents & POLLIN) != 0)
-		{
-			if (wl_display_read_events(display) < 0)
-				return false;
-		}
-		else
-		{
-			wl_display_cancel_read(display);
-		}
 		return wl_display_dispatch_queue_pending(display, queue) >= 0;
 	}
 };

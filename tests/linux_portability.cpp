@@ -134,6 +134,30 @@ static void test_key_translation()
 	assert(x11_input_context::keysym_to_utf32(XKB_KEY_Home) == 0);
 }
 
+static void test_x11_keyboard_focus_selection()
+{
+	constexpr xcb_window_t surface = 0x100;
+	constexpr xcb_window_t child = 0x101;
+	constexpr xcb_window_t unrelated = 0x200;
+
+	assert(x11_input_context::select_keyboard_window(surface, surface, true, false) == surface);
+	assert(x11_input_context::select_keyboard_window(surface, child, true, false) == surface);
+	assert(x11_input_context::select_keyboard_window(surface, unrelated, false, true) == unrelated);
+	assert(x11_input_context::select_keyboard_window(surface, unrelated, false, false) == XCB_WINDOW_NONE);
+	assert(x11_input_context::select_keyboard_window(surface, XCB_WINDOW_NONE, false, true) == XCB_WINDOW_NONE);
+	assert(x11_input_context::select_keyboard_window(surface, XCB_INPUT_FOCUS_POINTER_ROOT, false, true) == XCB_WINDOW_NONE);
+
+	reshade::input input(nullptr);
+	x11_input_context context;
+	context.owner = &input;
+	context.key_translation[10].keysym = XKB_KEY_Home;
+	context.handle_raw_key(10, true);
+	assert(!input.is_key_down(input::key_home));
+	context.keyboard_focused = true;
+	context.handle_raw_key(10, true);
+	assert(input.is_key_down(input::key_home));
+}
+
 // Regression test for the fractional-scale pointer desync (surface-local logical pointer
 // coordinates were passed straight through as if they were already physical framebuffer pixels):
 // 'to_framebuffer_pointer_position' must scale by the known output ratio, clamp to the
@@ -273,6 +297,7 @@ int main()
 	test_clipboard();
 	test_scroll();
 	test_key_translation();
+	test_x11_keyboard_focus_selection();
 	test_pointer_coordinate_scaling();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();
