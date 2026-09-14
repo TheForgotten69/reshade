@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <dlfcn.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -66,6 +67,7 @@ struct reshade::wayland_input_context
 	xkb_state *state = nullptr;
 	bool keyboard_focused = false;
 	bool pointer_focused = false;
+	bool wine_compatibility = false;
 	int32_t scroll_steps = 0;
 	bool has_scroll_steps = false;
 	double scroll_distance = 0.0;
@@ -296,8 +298,9 @@ struct reshade::wayland_input_context
 			single_surface_fallback = surface_count == 1;
 		}
 
-		reshade::log::message(reshade::log::level::info, "Wayland %s enter: focused_surface=%p vulkan_surface=%p exact_match=%d%s.", device, focused_surface, surface, exact_match, single_surface_fallback ? " fallback=single-surface" : "");
-		return exact_match || single_surface_fallback;
+		const bool compatibility_match = wine_compatibility && single_surface_fallback;
+		reshade::log::message(reshade::log::level::info, "Wayland %s enter: focused_surface=%p vulkan_surface=%p exact_match=%d%s.", device, focused_surface, surface, exact_match, compatibility_match ? " fallback=wine-single-surface" : "");
+		return exact_match || compatibility_match;
 	}
 
 	void set_key(uint32_t key, uint32_t key_state)
@@ -320,7 +323,7 @@ struct reshade::wayland_input_context
 		if (key_state == WL_KEYBOARD_KEY_STATE_PRESSED)
 		{
 			const uint32_t utf32 = xkb_state_key_get_utf32(state, xkb_key);
-			if (utf32 != 0 && utf32 <= 0xffff)
+			if (utf32 != 0 && utf32 <= 0x10ffff && (utf32 < 0xd800 || utf32 > 0xdfff))
 				owner->_text_input += static_cast<wchar_t>(utf32);
 		}
 		xkb_state_update_key(state, xkb_key, key_state == WL_KEYBOARD_KEY_STATE_PRESSED ? XKB_KEY_DOWN : XKB_KEY_UP);
@@ -714,12 +717,14 @@ struct reshade::wayland_input_context
 	}
 	void set_native_cursor_hidden(bool hidden)
 	{
-		if (!pointer_focused || pointer == nullptr || cursor_shape_device == nullptr || pointer_serial == 0 || native_cursor_hidden == hidden)
+		if (!pointer_focused || pointer == nullptr || pointer_serial == 0 || native_cursor_hidden == hidden)
 			return;
 		if (hidden)
 			wl_pointer_set_cursor(pointer, pointer_serial, nullptr, 0, 0);
-		else
+		else if (cursor_shape_device != nullptr)
 			wp_cursor_shape_device_v1_set_shape(cursor_shape_device, pointer_serial, WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
+		else
+			return;
 		native_cursor_hidden = hidden;
 		wl_display_flush(display);
 	}
@@ -811,6 +816,11 @@ struct reshade::wayland_input_context
 
 	bool initialize()
 	{
+		if (void *const module = dlopen("win32u.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD))
+		{
+			wine_compatibility = true;
+			dlclose(module);
+		}
 		queue = wl_display_create_queue(display);
 		xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 		if (queue == nullptr || xkb_context == nullptr)

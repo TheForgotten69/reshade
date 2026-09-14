@@ -102,7 +102,7 @@ struct reshade::x11_input_context
 			const bool shifted = (owner->_keys[input::key_shift] & 0x80) != 0;
 			const bool modified = (owner->_keys[input::key_ctrl] & 0x80) != 0 || (owner->_keys[input::key_alt] & 0x80) != 0;
 			const uint32_t utf32 = modified ? 0 : (shifted && translation.shifted_utf32 != 0 ? translation.shifted_utf32 : translation.utf32);
-			if (utf32 != 0 && utf32 <= 0xffff)
+			if (utf32 != 0 && utf32 <= 0x10ffff && (utf32 < 0xd800 || utf32 > 0xdfff))
 				owner->_text_input += static_cast<wchar_t>(utf32);
 		}
 	}

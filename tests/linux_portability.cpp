@@ -156,13 +156,15 @@ static void test_x11_keyboard_focus_selection()
 	context.keyboard_focused = true;
 	context.handle_raw_key(10, true);
 	assert(input.is_key_down(input::key_home));
+	context.key_translation[11].utf32 = 0x1f600;
+	context.handle_raw_key(11, true);
+	assert(input.text_input().back() == static_cast<wchar_t>(0x1f600));
 }
 
 // Regression test for the fractional-scale pointer desync (surface-local logical pointer
 // coordinates were passed straight through as if they were already physical framebuffer pixels):
-// 'to_framebuffer_pointer_position' must scale by the known output ratio, clamp to the
-// framebuffer extent, and fall back to passing coordinates through unscaled when no reliable
-// ratio is known rather than guessing one.
+// 'to_framebuffer_pointer_position' must preserve the surface-local 1:1 mapping and clamp to the
+// framebuffer extent. Monitor output scale is not a surface buffer or viewport transform.
 static void test_pointer_coordinate_scaling()
 {
 	wayland_input_context context;

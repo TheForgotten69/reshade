@@ -1040,8 +1040,12 @@ void reshade::runtime::draw_gui()
 			imgui_io.AddKeyEvent(mapping.first, _input->is_key_down(mapping.second));
 		for (ImGuiMouseButton i = 0; i < ImGuiMouseButton_COUNT; i++)
 			imgui_io.AddMouseButtonEvent(i, _input->is_mouse_button_down(i));
-		for (ImWchar16 c : _input->text_input())
-			imgui_io.AddInputCharacterUTF16(c);
+		for (wchar_t c : _input->text_input())
+#if defined(__linux__)
+			imgui_io.AddInputCharacter(static_cast<unsigned int>(c));
+#else
+			imgui_io.AddInputCharacterUTF16(static_cast<ImWchar16>(c));
+#endif
 	}
 
 	if (_input_gamepad != nullptr)
