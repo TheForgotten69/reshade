@@ -335,9 +335,9 @@ void     VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surfac
 #if defined(__linux__)
 	const vulkan_surface surface_info = g_vulkan_surfaces.at(surface);
 	if (surface_info.kind == vulkan_wsi_kind::wayland)
-		reshade::input::unregister_wayland_surface(surface_info.window);
+		reshade::input::unregister_wayland_surface(surface_info.window, reinterpret_cast<uintptr_t>(surface));
 	else if (surface_info.kind == vulkan_wsi_kind::xcb || surface_info.kind == vulkan_wsi_kind::xlib)
-		reshade::input::unregister_x11_window(surface_info.window);
+		reshade::input::unregister_x11_window(surface_info.window, reinterpret_cast<uintptr_t>(surface));
 #endif
 	g_vulkan_surfaces.erase(surface);
 

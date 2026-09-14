@@ -22,6 +22,8 @@ struct reshade::x11_input_context
 {
 	input *owner = nullptr;
 	xcb_window_t window = XCB_WINDOW_NONE;
+	void *wsi_display = nullptr;
+	input::x11_display_kind wsi_display_kind = input::x11_display_kind::xcb;
 	xcb_window_t keyboard_window = XCB_WINDOW_NONE;
 	xcb_window_t last_observed_focus = XCB_WINDOW_NONE;
 	xcb_window_t root = XCB_WINDOW_NONE;
@@ -441,6 +443,13 @@ struct reshade::x11_input_context
 		if (screen_iterator.rem == 0)
 			return false;
 		root = screen_iterator.data->root;
+		xcb_get_geometry_reply_t *const geometry = xcb_get_geometry_reply(connection, xcb_get_geometry(connection, window), nullptr);
+		if (geometry == nullptr)
+		{
+			reshade::log::message(reshade::log::level::warning, "X11 input window %#x is not present on the server selected by DISPLAY (WSI display=%p kind=%s).", window, wsi_display, wsi_display_kind == input::x11_display_kind::xcb ? "xcb" : "xlib");
+			return false;
+		}
+		free(geometry);
 
 		const xcb_query_extension_reply_t *const extension = xcb_get_extension_data(connection, &xcb_input_id);
 		if (extension == nullptr || !extension->present)

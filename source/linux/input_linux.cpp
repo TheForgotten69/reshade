@@ -93,7 +93,7 @@ std::shared_ptr<reshade::input> reshade::input::register_window(window_handle wi
 	}
 
 	auto result = std::make_shared<input>(window);
-	result->_x11 = new x11_input_context{result.get(), static_cast<xcb_window_t>(reinterpret_cast<uintptr_t>(window))};
+	result->_x11 = new x11_input_context{result.get(), static_cast<xcb_window_t>(reinterpret_cast<uintptr_t>(window)), x11_info.display, x11_info.display_kind};
 	result->_x11->width = std::max(1u, x11_info.width);
 	result->_x11->height = std::max(1u, x11_info.height);
 	if (!result->_x11->initialize())
@@ -123,30 +123,38 @@ reshade::input::~input()
 	delete _wayland;
 	delete _x11;
 }
-void reshade::input::register_wayland_surface(window_handle surface, void *display, unsigned int width, unsigned int height)
+void reshade::input::register_wayland_surface(window_handle surface, void *display, uintptr_t vulkan_surface, unsigned int width, unsigned int height)
 {
 	std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
 	auto [it, inserted] = s_wayland_surfaces.try_emplace(surface);
 	it->second.display = static_cast<wl_display *>(display);
 	it->second.width = width;
 	it->second.height = height;
+	it->second.surfaces.insert(vulkan_surface);
 }
-void reshade::input::unregister_wayland_surface(window_handle surface)
+void reshade::input::unregister_wayland_surface(window_handle surface, uintptr_t vulkan_surface)
 {
 	std::lock_guard<std::mutex> lock(s_wayland_surfaces_mutex);
-	s_wayland_surfaces.erase(surface);
+	const auto it = s_wayland_surfaces.find(surface);
+	if (it != s_wayland_surfaces.end() && it->second.surfaces.erase(vulkan_surface) != 0 && it->second.surfaces.empty())
+		s_wayland_surfaces.erase(it);
 }
-void reshade::input::register_x11_window(window_handle window, unsigned int width, unsigned int height)
+void reshade::input::register_x11_window(window_handle window, void *display, x11_display_kind display_kind, uintptr_t vulkan_surface, unsigned int width, unsigned int height)
 {
 	std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
 	auto [it, inserted] = s_x11_windows.try_emplace(window);
+	it->second.display = display;
+	it->second.display_kind = display_kind;
 	it->second.width = width;
 	it->second.height = height;
+	it->second.surfaces.insert(vulkan_surface);
 }
-void reshade::input::unregister_x11_window(window_handle window)
+void reshade::input::unregister_x11_window(window_handle window, uintptr_t vulkan_surface)
 {
 	std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
-	s_x11_windows.erase(window);
+	const auto it = s_x11_windows.find(window);
+	if (it != s_x11_windows.end() && it->second.surfaces.erase(vulkan_surface) != 0 && it->second.surfaces.empty())
+		s_x11_windows.erase(it);
 }
 const char *reshade::input::get_clipboard_text(void *user_data)
 {

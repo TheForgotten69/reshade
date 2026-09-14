@@ -192,11 +192,14 @@ static void test_input_lifetime_follows_native_surface()
 	{
 		std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
 		s_x11_windows[window].input_instance = instance;
+		s_x11_windows[window].surfaces = {0x100, 0x200};
 	}
 	instance.reset();
 	assert(!observer.expired());
 
-	reshade::input::unregister_x11_window(window);
+	reshade::input::unregister_x11_window(window, 0x100);
+	assert(!observer.expired());
+	reshade::input::unregister_x11_window(window, 0x200);
 	assert(observer.expired());
 }
 

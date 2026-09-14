@@ -3,6 +3,7 @@
 #include "input.hpp"
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 struct wl_display;
 
@@ -18,6 +19,7 @@ namespace reshade
 		wl_display *display = nullptr;
 		unsigned int width = 0;
 		unsigned int height = 0;
+		std::unordered_set<uintptr_t> surfaces;
 		std::shared_ptr<input> input_instance;
 	};
 	extern std::mutex s_wayland_surfaces_mutex;
@@ -25,8 +27,11 @@ namespace reshade
 
 	struct x11_window_info
 	{
+		void *display = nullptr;
+		input::x11_display_kind display_kind = input::x11_display_kind::xcb;
 		unsigned int width = 0;
 		unsigned int height = 0;
+		std::unordered_set<uintptr_t> surfaces;
 		std::shared_ptr<input> input_instance;
 	};
 	extern std::mutex s_x11_windows_mutex;

@@ -139,10 +139,11 @@ namespace reshade
 		bool try_acquire_primary_handler();
 		void release_primary_handler();
 #if defined(__linux__)
-		static void register_wayland_surface(window_handle surface, void *display, unsigned int width, unsigned int height);
-		static void unregister_wayland_surface(window_handle surface);
-		static void register_x11_window(window_handle window, unsigned int width, unsigned int height);
-		static void unregister_x11_window(window_handle window);
+		enum class x11_display_kind { xcb, xlib };
+		static void register_wayland_surface(window_handle surface, void *display, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
+		static void unregister_wayland_surface(window_handle surface, uintptr_t vulkan_surface);
+		static void register_x11_window(window_handle window, void *display, x11_display_kind display_kind, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
+		static void unregister_x11_window(window_handle window, uintptr_t vulkan_surface);
 
 		// Wayland clipboard integration; 'user_data' is expected to be the 'reshade::input'
 		// instance owning the Wayland connection, matching the shape ImGui's clipboard
