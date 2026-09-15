@@ -393,12 +393,17 @@ struct reshade::x11_input_context
 		if (extension == nullptr || !extension->present)
 			return false;
 		xinput_opcode = extension->major_opcode;
-		xcb_input_xi_query_version_reply_t *const version = xcb_input_xi_query_version_reply(connection, xcb_input_xi_query_version(connection, 2, 0), nullptr);
+		// XI 2.0 suppresses raw events while another client (the host application)
+		// owns a grab. XI 2.1 delivers them even during fullscreen and implicit grabs.
+		xcb_input_xi_query_version_reply_t *const version = xcb_input_xi_query_version_reply(connection, xcb_input_xi_query_version(connection, 2, 1), nullptr);
 		if (version == nullptr || version->major_version < 2)
 		{
 			free(version);
 			return false;
 		}
+		reshade::log::message(reshade::log::level::info, "X11 input: negotiated XInput %u.%u.", version->major_version, version->minor_version);
+		if (version->major_version == 2 && version->minor_version == 0)
+			reshade::log::message(reshade::log::level::warning, "XInput 2.1 is unavailable; input cannot be observed during host grabs.");
 		free(version);
 
 		const xcb_query_extension_reply_t *const xfixes_extension = xcb_get_extension_data(connection, &xcb_xfixes_id);
