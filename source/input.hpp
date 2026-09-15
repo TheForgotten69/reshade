@@ -5,15 +5,18 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace reshade
 {
 	#if defined(__linux__)
 	struct wayland_input_context;
+	struct x11_input_context;
 	#endif
 
 	class input
@@ -134,9 +137,14 @@ namespace reshade
 		/// <param name="window">Window handle of the target window.</param>
 		/// <returns>Pointer to the input manager registered for this <paramref name="window"/>.</returns>
 		static std::shared_ptr<input> register_window(window_handle window);
+		bool try_acquire_primary_handler();
+		void release_primary_handler();
 #if defined(__linux__)
-		static void register_wayland_surface(window_handle surface, void *display, unsigned int width, unsigned int height);
-		static void unregister_wayland_surface(window_handle surface);
+		enum class x11_display_kind { xcb, xlib };
+		static void register_wayland_surface(window_handle surface, void *display, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
+		static void unregister_wayland_surface(window_handle surface, uintptr_t vulkan_surface);
+		static void register_x11_window(window_handle window, void *display, x11_display_kind display_kind, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
+		static void unregister_x11_window(window_handle window, uintptr_t vulkan_surface);
 
 		// Wayland clipboard integration; 'user_data' is expected to be the 'reshade::input'
 		// instance owning the Wayland connection, matching the shape ImGui's clipboard
@@ -193,6 +201,13 @@ namespace reshade
 		/// </summary>
 		void block_mouse_cursor_warping(bool enable);
 		bool is_blocking_mouse_cursor_warping() const { return _block_cursor_warping; }
+#if defined(__linux__)
+		bool uses_wayland() const { return _wayland != nullptr; }
+		bool is_mouse_position_valid() const;
+		void use_host_cursor(bool enable);
+		struct key_transition { unsigned int key; bool down; };
+		const std::vector<key_transition> &key_transitions() const { return _key_transitions; }
+#endif
 		static bool is_blocking_any_mouse_cursor_warping();
 
 		/// <summary>
@@ -233,6 +248,7 @@ namespace reshade
 		bool _block_mouse = false;
 		bool _block_keyboard = false;
 		bool _block_cursor_warping = false;
+		std::atomic_bool _primary_handler_claimed = false;
 		uint8_t _keys[256] = {};
 		uint8_t _last_keys[256] = {};
 		unsigned int _keys_time[256] = {};
@@ -242,9 +258,15 @@ namespace reshade
 		uint64_t _frame_count = 0; // Keep track of frame count to identify windows with a lot of rendering
 		std::wstring _text_input;
 	#if defined(__linux__)
+		void update_key_state(unsigned int key, bool down);
+		uint8_t _key_press_modifiers[256] = {};
+		std::vector<key_transition> _key_transitions;
+		bool _use_host_cursor = false;
 		wayland_input_context *_wayland = nullptr;
+		x11_input_context *_x11 = nullptr;
 
 		friend struct wayland_input_context;
+		friend struct x11_input_context;
 	#endif
 	};
 

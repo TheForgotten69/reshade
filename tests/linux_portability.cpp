@@ -1,15 +1,45 @@
-// Exercise the real Wayland callbacks without a compositor or a Vulkan device.
-#include "../source/linux/input_linux.cpp"
+// Exercise the real Wayland/X11 backend logic linked from the production translation units below
+// (see CMakeLists), without a compositor or a Vulkan device. Deliberately does not '#include' any
+// production '.cpp' - only the headers that declare the types and free functions under test - so
+// this stays a real link-time test of the shipped object code rather than a second copy of it.
+#include "../source/linux/wayland_input.hpp"
+#include "../source/linux/x11_input.hpp"
+#include "../source/linux/window_registry.hpp"
+#include "../source/linux/key_translation.hpp"
+#include "../source/linux/clipboard.hpp"
 #include "../source/linux/paths.hpp"
 #include "../source/linux/addon_paths.hpp"
 #include "../examples/09-depth/generic_depth_detection.hpp"
+#include <glad/vulkan.h>
 #include <cassert>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <sys/wait.h>
 
+using namespace reshade;
+
+#if !VK_KHR_wayland_surface || !VK_KHR_xcb_surface || !VK_KHR_xlib_surface
+#error "Linux builds must expose Wayland, XCB and Xlib Vulkan WSI entry points"
+#endif
+
 static uint32_t pointer_version = 5;
+// Simulate X server parent replies to exercise both directions of focus ancestry.
+static std::unordered_map<xcb_window_t, xcb_window_t> x11_test_parents;
+extern "C" xcb_query_tree_cookie_t xcb_query_tree(xcb_connection_t *, xcb_window_t window)
+{
+	return {window};
+}
+extern "C" xcb_query_tree_reply_t *xcb_query_tree_reply(xcb_connection_t *, xcb_query_tree_cookie_t cookie, xcb_generic_error_t **)
+{
+	const auto it = x11_test_parents.find(cookie.sequence);
+	if (it == x11_test_parents.end())
+		return nullptr;
+	auto *reply = static_cast<xcb_query_tree_reply_t *>(std::calloc(1, sizeof(xcb_query_tree_reply_t)));
+	assert(reply != nullptr);
+	reply->parent = it->second;
+	return reply;
+}
 extern "C" uint32_t wl_proxy_get_version(wl_proxy *)
 {
 	return pointer_version;
@@ -22,6 +52,17 @@ void reshade::log::message(level, const char *, ...)
 static void test_clipboard()
 {
 	reshade::wayland_input_context context;
+	auto *const text_offer = reinterpret_cast<wl_data_offer *>(static_cast<uintptr_t>(0x100));
+	auto *const image_offer = reinterpret_cast<wl_data_offer *>(static_cast<uintptr_t>(0x200));
+	context.data_offers.try_emplace(text_offer);
+	context.data_offers.try_emplace(image_offer);
+	reshade::wayland_input_context::data_offer_offer(&context, text_offer, "text/plain;charset=utf-8");
+	reshade::wayland_input_context::data_offer_offer(&context, image_offer, "image/png");
+	assert(context.data_offers.at(text_offer).has_text);
+	assert(context.data_offers.at(text_offer).mime_type == "text/plain;charset=utf-8");
+	assert(!context.data_offers.at(image_offer).has_text);
+	context.data_offers.clear();
+
 	context.clipboard_text = "ReShade clipboard";
 	context.clipboard_source = reinterpret_cast<wl_data_source *>(&context);
 	assert(context.get_clipboard_text() == context.clipboard_text);
@@ -91,6 +132,239 @@ static void test_scroll()
 	pointer_version = 4;
 	callbacks::pointer_axis(&context, nullptr, 0, WL_POINTER_AXIS_VERTICAL_SCROLL, wl_fixed_from_int(10));
 	assert(input.mouse_wheel_delta() == -1);
+}
+
+static void test_key_translation()
+{
+	assert(virtual_key_from_keysym(XKB_KEY_a) == 'A');
+	assert(virtual_key_from_keysym(XKB_KEY_Z) == 'Z');
+	assert(virtual_key_from_keysym(XKB_KEY_5) == '5');
+	assert(virtual_key_from_keysym(XKB_KEY_F5) == input::key_f5);
+	assert(virtual_key_from_keysym(XKB_KEY_Control_L) == input::key_left_ctrl);
+	assert(virtual_key_from_keysym(XKB_KEY_Shift_R) == input::key_right_shift);
+	assert(virtual_key_from_keysym(XKB_KEY_Return) == input::key_return);
+	assert(virtual_key_from_keysym(XKB_KEY_KP_Home) == input::key_home);
+	assert(virtual_key_from_keysym(XKB_KEY_VoidSymbol) == 0);
+	assert(x11_input_context::keysym_to_utf32('a') == 'a');
+	assert(x11_input_context::keysym_to_utf32(0x010020acu) == 0x20ac);
+	assert(x11_input_context::keysym_to_utf32(XKB_KEY_Home) == 0);
+}
+
+static void test_x11_keyboard_focus_selection()
+{
+	constexpr xcb_window_t surface = 0x100;
+	constexpr xcb_window_t child = 0x101;
+	constexpr xcb_window_t unrelated = 0x200;
+
+	assert(x11_input_context::select_keyboard_window(surface, surface, true, false) == surface);
+	assert(x11_input_context::select_keyboard_window(surface, child, true, false) == surface);
+	assert(x11_input_context::select_keyboard_window(surface, unrelated, false, true) == unrelated);
+	assert(x11_input_context::select_keyboard_window(surface, unrelated, false, false) == XCB_WINDOW_NONE);
+	assert(x11_input_context::select_keyboard_window(surface, XCB_WINDOW_NONE, false, true) == XCB_WINDOW_NONE);
+	assert(x11_input_context::select_keyboard_window(surface, XCB_INPUT_FOCUS_POINTER_ROOT, false, true) == XCB_WINDOW_NONE);
+
+	reshade::input input(nullptr);
+	x11_input_context context;
+	context.owner = &input;
+	context.key_translation[10].keysym = XKB_KEY_Home;
+	context.handle_raw_key(10, true);
+	assert(!input.is_key_down(input::key_home));
+	context.keyboard_focused = true;
+	context.handle_raw_key(10, true);
+	assert(input.is_key_down(input::key_home));
+	context.key_translation[11].utf32 = 0x1f600;
+	context.handle_raw_key(11, true);
+	assert(input.text_input().back() == static_cast<wchar_t>(0x1f600));
+}
+
+static void test_polled_button_transitions()
+{
+	assert(x11_input_context::update_polled_button_state(0, false) == 0);
+	assert(x11_input_context::update_polled_button_state(0, true) == 0x88);
+	assert(x11_input_context::update_polled_button_state(0x88, true) == 0x80);
+	assert(x11_input_context::update_polled_button_state(0x80, false) == 0x08);
+	assert(x11_input_context::update_polled_button_state(0x08, false) == 0);
+}
+
+// Regression test for the fractional-scale pointer desync (surface-local logical pointer
+// coordinates were passed straight through as if they were already physical framebuffer pixels):
+// 'to_framebuffer_pointer_position' must preserve the surface-local 1:1 mapping and clamp to the
+// framebuffer extent. Monitor output scale is not a surface buffer or viewport transform.
+static void test_pointer_coordinate_scaling()
+{
+	wayland_input_context context;
+
+	// Verified against a live KWin session: a client that never opts into a Wayland buffer scale
+	// (true of most Vulkan applications, e.g. vkcube) has a 1:1 logical/pixel surface, so
+	// coordinates must pass through unscaled regardless of 'output_scale' - multiplying by it
+	// previously clamped the cursor short of the real window edge on exactly this common case.
+	context.output_scale = 0.0;
+	assert(context.to_framebuffer_pointer_position(960.0, 1920) == 960.0);
+	context.output_scale = 1.5;
+	assert(context.to_framebuffer_pointer_position(960.0, 2880) == 960.0);
+
+	// Still clamped to the framebuffer extent.
+	assert(context.to_framebuffer_pointer_position(3000.0, 1920) == 1920.0);
+	assert(context.to_framebuffer_pointer_position(-10.0, 1920) == 0.0);
+}
+
+static void test_wayland_surface_scale_fallback()
+{
+	reshade::input input(nullptr);
+	wayland_input_context context;
+	context.owner = &input;
+	context.width = 3840;
+	context.height = 2160;
+	context.pointer_focused = true;
+	context.set_absolute_pointer_position(wl_fixed_from_int(100), wl_fixed_from_int(200));
+	context.update_pointer_scale(1.5);
+	assert(input.mouse_position_x() == 150 && input.mouse_position_y() == 300);
+	assert(context.to_framebuffer_pointer_position(2560, 3840) == 3840);
+	context.set_software_cursor_active(true);
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(20), 0, 0);
+	context.update_pointer_scale(1.35);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 149 && input.mouse_position_y() == 297);
+	assert(std::abs(context.virtual_pointer_position[0] - 148.5) < 0.0001);
+	context.update_pointer_scale(0);
+	assert(context.pointer_scale == 1.35);
+	context.update_pointer_scale(1);
+	assert(input.mouse_position_x() == 110 && input.mouse_position_y() == 220);
+	context.set_software_cursor_active(false);
+	context.begin_pointer_event_batch();
+	context.set_absolute_pointer_position(wl_fixed_from_int(100), wl_fixed_from_int(200));
+	context.update_pointer_scale(1.5);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 150 && input.mouse_position_y() == 300);
+
+	wayland_input_context wine;
+	wine.wine_compatibility = true;
+	wine.update_pointer_scale(1.5);
+	assert(wine.to_framebuffer_pointer_position(100, 1000) == 100);
+}
+
+static void test_wayland_pointer_source_stays_stable()
+{
+	reshade::input input(nullptr);
+	wayland_input_context context;
+	context.owner = &input;
+	context.pointer_focused = true;
+	context.width = 200;
+	context.height = 100;
+	context.set_absolute_pointer_position(wl_fixed_from_int(20), wl_fixed_from_int(30));
+	context.set_software_cursor_active(true);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(5), wl_fixed_from_int(7), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 25 && input.mouse_position_y() == 37);
+
+	// A locked host may keep reporting the same absolute anchor together with relative deltas.
+	// The anchor must not snap ImGui's software cursor back on every motion event.
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(20), wl_fixed_from_int(30));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(5), wl_fixed_from_int(7), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 30 && input.mouse_position_y() == 44);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(20), wl_fixed_from_int(30));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(5), wl_fixed_from_int(7), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 35 && input.mouse_position_y() == 51);
+
+	// A recenter event may arrive in its own render batch. It must not reset the virtual cursor.
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(20), wl_fixed_from_int(30));
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 35 && input.mouse_position_y() == 51);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(10), 0, 0);
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(80), wl_fixed_from_int(60));
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 45 && input.mouse_position_y() == 61);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(40), wl_fixed_from_int(50));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(10), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 55 && input.mouse_position_y() == 71);
+
+	context.set_software_cursor_active(false);
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(40), wl_fixed_from_int(50));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(10), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 40 && input.mouse_position_y() == 50);
+
+	context.set_software_cursor_active(true);
+	// Servers without relative motion keep working with absolute input.
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_motion(&context, nullptr, 0, wl_fixed_from_int(60), wl_fixed_from_int(70));
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 60 && input.mouse_position_y() == 70);
+
+	for (unsigned int frame = 0; frame < 4; ++frame)
+	{
+		context.set_software_cursor_active(true); // Called every frame, must not reset the accumulator.
+		context.begin_pointer_event_batch();
+		wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_double(0.25), 0, 0, 0);
+		context.finish_pointer_event_batch();
+	}
+	assert(input.mouse_position_x() == 61 && input.mouse_position_y() == 70);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(500), wl_fixed_from_int(-500), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 200 && input.mouse_position_y() == 0);
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(-1), wl_fixed_from_int(1), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 199 && input.mouse_position_y() == 1);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(-20), 0, 0, 0);
+	wayland_input_context::pointer_leave(&context, nullptr, 0, nullptr);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 199 && input.mouse_position_y() == 1);
+
+	context.begin_pointer_event_batch();
+	wayland_input_context::pointer_enter(&context, nullptr, 0, nullptr, wl_fixed_from_int(10), wl_fixed_from_int(20));
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(2), wl_fixed_from_int(3), 0, 0);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 12 && input.mouse_position_y() == 23);
+}
+
+static void test_input_lifetime_follows_native_surface()
+{
+	const reshade::input::window_handle window = reinterpret_cast<void *>(static_cast<uintptr_t>(0x1234));
+	auto instance = std::make_shared<reshade::input>(window);
+	const std::weak_ptr<reshade::input> observer = instance;
+
+	{
+		std::lock_guard<std::mutex> lock(s_x11_windows_mutex);
+		s_x11_windows[window].input_instance = instance;
+		s_x11_windows[window].surfaces = {0x100, 0x200};
+	}
+	instance.reset();
+	assert(!observer.expired());
+
+	reshade::input::unregister_x11_window(window, 0x100);
+	assert(!observer.expired());
+	reshade::input::unregister_x11_window(window, 0x200);
+	assert(observer.expired());
+}
+
+static void test_primary_input_handler_claim_transfers()
+{
+	reshade::input input(nullptr);
+	assert(input.try_acquire_primary_handler());
+	assert(!input.try_acquire_primary_handler());
+	input.release_primary_handler();
+	assert(input.try_acquire_primary_handler());
+	input.release_primary_handler();
 }
 
 static void test_paths()
@@ -176,11 +450,119 @@ static void test_depth_detection()
 	assert(clear_evidence(std::numeric_limits<float>::quiet_NaN()) == unknown);
 }
 
+static void test_wayland_parent_keyboard_focus()
+{
+	input owner(nullptr);
+	wayland_input_context context;
+	context.owner = &owner;
+	context.surface = reinterpret_cast<wl_surface *>(uintptr_t(0x100));
+	context.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	xkb_rule_names names = {};
+	names.layout = "us";
+	context.keymap = xkb_keymap_new_from_names(context.xkb_context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	assert(context.keymap != nullptr);
+	context.state = xkb_state_new(context.keymap);
+	assert(context.state != nullptr);
+	const auto home = xkb_keymap_key_by_name(context.keymap, "HOME") - 8;
+	auto *parent = reinterpret_cast<wl_surface *>(uintptr_t(0x200));
+	wayland_input_context::keyboard_enter(&context, nullptr, 0, parent, nullptr);
+	assert(!context.keyboard_focused);
+	wayland_input_context::pointer_enter(&context, nullptr, 0, context.surface, 0, 0);
+	assert(context.keyboard_focused);
+	wayland_input_context::keyboard_key(&context, nullptr, 1, 0, home, WL_KEYBOARD_KEY_STATE_PRESSED);
+	wayland_input_context::keyboard_key(&context, nullptr, 2, 0, home, WL_KEYBOARD_KEY_STATE_RELEASED);
+	assert(owner.is_key_pressed(input::key_home) && !owner.is_key_down(input::key_home));
+	owner.next_frame();
+	const auto control_index = xkb_keymap_mod_get_index(context.keymap, XKB_MOD_NAME_CTRL);
+	assert(control_index < 32);
+	wayland_input_context::keyboard_modifiers(&context, nullptr, 3, 1u << control_index, 0, 0, 0);
+	assert(owner.is_key_down(input::key_ctrl));
+	wayland_input_context::keyboard_key(&context, nullptr, 4, 0, home, WL_KEYBOARD_KEY_STATE_PRESSED);
+	wayland_input_context::keyboard_key(&context, nullptr, 5, 0, home, WL_KEYBOARD_KEY_STATE_RELEASED);
+	wayland_input_context::keyboard_modifiers(&context, nullptr, 6, 0, 0, 0, 0);
+	assert(owner.is_key_pressed(input::key_home, true, false, false, true));
+	wayland_input_context::keyboard_leave(&context, nullptr, 0, parent);
+	assert(!context.keyboard_focused);
+	wayland_input_context::keyboard_enter(&context, nullptr, 0, parent, nullptr);
+	assert(context.keyboard_focused);
+	wayland_input_context::pointer_leave(&context, nullptr, 0, context.surface);
+	assert(!context.keyboard_focused);
+}
+
+static void test_x11_short_key_press()
+{
+	input owner(nullptr);
+	x11_input_context context;
+	context.owner = &owner;
+	context.keyboard_focused = true;
+	context.key_translation[10].keysym = XKB_KEY_Home;
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	assert(!owner.is_key_down(input::key_home));
+	assert(owner.is_key_pressed(input::key_home));
+	assert(owner.key_transitions().size() == 2);
+	assert(owner.key_transitions()[0].down && !owner.key_transitions()[1].down);
+	owner.next_frame();
+	assert(owner.key_transitions().empty());
+	assert(!owner.is_key_pressed(input::key_home));
+	context.key_translation[11].keysym = XKB_KEY_Control_L;
+	context.handle_raw_key(11, true);
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	context.handle_raw_key(11, false);
+	assert(owner.is_key_pressed(input::key_ctrl));
+	assert(owner.is_key_released(input::key_ctrl));
+	assert(owner.is_key_pressed(input::key_home, true, false, false, true));
+	assert(!owner.is_key_pressed(input::key_home, false, false, false, true));
+	owner.next_frame();
+	assert(!owner.is_key_pressed(input::key_home));
+	context.root = 10;
+	context.window = 30;
+	x11_test_parents = {{30, 20}, {20, 10}, {40, 30}, {50, 20}};
+	assert(context.contains_window(20)); // Focused toolkit parent.
+	assert(context.contains_window(40)); // Focused child.
+	assert(!context.contains_window(50)); // Sibling is not this renderer.
+	assert(!context.contains_window(10)); // Desktop is never owned.
+	x11_test_parents.clear();
+
+	context.pointer_focused = true;
+	xcb_button_press_event_t button = {};
+	button.detail = 1;
+	context.handle_button(button, true);
+	context.handle_button(button, false);
+	assert(owner.is_mouse_button_pressed(0) && owner.is_mouse_button_released(0));
+	assert(!owner.is_mouse_button_down(0));
+	assert(owner.key_transitions().size() == 2);
+	assert(owner.key_transitions()[0].down && !owner.key_transitions()[1].down);
+	context.clear_pointer_state();
+	assert(owner.key_transitions().empty());
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	assert(owner.key_transitions().size() == 4);
+	for (size_t i = 0; i < 4; ++i)
+		assert(owner.key_transitions()[i].down == (i % 2 == 0));
+	context.clear_keyboard_state();
+	assert(owner.key_transitions().empty());
+	assert(!owner.is_key_pressed(input::key_home));
+}
+
 int main()
 {
+	test_wayland_parent_keyboard_focus();
+	test_x11_short_key_press();
 	test_depth_detection();
 	test_clipboard();
 	test_scroll();
+	test_key_translation();
+	test_x11_keyboard_focus_selection();
+	test_polled_button_transitions();
+	test_pointer_coordinate_scaling();
+	test_wayland_surface_scale_fallback();
+	test_wayland_pointer_source_stays_stable();
+	test_input_lifetime_follows_native_surface();
+	test_primary_input_handler_claim_transfers();
 	test_paths();
-	std::cout << "Depth detection, clipboard, scroll and add-on path tests passed.\n";
+	std::cout << "Depth detection, clipboard, scroll, key translation, pointer scaling and add-on path tests passed.\n";
 }

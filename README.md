@@ -21,7 +21,7 @@ You'll need Visual Studio 2017 or higher to build ReShade. And Python in the PAT
 
 ### Linux
 
-The native Linux build currently supports x86-64 Vulkan applications running on Wayland. It requires CMake, a C++17 compiler, Python, pkg-config, and the development packages for Wayland client, Wayland protocols, xkbcommon, and Fontconfig.
+The native Linux build supports x86-64 Vulkan applications running on Wayland, native X11, or XWayland, plus experimental Wine/Proton hosts. The input backend is selected per window from the Vulkan presentation surface's actual WSI kind, not from `$XDG_SESSION_TYPE`. It requires CMake, a C++17 compiler, Python, pkg-config, and the development packages for Wayland client, Wayland protocols, xkbcommon, XCB (including `xcb-xinput` and `xcb-xfixes`), and Fontconfig.
 
 ```sh
 cmake -S . -B build-linux -DRESHADE_VERSION=<major.minor.patch>
@@ -35,13 +35,19 @@ The version option is only needed when the source tree has no reachable ReShade 
 RESHADE_ENABLE=1 /path/to/application
 ```
 
+For a Steam game using a Proton build with native Wayland support, use this launch option:
+
+```sh
+RESHADE_ENABLE=1 PROTON_ENABLE_WAYLAND=1 %command%
+```
+
 Configuration is stored below the XDG config directory (normally `~/.config/reshade`), and logs below `$XDG_DATA_HOME/reshade/logs` (normally `~/.local/share/reshade/logs`). Generic Depth and Effect Runtime Sync are built in. Native Linux `.addon` and `.addon64` libraries are loaded from the user's XDG data directory and the installation's share directory; user copies take precedence by filename. Setting `[ADDON] AddonPath` explicitly restricts discovery to that directory. Windows add-on binaries are listed as incompatible and are not loaded.
 
 Configure with `-DRESHADE_BUILD_LINUX_ADDON_EXAMPLES=ON` to build the portable example add-ons. Generic Depth and Effect Runtime Sync are also built as standalone examples, but are not installed again because they are built into the host. Video capture requires FFmpeg development packages, and ray tracing requires DXC. These examples retain their individual behavior: Texture Replace reads `texreplace` beside the executable; shader/texture dumps and shader replacements use the user's ReShade data directory.
 
 To produce a distributable Linux archive with the optional example add-ons, configure that option and run `tools/package_linux.sh <build-dir> <official-reshade-shaders-checkout> [output-dir] [version]`. The archive installer installs no optional add-ons unless the user selects them interactively (or sets `INSTALL_ADDONS` for an unattended installation), so a fresh install does not activate development tools by default.
 
-The initial Linux port does not support Windows add-on binaries, OpenGL injection, VR overlays, gamepad navigation, screenshot sounds or post-save commands, or automatic update checks. FFmpeg-dependent add-ons may require compatible system libraries when the application bundles its own dependencies.
+The Linux port does not support Windows add-on binaries, OpenGL injection, VR overlays, gamepad navigation, screenshot sounds, or automatic update checks. Input is read passively through a private Wayland event queue, non-exclusive XInput2 raw events on X11/XWayland, or Wine's dynamically discovered `win32u` input bridge. It does not use an invasive global X11 grab, so native applications may continue receiving mouse and keyboard input while the overlay is open. A configured screenshot post-save command is run as `/bin/sh -c <command>` in a detached, non-blocking process. FFmpeg-dependent add-ons may require compatible system libraries when the application bundles its own dependencies.
 
 On Linux/Vulkan, Generic Depth can infer normal versus reversed depth from matching clear values and depth-test comparisons for the selected buffer. It observes at most 600 rendered frames and requires 120 consecutive matching observations before applying a result. Missing or conflicting evidence leaves the setting unchanged. No GPU readback is used. An explicit `RESHADE_DEPTH_INPUT_IS_REVERSED` definition takes precedence; automatic results are saved in the active preset, so use separate presets for games with different depth conventions. DisplayDepth's live-preview controls do not change other effects' preprocessor definitions.
 

@@ -11,6 +11,16 @@ reshade::input::input(window_handle window)
 {
 }
 
+bool reshade::input::try_acquire_primary_handler()
+{
+	bool expected = false;
+	return _primary_handler_claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
+}
+void reshade::input::release_primary_handler()
+{
+	_primary_handler_claimed.store(false, std::memory_order_release);
+}
+
 bool reshade::input::is_key_down(unsigned int keycode) const
 {
 	assert(keycode < std::size(_keys));
@@ -19,6 +29,10 @@ bool reshade::input::is_key_down(unsigned int keycode) const
 bool reshade::input::is_key_pressed(unsigned int keycode) const
 {
 	assert(keycode < std::size(_keys));
+#if defined(__linux__)
+	if (keycode > 0 && keycode < std::size(_keys) && (_keys[keycode] & 0x10) != 0)
+		return true;
+#endif
 	return keycode > 0 && keycode < std::size(_keys) && (_keys[keycode] & 0x88) == 0x88 && !is_key_repeated(keycode);
 }
 bool reshade::input::is_key_pressed(unsigned int keycode, bool ctrl, bool shift, bool alt, bool force_modifiers) const
@@ -26,7 +40,16 @@ bool reshade::input::is_key_pressed(unsigned int keycode, bool ctrl, bool shift,
 	if (keycode == 0)
 		return false;
 
-	const bool key_down = is_key_pressed(keycode), ctrl_down = is_key_down(key_ctrl), shift_down = is_key_down(key_shift), alt_down = is_key_down(key_alt);
+	const bool key_down = is_key_pressed(keycode);
+	bool ctrl_down = is_key_down(key_ctrl), shift_down = is_key_down(key_shift), alt_down = is_key_down(key_alt);
+#if defined(__linux__)
+	if (key_down && (_keys[keycode] & 0x10) != 0)
+	{
+		ctrl_down = (_key_press_modifiers[keycode] & 1) != 0;
+		shift_down = (_key_press_modifiers[keycode] & 2) != 0;
+		alt_down = (_key_press_modifiers[keycode] & 4) != 0;
+	}
+#endif
 	if (force_modifiers) // Modifier state is required to match
 		return key_down && (ctrl == ctrl_down && shift == shift_down && alt == alt_down);
 	else // Modifier state is optional and only has to match when down
@@ -35,6 +58,10 @@ bool reshade::input::is_key_pressed(unsigned int keycode, bool ctrl, bool shift,
 bool reshade::input::is_key_released(unsigned int keycode) const
 {
 	assert(keycode < std::size(_keys));
+#if defined(__linux__)
+	if (keycode > 0 && keycode < std::size(_keys) && (_keys[keycode] & 0x20) != 0)
+		return true;
+#endif
 	return keycode > 0 && keycode < std::size(_keys) && (_keys[keycode] & 0x88) == 0x08;
 }
 bool reshade::input::is_key_repeated(unsigned int keycode) const

@@ -21,6 +21,18 @@
 lockfree_linear_map<VkSurfaceKHR, vulkan_surface, 16> g_vulkan_surfaces;
 lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
 
+static const char *get_wsi_kind_name(vulkan_wsi_kind kind)
+{
+	switch (kind)
+	{
+	case vulkan_wsi_kind::win32: return "win32";
+	case vulkan_wsi_kind::wayland: return "wayland";
+	case vulkan_wsi_kind::xcb: return "xcb";
+	case vulkan_wsi_kind::xlib: return "xlib";
+	default: return "unknown";
+	}
+}
+
 struct VkLayerInstanceLink
 {
 	VkLayerInstanceLink *pNext;
@@ -249,7 +261,9 @@ VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Su
 		return result;
 	}
 
-	g_vulkan_surfaces.emplace(*pSurface, vulkan_surface { pCreateInfo->hwnd, nullptr });
+	const vulkan_surface surface_info { vulkan_wsi_kind::win32, pCreateInfo->hwnd, nullptr };
+	g_vulkan_surfaces.emplace(*pSurface, surface_info);
+	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
 
 	return VK_SUCCESS;
 }
@@ -267,20 +281,63 @@ VkResult VKAPI_CALL vkCreateWaylandSurfaceKHR(VkInstance instance, const VkWayla
 		return result;
 	}
 
-	g_vulkan_surfaces.emplace(*pSurface, vulkan_surface { pCreateInfo->surface, pCreateInfo->display });
+	const vulkan_surface surface_info { vulkan_wsi_kind::wayland, pCreateInfo->surface, pCreateInfo->display };
+	g_vulkan_surfaces.emplace(*pSurface, surface_info);
+	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
 
+	return VK_SUCCESS;
+}
+#endif
+#if VK_KHR_xcb_surface
+VkResult VKAPI_CALL vkCreateXcbSurfaceKHR(VkInstance instance, const VkXcbSurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface)
+{
+	reshade::log::message(reshade::log::level::info, "Redirecting vkCreateXcbSurfaceKHR(instance = %p, pCreateInfo = %p, pAllocator = %p, pSurface = %p) ...", instance, pCreateInfo, pAllocator, pSurface);
+
+	RESHADE_VULKAN_GET_INSTANCE_DISPATCH_PTR(CreateXcbSurfaceKHR, instance);
+	const VkResult result = trampoline(instance, pCreateInfo, pAllocator, pSurface);
+	if (result != VK_SUCCESS)
+	{
+		reshade::log::message(reshade::log::level::warning, "vkCreateXcbSurfaceKHR failed with error code %d.", static_cast<int>(result));
+		return result;
+	}
+
+	const vulkan_surface surface_info { vulkan_wsi_kind::xcb, reinterpret_cast<void *>(static_cast<uintptr_t>(pCreateInfo->window)), pCreateInfo->connection };
+	g_vulkan_surfaces.emplace(*pSurface, surface_info);
+	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
+	return VK_SUCCESS;
+}
+#endif
+#if VK_KHR_xlib_surface
+VkResult VKAPI_CALL vkCreateXlibSurfaceKHR(VkInstance instance, const VkXlibSurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface)
+{
+	reshade::log::message(reshade::log::level::info, "Redirecting vkCreateXlibSurfaceKHR(instance = %p, pCreateInfo = %p, pAllocator = %p, pSurface = %p) ...", instance, pCreateInfo, pAllocator, pSurface);
+
+	RESHADE_VULKAN_GET_INSTANCE_DISPATCH_PTR(CreateXlibSurfaceKHR, instance);
+	const VkResult result = trampoline(instance, pCreateInfo, pAllocator, pSurface);
+	if (result != VK_SUCCESS)
+	{
+		reshade::log::message(reshade::log::level::warning, "vkCreateXlibSurfaceKHR failed with error code %d.", static_cast<int>(result));
+		return result;
+	}
+
+	const vulkan_surface surface_info { vulkan_wsi_kind::xlib, reinterpret_cast<void *>(static_cast<uintptr_t>(pCreateInfo->window)), pCreateInfo->dpy };
+	g_vulkan_surfaces.emplace(*pSurface, surface_info);
+	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
 	return VK_SUCCESS;
 }
 #endif
 #if VK_KHR_surface
 void     VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surface, const VkAllocationCallbacks *pAllocator)
 {
-	reshade::log::message(reshade::log::level::info, "Redirecting vkDestroySurfaceKHR(instance = %p, surface = %p, pAllocator = %) ...", instance, surface, pAllocator);
+	reshade::log::message(reshade::log::level::info, "Redirecting vkDestroySurfaceKHR(instance = %p, surface = %p, pAllocator = %p) ...", instance, surface, pAllocator);
+
 
 #if defined(__linux__)
 	const vulkan_surface surface_info = g_vulkan_surfaces.at(surface);
-	if (surface_info.display != nullptr)
-		reshade::input::unregister_wayland_surface(surface_info.window);
+	if (surface_info.kind == vulkan_wsi_kind::wayland)
+		reshade::input::unregister_wayland_surface(surface_info.window, reinterpret_cast<uintptr_t>(surface));
+	else if (surface_info.kind == vulkan_wsi_kind::xcb || surface_info.kind == vulkan_wsi_kind::xlib)
+		reshade::input::unregister_x11_window(surface_info.window, reinterpret_cast<uintptr_t>(surface));
 #endif
 	g_vulkan_surfaces.erase(surface);
 
