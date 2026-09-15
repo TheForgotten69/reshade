@@ -31,6 +31,9 @@ struct reshade::x11_input_context
 	bool wine_input_available = false;
 	bool xfixes_cursor_hiding = false;
 	bool native_cursor_hidden = false;
+	bool fullscreen = false;
+	xcb_atom_t wm_state_atom = XCB_ATOM_NONE;
+	xcb_atom_t fullscreen_atom = XCB_ATOM_NONE;
 	wine_input_bridge wine_input;
 	struct cached_key
 	{
@@ -280,6 +283,40 @@ struct reshade::x11_input_context
 			clear_keyboard_state();
 		return keyboard_focused;
 	}
+	bool query_fullscreen() const
+	{
+		if (wm_state_atom == XCB_ATOM_NONE || fullscreen_atom == XCB_ATOM_NONE)
+			return false;
+		// Qt's render window can be a child of the managed top-level window.
+		xcb_window_t candidate = window;
+		for (unsigned int depth = 0; candidate != XCB_WINDOW_NONE && candidate != root && depth < 64; ++depth)
+		{
+			auto *property = xcb_get_property_reply(connection, xcb_get_property(connection, false, candidate, wm_state_atom, XCB_ATOM_ATOM, 0, 64), nullptr);
+			bool found = false;
+			if (property != nullptr && property->type == XCB_ATOM_ATOM && property->format == 32)
+			{
+				const auto *states = static_cast<const xcb_atom_t *>(xcb_get_property_value(property));
+				for (int i = 0; i < xcb_get_property_value_length(property) / 4; ++i)
+					found |= states[i] == fullscreen_atom;
+			}
+			free(property);
+			if (found)
+				return true;
+			auto *tree = xcb_query_tree_reply(connection, xcb_query_tree(connection, candidate), nullptr);
+			if (tree == nullptr)
+				break;
+			const auto parent = tree->parent;
+			free(tree);
+			if (parent == candidate)
+				break;
+			candidate = parent;
+		}
+		return false;
+	}
+	bool uses_relative_motion() const
+	{
+		return owner->_block_cursor_warping && (wine_input_available || fullscreen);
+	}
 	void query_pointer_position()
 	{
 		if (query_wine_pointer_position())
@@ -292,7 +329,7 @@ struct reshade::x11_input_context
 			pointer->win_x < static_cast<int>(width) && pointer->win_y < static_cast<int>(height);
 		if (was_focused && !pointer_focused)
 			clear_pointer_state();
-		if (pointer_focused && !owner->_block_cursor_warping)
+		if (pointer_focused && !uses_relative_motion())
 		{
 			owner->_mouse_position[0] = static_cast<unsigned int>(pointer->win_x);
 			owner->_mouse_position[1] = static_cast<unsigned int>(pointer->win_y);
@@ -301,7 +338,7 @@ struct reshade::x11_input_context
 	}
 	void handle_raw_motion(const xcb_input_raw_motion_event_t &event)
 	{
-		if (!pointer_focused || !owner->_block_cursor_warping)
+		if (!pointer_focused || !uses_relative_motion())
 			return;
 		// xcb_input_raw_motion_event_t is an alias of the generated raw-button event type.
 		const xcb_input_fp3232_t *const values = xcb_input_raw_button_press_axisvalues_raw(&event);
@@ -324,6 +361,8 @@ struct reshade::x11_input_context
 		// XI2 raw events are global, so establish ownership once before draining this frame's
 		// batch. This bounds synchronous X requests independently of mouse polling rate.
 		refresh_keyboard_focus();
+		if (!wine_input_available)
+			fullscreen = owner->_block_cursor_warping && query_fullscreen();
 		query_pointer_position();
 		if (wine_input_available)
 		{
@@ -381,6 +420,14 @@ struct reshade::x11_input_context
 		if (screen_iterator.rem == 0)
 			return false;
 		root = screen_iterator.data->root;
+		const auto state_cookie = xcb_intern_atom(connection, false, 13, "_NET_WM_STATE");
+		const auto fullscreen_cookie = xcb_intern_atom(connection, false, 24, "_NET_WM_STATE_FULLSCREEN");
+		auto *state_reply = xcb_intern_atom_reply(connection, state_cookie, nullptr);
+		auto *fullscreen_reply = xcb_intern_atom_reply(connection, fullscreen_cookie, nullptr);
+		wm_state_atom = state_reply != nullptr ? state_reply->atom : XCB_ATOM_NONE;
+		fullscreen_atom = fullscreen_reply != nullptr ? fullscreen_reply->atom : XCB_ATOM_NONE;
+		free(state_reply);
+		free(fullscreen_reply);
 		xcb_get_geometry_reply_t *const geometry = xcb_get_geometry_reply(connection, xcb_get_geometry(connection, window), nullptr);
 		if (geometry == nullptr)
 		{

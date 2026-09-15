@@ -922,7 +922,7 @@ void reshade::runtime::draw_gui()
 
 #if defined(__linux__)
 		_input->use_host_cursor(_wayland_use_host_cursor);
-		if (_input->uses_wayland() && _wayland_use_host_cursor)
+		if (!_input->is_mouse_position_valid() || (_input->uses_wayland() && _wayland_use_host_cursor))
 			imgui_io.MouseDrawCursor = false;
 		_imgui_context->PlatformIO.Platform_ClipboardUserData = _input.get();
 #endif
@@ -930,6 +930,13 @@ void reshade::runtime::draw_gui()
 		// Scale mouse position in case render resolution does not match the window size
 		unsigned int max_position[2];
 		_input->max_mouse_position(max_position);
+#if defined(__linux__)
+		// The compositor owns the pointer outside the render surface. Do not leave
+		// a second cursor or an active hover target at its last in-surface position.
+		if (!_input->is_mouse_position_valid())
+			imgui_io.AddMousePosEvent(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+		else
+#endif
 		imgui_io.AddMousePosEvent(
 			_input->mouse_position_x() * (imgui_io.DisplaySize.x / max_position[0]),
 			_input->mouse_position_y() * (imgui_io.DisplaySize.y / max_position[1]));

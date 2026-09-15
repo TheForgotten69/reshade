@@ -227,6 +227,10 @@ void reshade::input::max_mouse_position(unsigned int position[2]) const
 	}
 	position[0] = position[1] = 1;
 }
+bool reshade::input::is_mouse_position_valid() const
+{
+	return (_wayland != nullptr && _wayland->pointer_focused) || (_x11 != nullptr && _x11->pointer_focused);
+}
 void reshade::input::block_mouse_cursor_warping(bool enable)
 {
 	_block_cursor_warping = enable;

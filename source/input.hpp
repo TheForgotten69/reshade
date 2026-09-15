@@ -203,6 +203,7 @@ namespace reshade
 		bool is_blocking_mouse_cursor_warping() const { return _block_cursor_warping; }
 #if defined(__linux__)
 		bool uses_wayland() const { return _wayland != nullptr; }
+		bool is_mouse_position_valid() const;
 		void use_host_cursor(bool enable);
 		struct key_transition { unsigned int key; bool down; };
 		const std::vector<key_transition> &key_transitions() const { return _key_transitions; }
