@@ -10,6 +10,7 @@
 #include <string>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace reshade
 {
@@ -200,6 +201,12 @@ namespace reshade
 		/// </summary>
 		void block_mouse_cursor_warping(bool enable);
 		bool is_blocking_mouse_cursor_warping() const { return _block_cursor_warping; }
+#if defined(__linux__)
+		bool uses_wayland() const { return _wayland != nullptr; }
+		void use_host_cursor(bool enable);
+		struct key_transition { unsigned int key; bool down; };
+		const std::vector<key_transition> &key_transitions() const { return _key_transitions; }
+#endif
 		static bool is_blocking_any_mouse_cursor_warping();
 
 		/// <summary>
@@ -250,6 +257,10 @@ namespace reshade
 		uint64_t _frame_count = 0; // Keep track of frame count to identify windows with a lot of rendering
 		std::wstring _text_input;
 	#if defined(__linux__)
+		void update_key_state(unsigned int key, bool down);
+		uint8_t _key_press_modifiers[256] = {};
+		std::vector<key_transition> _key_transitions;
+		bool _use_host_cursor = false;
 		wayland_input_context *_wayland = nullptr;
 		x11_input_context *_x11 = nullptr;
 

@@ -349,6 +349,9 @@ void reshade::runtime::load_config_gui(const ini_file &config)
 	config_get("INPUT", "KeyFPS", _fps_key_data);
 	config_get("INPUT", "KeyFrameTime", _frametime_key_data);
 	config_get("INPUT", "InputProcessing", _input_processing_mode);
+#if defined(__linux__)
+	config_get("INPUT", "WaylandUseHostCursor", _wayland_use_host_cursor);
+#endif
 
 #if RESHADE_LOCALIZATION
 	config_get("OVERLAY", "Language", _selected_language);
@@ -452,6 +455,9 @@ void reshade::runtime::save_config_gui(ini_file &config) const
 	config.set("INPUT", "KeyFPS", _fps_key_data);
 	config.set("INPUT", "KeyFrametime", _frametime_key_data);
 	config.set("INPUT", "InputProcessing", _input_processing_mode);
+#if defined(__linux__)
+	config.set("INPUT", "WaylandUseHostCursor", _wayland_use_host_cursor);
+#endif
 
 #if RESHADE_LOCALIZATION
 	config.set("OVERLAY", "Language", _selected_language);
@@ -915,6 +921,9 @@ void reshade::runtime::draw_gui()
 		imgui_io.MouseDrawCursor = _show_overlay && (!_should_save_screenshot || !_screenshot_save_gui);
 
 #if defined(__linux__)
+		_input->use_host_cursor(_wayland_use_host_cursor);
+		if (_input->uses_wayland() && _wayland_use_host_cursor)
+			imgui_io.MouseDrawCursor = false;
 		_imgui_context->PlatformIO.Platform_ClipboardUserData = _input.get();
 #endif
 
@@ -1036,11 +1045,26 @@ void reshade::runtime::draw_gui()
 			{ ImGuiMod_Ctrl, input::key_ctrl },
 			{ ImGuiMod_Shift, input::key_shift },
 			{ ImGuiMod_Alt, input::key_alt },
-			{ ImGuiMod_Super, input::key_application },
 		};
 
+#if defined(__linux__)
+		// Submit complete taps in event order. A pressed-or-down snapshot merges
+		// consecutive short taps into one held key (or mouse button).
+		constexpr unsigned int mouse_keys[] = { input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2 };
+		for (const auto &event : _input->key_transitions())
+		{
+			for (const auto &mapping : key_mappings)
+				if (mapping.second == event.key)
+					imgui_io.AddKeyEvent(mapping.first, event.down);
+			for (ImGuiMouseButton i = 0; i < ImGuiMouseButton_COUNT; ++i)
+				if (mouse_keys[i] == event.key)
+					imgui_io.AddMouseButtonEvent(i, event.down);
+		}
+#endif
+		// Reconcile polled inputs and focus-loss releases as well.
 		for (const std::pair<ImGuiKey, unsigned int> &mapping : key_mappings)
 			imgui_io.AddKeyEvent(mapping.first, _input->is_key_down(mapping.second));
+		imgui_io.AddKeyEvent(ImGuiMod_Super, _input->is_key_down(input::key_left_windows) || _input->is_key_down(input::key_right_windows));
 		for (ImGuiMouseButton i = 0; i < ImGuiMouseButton_COUNT; i++)
 			imgui_io.AddMouseButtonEvent(i, _input->is_mouse_button_down(i));
 		for (wchar_t c : _input->text_input())
@@ -2140,6 +2164,14 @@ void reshade::runtime::draw_gui_settings()
 				"Block all input when overlay is visible\n");
 			std::replace(input_processing_mode_items.begin(), input_processing_mode_items.end(), '\n', '\0');
 			modified |= ImGui::Combo(_("Input processing"), reinterpret_cast<int *>(&_input_processing_mode), input_processing_mode_items.c_str());
+#if defined(__linux__)
+			if (_input != nullptr && _input->uses_wayland())
+			{
+				modified |= ImGui::Checkbox("Use host cursor (Wayland)", &_wayland_use_host_cursor);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Avoids a duplicate cursor in windowed applications. Disable when the application hides or locks its cursor, especially in fullscreen.");
+			}
+#endif
 
 			modified |= imgui::key_input_box(_("Overlay key"), _overlay_key_data, *_input);
 

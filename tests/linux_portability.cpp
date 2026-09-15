@@ -24,6 +24,22 @@ using namespace reshade;
 #endif
 
 static uint32_t pointer_version = 5;
+// Simulate X server parent replies to exercise both directions of focus ancestry.
+static std::unordered_map<xcb_window_t, xcb_window_t> x11_test_parents;
+extern "C" xcb_query_tree_cookie_t xcb_query_tree(xcb_connection_t *, xcb_window_t window)
+{
+	return {window};
+}
+extern "C" xcb_query_tree_reply_t *xcb_query_tree_reply(xcb_connection_t *, xcb_query_tree_cookie_t cookie, xcb_generic_error_t **)
+{
+	const auto it = x11_test_parents.find(cookie.sequence);
+	if (it == x11_test_parents.end())
+		return nullptr;
+	auto *reply = static_cast<xcb_query_tree_reply_t *>(std::calloc(1, sizeof(xcb_query_tree_reply_t)));
+	assert(reply != nullptr);
+	reply->parent = it->second;
+	return reply;
+}
 extern "C" uint32_t wl_proxy_get_version(wl_proxy *)
 {
 	return pointer_version;
@@ -398,8 +414,108 @@ static void test_depth_detection()
 	assert(clear_evidence(std::numeric_limits<float>::quiet_NaN()) == unknown);
 }
 
+static void test_wayland_parent_keyboard_focus()
+{
+	input owner(nullptr);
+	wayland_input_context context;
+	context.owner = &owner;
+	context.surface = reinterpret_cast<wl_surface *>(uintptr_t(0x100));
+	context.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	xkb_rule_names names = {};
+	names.layout = "us";
+	context.keymap = xkb_keymap_new_from_names(context.xkb_context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	assert(context.keymap != nullptr);
+	context.state = xkb_state_new(context.keymap);
+	assert(context.state != nullptr);
+	const auto home = xkb_keymap_key_by_name(context.keymap, "HOME") - 8;
+	auto *parent = reinterpret_cast<wl_surface *>(uintptr_t(0x200));
+	wayland_input_context::keyboard_enter(&context, nullptr, 0, parent, nullptr);
+	assert(!context.keyboard_focused);
+	wayland_input_context::pointer_enter(&context, nullptr, 0, context.surface, 0, 0);
+	assert(context.keyboard_focused);
+	wayland_input_context::keyboard_key(&context, nullptr, 1, 0, home, WL_KEYBOARD_KEY_STATE_PRESSED);
+	wayland_input_context::keyboard_key(&context, nullptr, 2, 0, home, WL_KEYBOARD_KEY_STATE_RELEASED);
+	assert(owner.is_key_pressed(input::key_home) && !owner.is_key_down(input::key_home));
+	owner.next_frame();
+	const auto control_index = xkb_keymap_mod_get_index(context.keymap, XKB_MOD_NAME_CTRL);
+	assert(control_index < 32);
+	wayland_input_context::keyboard_modifiers(&context, nullptr, 3, 1u << control_index, 0, 0, 0);
+	assert(owner.is_key_down(input::key_ctrl));
+	wayland_input_context::keyboard_key(&context, nullptr, 4, 0, home, WL_KEYBOARD_KEY_STATE_PRESSED);
+	wayland_input_context::keyboard_key(&context, nullptr, 5, 0, home, WL_KEYBOARD_KEY_STATE_RELEASED);
+	wayland_input_context::keyboard_modifiers(&context, nullptr, 6, 0, 0, 0, 0);
+	assert(owner.is_key_pressed(input::key_home, true, false, false, true));
+	wayland_input_context::keyboard_leave(&context, nullptr, 0, parent);
+	assert(!context.keyboard_focused);
+	wayland_input_context::keyboard_enter(&context, nullptr, 0, parent, nullptr);
+	assert(context.keyboard_focused);
+	wayland_input_context::pointer_leave(&context, nullptr, 0, context.surface);
+	assert(!context.keyboard_focused);
+}
+
+static void test_x11_short_key_press()
+{
+	input owner(nullptr);
+	x11_input_context context;
+	context.owner = &owner;
+	context.keyboard_focused = true;
+	context.key_translation[10].keysym = XKB_KEY_Home;
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	assert(!owner.is_key_down(input::key_home));
+	assert(owner.is_key_pressed(input::key_home));
+	assert(owner.key_transitions().size() == 2);
+	assert(owner.key_transitions()[0].down && !owner.key_transitions()[1].down);
+	owner.next_frame();
+	assert(owner.key_transitions().empty());
+	assert(!owner.is_key_pressed(input::key_home));
+	context.key_translation[11].keysym = XKB_KEY_Control_L;
+	context.handle_raw_key(11, true);
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	context.handle_raw_key(11, false);
+	assert(owner.is_key_pressed(input::key_ctrl));
+	assert(owner.is_key_released(input::key_ctrl));
+	assert(owner.is_key_pressed(input::key_home, true, false, false, true));
+	assert(!owner.is_key_pressed(input::key_home, false, false, false, true));
+	owner.next_frame();
+	assert(!owner.is_key_pressed(input::key_home));
+	context.root = 10;
+	context.window = 30;
+	x11_test_parents = {{30, 20}, {20, 10}, {40, 30}, {50, 20}};
+	assert(context.contains_window(20)); // Focused toolkit parent.
+	assert(context.contains_window(40)); // Focused child.
+	assert(!context.contains_window(50)); // Sibling is not this renderer.
+	assert(!context.contains_window(10)); // Desktop is never owned.
+	x11_test_parents.clear();
+
+	context.pointer_focused = true;
+	xcb_button_press_event_t button = {};
+	button.detail = 1;
+	context.handle_button(button, true);
+	context.handle_button(button, false);
+	assert(owner.is_mouse_button_pressed(0) && owner.is_mouse_button_released(0));
+	assert(!owner.is_mouse_button_down(0));
+	assert(owner.key_transitions().size() == 2);
+	assert(owner.key_transitions()[0].down && !owner.key_transitions()[1].down);
+	context.clear_pointer_state();
+	assert(owner.key_transitions().empty());
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	context.handle_raw_key(10, true);
+	context.handle_raw_key(10, false);
+	assert(owner.key_transitions().size() == 4);
+	for (size_t i = 0; i < 4; ++i)
+		assert(owner.key_transitions()[i].down == (i % 2 == 0));
+	context.clear_keyboard_state();
+	assert(owner.key_transitions().empty());
+	assert(!owner.is_key_pressed(input::key_home));
+}
+
 int main()
 {
+	test_wayland_parent_keyboard_focus();
+	test_x11_short_key_press();
 	test_depth_detection();
 	test_clipboard();
 	test_scroll();

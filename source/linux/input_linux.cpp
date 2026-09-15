@@ -172,12 +172,24 @@ void reshade::input::set_clipboard_text(void *user_data, const char *text)
 		self->_wayland->set_clipboard_text(text);
 }
 void reshade::input::register_window_with_raw_input(window_handle, bool, bool) {}
+void reshade::input::update_key_state(unsigned int key, bool down)
+{
+	const bool was_down = (_keys[key] & 0x80) != 0;
+	if (was_down == down)
+		return;
+	_key_transitions.push_back({key, down});
+	if (down)
+		_key_press_modifiers[key] = (is_key_down(key_ctrl) ? 1 : 0) | (is_key_down(key_shift) ? 2 : 0) | (is_key_down(key_alt) ? 4 : 0);
+	// Preserve both edges until the renderer consumes this frame, including a complete tap.
+	_keys[key] = (_keys[key] & 0x30) | (down ? 0x98 : 0x28);
+}
 void reshade::input::next_frame()
 {
 	const std::unique_lock<std::recursive_mutex> lock(_mutex);
 	std::copy(std::begin(_keys), std::end(_keys), std::begin(_last_keys));
+	_key_transitions.clear();
 	for (uint8_t &state : _keys)
-		state &= ~0x08;
+		state &= 0x80;
 	std::copy(std::begin(_mouse_position), std::end(_mouse_position), std::begin(_last_mouse_position));
 	_mouse_wheel_delta = 0;
 	_text_input.clear();
@@ -219,9 +231,15 @@ void reshade::input::block_mouse_cursor_warping(bool enable)
 {
 	_block_cursor_warping = enable;
 	if (_wayland != nullptr)
-		_wayland->set_software_cursor_active(enable);
+		_wayland->set_software_cursor_active(enable && !_use_host_cursor);
 	if (_x11 != nullptr)
 		_x11->set_native_cursor_hidden(enable);
+}
+void reshade::input::use_host_cursor(bool enable)
+{
+	_use_host_cursor = enable;
+	if (_wayland != nullptr)
+		_wayland->set_software_cursor_active(_block_cursor_warping && !enable);
 }
 std::shared_ptr<reshade::input_gamepad> reshade::input_gamepad::load()
 {

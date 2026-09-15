@@ -54,16 +54,18 @@ struct reshade::x11_input_context
 	}
 	void clear_keyboard_state()
 	{
+		auto &events = owner->_key_transitions;
+		events.erase(std::remove_if(events.begin(), events.end(), [](const auto &event) { return event.key > input::key_button_xbutton2; }), events.end());
 		for (unsigned int key = input::key_button_xbutton2 + 1; key < std::size(owner->_keys); ++key)
-			if ((owner->_keys[key] & 0x80) != 0)
-				owner->_keys[key] = 0x08;
+			owner->_keys[key] = (owner->_keys[key] & 0x80) != 0 ? 0x08 : 0;
 	}
 	void clear_pointer_state()
 	{
+		auto &events = owner->_key_transitions;
+		events.erase(std::remove_if(events.begin(), events.end(), [](const auto &event) { return event.key <= input::key_button_xbutton2; }), events.end());
 		constexpr unsigned int keys[] = {input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2};
 		for (const unsigned int key : keys)
-			if ((owner->_keys[key] & 0x80) != 0)
-				owner->_keys[key] = 0x08;
+			owner->_keys[key] = (owner->_keys[key] & 0x80) != 0 ? 0x08 : 0;
 	}
 	void set_key(xcb_keycode_t key, bool pressed)
 	{
@@ -72,13 +74,13 @@ struct reshade::x11_input_context
 		const unsigned int virtual_key = virtual_key_from_keysym(keysym);
 		if (virtual_key != 0)
 		{
-			owner->_keys[virtual_key] = pressed ? 0x88 : 0x08;
+			owner->update_key_state(virtual_key, pressed);
 			if (virtual_key == input::key_left_ctrl || virtual_key == input::key_right_ctrl)
-				owner->_keys[input::key_ctrl] = (owner->_keys[input::key_left_ctrl] & 0x80) != 0 || (owner->_keys[input::key_right_ctrl] & 0x80) != 0 ? 0x88 : 0x08;
+				owner->update_key_state(input::key_ctrl, owner->is_key_down(input::key_left_ctrl) || owner->is_key_down(input::key_right_ctrl));
 			if (virtual_key == input::key_left_shift || virtual_key == input::key_right_shift)
-				owner->_keys[input::key_shift] = (owner->_keys[input::key_left_shift] & 0x80) != 0 || (owner->_keys[input::key_right_shift] & 0x80) != 0 ? 0x88 : 0x08;
+				owner->update_key_state(input::key_shift, owner->is_key_down(input::key_left_shift) || owner->is_key_down(input::key_right_shift));
 			if (virtual_key == input::key_left_alt || virtual_key == input::key_right_alt)
-				owner->_keys[input::key_alt] = (owner->_keys[input::key_left_alt] & 0x80) != 0 || (owner->_keys[input::key_right_alt] & 0x80) != 0 ? 0x88 : 0x08;
+				owner->update_key_state(input::key_alt, owner->is_key_down(input::key_left_alt) || owner->is_key_down(input::key_right_alt));
 		}
 		if (pressed)
 		{
@@ -210,16 +212,16 @@ struct reshade::x11_input_context
 		case 5: if (pressed) --owner->_mouse_wheel_delta; return;
 		default: return;
 		}
-		owner->_keys[key] = pressed ? 0x88 : 0x08;
+		owner->update_key_state(key, pressed);
 	}
-	bool contains_window(xcb_window_t focused_window) const
+	bool is_ancestor_window(xcb_window_t ancestor, xcb_window_t focused_window) const
 	{
 		// The Vulkan surface may belong to a parent of the actual X11 input window
 		// (this is common with Wine). Walk towards the root so late attachment works
 		// for both the surface window itself and one of its children.
 		while (focused_window != XCB_WINDOW_NONE && focused_window != XCB_INPUT_FOCUS_POINTER_ROOT)
 		{
-			if (focused_window == window)
+			if (focused_window == ancestor)
 				return true;
 
 			xcb_query_tree_reply_t *const tree = xcb_query_tree_reply(connection, xcb_query_tree(connection, focused_window), nullptr);
@@ -232,6 +234,13 @@ struct reshade::x11_input_context
 			focused_window = parent;
 		}
 		return false;
+	}
+	bool contains_window(xcb_window_t focused_window) const
+	{
+		if (focused_window == XCB_WINDOW_NONE || focused_window == XCB_INPUT_FOCUS_POINTER_ROOT || focused_window == root)
+			return false;
+		// Embedded Vulkan windows may be children of the toolkit's keyboard focus window.
+		return is_ancestor_window(window, focused_window) || is_ancestor_window(focused_window, window);
 	}
 	static xcb_window_t select_keyboard_window(xcb_window_t surface_window, xcb_window_t focused_window, bool surface_related, bool wine_related)
 	{

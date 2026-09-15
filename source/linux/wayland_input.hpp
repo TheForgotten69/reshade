@@ -70,6 +70,8 @@ struct reshade::wayland_input_context
 	xkb_keymap *keymap = nullptr;
 	xkb_state *state = nullptr;
 	bool keyboard_focused = false;
+	wl_surface *keyboard_focus_surface = nullptr;
+	bool keyboard_focus_exact = false;
 	bool pointer_focused = false;
 	bool wine_compatibility = false;
 	int32_t scroll_steps = 0;
@@ -270,12 +272,15 @@ struct reshade::wayland_input_context
 	}
 	void clear_keyboard_state()
 	{
+		auto &events = owner->_key_transitions;
+		events.erase(std::remove_if(events.begin(), events.end(), [](const auto &event) { return event.key > input::key_button_xbutton2; }), events.end());
 		for (unsigned int key = input::key_button_xbutton2 + 1; key < std::size(owner->_keys); ++key)
-			if ((owner->_keys[key] & 0x80) != 0)
-				owner->_keys[key] = 0x08;
+			owner->_keys[key] = (owner->_keys[key] & 0x80) != 0 ? 0x08 : 0;
 	}
 	void clear_pointer_state()
 	{
+		auto &events = owner->_key_transitions;
+		events.erase(std::remove_if(events.begin(), events.end(), [](const auto &event) { return event.key <= input::key_button_xbutton2; }), events.end());
 		relative_cursor_active = false;
 		absolute_pointer_motion_in_batch = false;
 		relative_pointer_delta[0] = relative_pointer_delta[1] = 0.0;
@@ -284,8 +289,7 @@ struct reshade::wayland_input_context
 		scroll_distance = 0.0;
 		constexpr unsigned int keys[] = {input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2};
 		for (const unsigned int key : keys)
-			if ((owner->_keys[key] & 0x80) != 0)
-				owner->_keys[key] = 0x08;
+			owner->_keys[key] = (owner->_keys[key] & 0x80) != 0 ? 0x08 : 0;
 	}
 	bool accepts_focus(wl_surface *focused_surface, const char *device)
 	{
@@ -315,13 +319,13 @@ struct reshade::wayland_input_context
 		const unsigned int virtual_key = virtual_key_from_keysym(keysym);
 		if (virtual_key != 0)
 		{
-			owner->_keys[virtual_key] = key_state == WL_KEYBOARD_KEY_STATE_PRESSED ? 0x88 : 0x08;
+			owner->update_key_state(virtual_key, key_state == WL_KEYBOARD_KEY_STATE_PRESSED);
 			if (virtual_key == input::key_left_ctrl || virtual_key == input::key_right_ctrl)
-				owner->_keys[input::key_ctrl] = (owner->_keys[input::key_left_ctrl] & 0x80) != 0 || (owner->_keys[input::key_right_ctrl] & 0x80) != 0 ? 0x88 : 0x08;
+				owner->update_key_state(input::key_ctrl, owner->is_key_down(input::key_left_ctrl) || owner->is_key_down(input::key_right_ctrl));
 			if (virtual_key == input::key_left_shift || virtual_key == input::key_right_shift)
-				owner->_keys[input::key_shift] = (owner->_keys[input::key_left_shift] & 0x80) != 0 || (owner->_keys[input::key_right_shift] & 0x80) != 0 ? 0x88 : 0x08;
+				owner->update_key_state(input::key_shift, owner->is_key_down(input::key_left_shift) || owner->is_key_down(input::key_right_shift));
 			if (virtual_key == input::key_left_alt || virtual_key == input::key_right_alt)
-				owner->_keys[input::key_alt] = (owner->_keys[input::key_left_alt] & 0x80) != 0 || (owner->_keys[input::key_right_alt] & 0x80) != 0 ? 0x88 : 0x08;
+				owner->update_key_state(input::key_alt, owner->is_key_down(input::key_left_alt) || owner->is_key_down(input::key_right_alt));
 		}
 		if (key_state == WL_KEYBOARD_KEY_STATE_PRESSED)
 		{
@@ -404,6 +408,8 @@ struct reshade::wayland_input_context
 				context->seat = nullptr;
 			}
 			context->keyboard_focused = context->pointer_focused = false;
+			context->keyboard_focus_surface = nullptr;
+			context->keyboard_focus_exact = false;
 			context->seat_global_name = 0;
 		}
 		if (context->xdg_output_manager_global_name == name)
@@ -452,6 +458,8 @@ struct reshade::wayland_input_context
 			wl_keyboard_destroy(context->keyboard);
 			context->keyboard = nullptr;
 			context->keyboard_focused = false;
+			context->keyboard_focus_surface = nullptr;
+			context->keyboard_focus_exact = false;
 		}
 		if ((capabilities & WL_SEAT_CAPABILITY_POINTER) != 0 && context->pointer == nullptr)
 		{
@@ -478,6 +486,7 @@ struct reshade::wayland_input_context
 			wl_pointer_destroy(context->pointer);
 			context->pointer = nullptr;
 			context->pointer_focused = false;
+			context->refresh_keyboard_focus();
 		}
 	}
 	static void seat_name(void *, wl_seat *, const char *) {}
@@ -632,13 +641,38 @@ struct reshade::wayland_input_context
 	static void keyboard_enter(void *data, wl_keyboard *, uint32_t, wl_surface *surface, wl_array *)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
-		context->keyboard_focused = context->accepts_focus(surface, "keyboard");
+		context->clear_keyboard_state();
+		context->keyboard_focus_surface = surface;
+		context->keyboard_focus_exact = context->accepts_focus(surface, "keyboard");
+		context->refresh_keyboard_focus();
+	}
+	void refresh_keyboard_focus()
+	{
+		// Qt can focus its parent while the Vulkan subsurface has pointer focus. Events on this
+		// display belong to the host client; require pointer focus as evidence before accepting
+		// a different keyboard surface, and drop this association on either focus leaving.
+		const bool focused = keyboard_focus_surface != nullptr && (keyboard_focus_exact || pointer_focused);
+		if (keyboard_focused && !focused)
+			clear_keyboard_state();
+		keyboard_focused = focused;
+		if (focused)
+			sync_keyboard_modifiers();
+	}
+	void sync_keyboard_modifiers()
+	{
+		if (!keyboard_focused || state == nullptr)
+			return;
+		owner->update_key_state(input::key_ctrl, xkb_state_mod_name_is_active(state, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) > 0);
+		owner->update_key_state(input::key_shift, xkb_state_mod_name_is_active(state, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) > 0);
+		owner->update_key_state(input::key_alt, xkb_state_mod_name_is_active(state, XKB_MOD_NAME_ALT, XKB_STATE_MODS_EFFECTIVE) > 0);
 	}
 	static void keyboard_leave(void *data, wl_keyboard *, uint32_t, wl_surface *)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
 		context->clear_keyboard_state();
 		context->keyboard_focused = false;
+		context->keyboard_focus_surface = nullptr;
+		context->keyboard_focus_exact = false;
 	}
 	static void keyboard_key(void *data, wl_keyboard *, uint32_t serial, uint32_t, uint32_t key, uint32_t state)
 	{
@@ -655,6 +689,7 @@ struct reshade::wayland_input_context
 		if (context->state != nullptr)
 		{
 			xkb_state_update_mask(context->state, depressed, latched, locked, 0, 0, group);
+			context->sync_keyboard_modifiers();
 			update_keyboard_layout_german(context->keymap, group);
 		}
 	}
@@ -735,6 +770,7 @@ struct reshade::wayland_input_context
 		auto *context = static_cast<wayland_input_context *>(data);
 		context->clear_pointer_state();
 		context->pointer_focused = context->accepts_focus(surface, "pointer");
+		context->refresh_keyboard_focus();
 		context->set_absolute_pointer_position(x, y);
 		// Seed the new focus session before a relative event from this same batch arrives.
 		if (context->pointer_focused && context->pointer_event_batch_active)
@@ -749,6 +785,7 @@ struct reshade::wayland_input_context
 		auto *context = static_cast<wayland_input_context *>(data);
 		context->clear_pointer_state();
 		context->pointer_focused = false;
+		context->refresh_keyboard_focus();
 		context->relative_pointer_delta[0] = context->relative_pointer_delta[1] = 0.0;
 	}
 	static void pointer_motion(void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y)
@@ -773,7 +810,7 @@ struct reshade::wayland_input_context
 		else if (button == BTN_EXTRA)
 			key = input::key_button_xbutton2;
 		if (key != 0)
-			context->owner->_keys[key] = state == WL_POINTER_BUTTON_STATE_PRESSED ? 0x88 : 0x08;
+			context->owner->update_key_state(key, state == WL_POINTER_BUTTON_STATE_PRESSED);
 	}
 	static void pointer_axis(void *data, wl_pointer *pointer, uint32_t, uint32_t axis, wl_fixed_t value)
 	{
