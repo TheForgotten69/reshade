@@ -77,6 +77,13 @@ add_custom_command(
   COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}" "${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}"
   DEPENDS "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}"
 )
+set(RESHADE_WAYLAND_FRACTIONAL_XML "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
+set(RESHADE_WAYLAND_FRACTIONAL_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/fractional-scale-v1-client-protocol.h")
+set(RESHADE_WAYLAND_FRACTIONAL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/fractional-scale-v1-protocol.c")
+add_custom_command(OUTPUT "${RESHADE_WAYLAND_FRACTIONAL_HEADER}" "${RESHADE_WAYLAND_FRACTIONAL_SOURCE}"
+  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${RESHADE_WAYLAND_FRACTIONAL_XML}" "${RESHADE_WAYLAND_FRACTIONAL_HEADER}"
+  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_FRACTIONAL_XML}" "${RESHADE_WAYLAND_FRACTIONAL_SOURCE}"
+  DEPENDS "${RESHADE_WAYLAND_FRACTIONAL_XML}")
 set(RESHADE_WAYLAND_TABLET_XML "${WAYLAND_PROTOCOLS_DIR}/stable/tablet/tablet-v2.xml")
 set(RESHADE_WAYLAND_TABLET_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/tablet-v2-protocol.c")
 add_custom_command(
@@ -143,6 +150,7 @@ function(reshade_configure_linux_target target)
       ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}
       ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
       ${RESHADE_WAYLAND_TABLET_SOURCE}
+      ${RESHADE_WAYLAND_FRACTIONAL_HEADER} ${RESHADE_WAYLAND_FRACTIONAL_SOURCE}
       ${RESHADE_LOCALIZATION_HEADER}
       ${RESHADE_LOCALIZATION_SOURCE}
       source/imgui_code_editor.cpp
@@ -197,13 +205,26 @@ if(RESHADE_BUILD_LINUX_TESTS)
     source/linux/input_linux.cpp source/linux/key_translation.cpp source/linux/window_registry.cpp source/linux/wine_input_bridge.cpp
     ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER} ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
     ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER} ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
-    ${RESHADE_WAYLAND_TABLET_SOURCE})
+    ${RESHADE_WAYLAND_TABLET_SOURCE} ${RESHADE_WAYLAND_FRACTIONAL_HEADER} ${RESHADE_WAYLAND_FRACTIONAL_SOURCE})
   target_include_directories(reshade_linux_tests PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
   set_source_files_properties(source/linux/input_linux.cpp tests/linux_portability.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER};${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}")
   target_compile_options(reshade_linux_tests PRIVATE -UNDEBUG $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
   target_link_libraries(reshade_linux_tests PRIVATE glad Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES)
   add_test(NAME linux_portability COMMAND reshade_linux_tests)
   set_tests_properties(linux_portability PROPERTIES TIMEOUT 15)
+  # Manual integration test. Run only inside an isolated compositor (creates a toplevel).
+  set(scale_test_xdg_xml "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
+  set(scale_test_xdg_header "${RESHADE_GENERATED_INCLUDE_DIR}/xdg-shell-client-protocol.h")
+  set(scale_test_xdg_source "${CMAKE_CURRENT_BINARY_DIR}/scale-test-xdg-shell.c")
+  add_custom_command(OUTPUT "${scale_test_xdg_header}" "${scale_test_xdg_source}"
+    COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${scale_test_xdg_xml}" "${scale_test_xdg_header}"
+    COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${scale_test_xdg_xml}" "${scale_test_xdg_source}"
+    DEPENDS "${scale_test_xdg_xml}")
+  add_executable(reshade_wayland_scale_test tests/linux_wayland_scale.c tests/linux_wayland_scale_bridge.cpp
+    "${scale_test_xdg_header}" "${scale_test_xdg_source}" "${RESHADE_WAYLAND_FRACTIONAL_HEADER}" "${RESHADE_WAYLAND_FRACTIONAL_SOURCE}")
+  target_include_directories(reshade_wayland_scale_test PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
+  target_compile_options(reshade_wayland_scale_test PRIVATE -UNDEBUG)
+  target_link_libraries(reshade_wayland_scale_test PRIVATE PkgConfig::WAYLAND_CLIENT)
   option(RESHADE_BUILD_X11_GRAB_TEST "Build manual X11 grab regression (run on an isolated X server only)" OFF)
   if(RESHADE_BUILD_X11_GRAB_TEST)
     pkg_check_modules(XCB_XTEST REQUIRED IMPORTED_TARGET xcb-xtest)

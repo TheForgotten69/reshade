@@ -5,6 +5,7 @@
 #include "clipboard.hpp"
 #include "key_translation.hpp"
 #include "window_registry.hpp"
+#include "wayland_scale_probe.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -88,6 +89,25 @@ struct reshade::wayland_input_context
 	// pointer coordinates (see 'to_framebuffer_pointer_position' for why), only surfaced through the
 	// verbose log as a diagnostic. 0 when no reliable compositor-wide scale exists.
 	double output_scale = 0.0;
+	wayland_scale_probe surface_scale_probe;
+	double last_preferred_surface_scale = 0.0;
+	double pointer_scale = 1.0;
+	void update_pointer_scale(double preferred)
+	{
+		if (wine_compatibility || !std::isfinite(preferred) || preferred <= 0.0 || preferred == pointer_scale)
+			return;
+		const double ratio = preferred / pointer_scale;
+		pointer_scale = preferred;
+		unsigned int maximum[2];
+		max_pointer_position(maximum);
+		for (unsigned int axis = 0; axis < 2; ++axis)
+		{
+			virtual_pointer_position[axis] = std::clamp(virtual_pointer_position[axis] * ratio, 0.0, static_cast<double>(maximum[axis]));
+			absolute_pointer_position[axis] = std::clamp(absolute_pointer_position[axis] * ratio, 0.0, static_cast<double>(maximum[axis]));
+			if (owner != nullptr)
+				owner->_mouse_position[axis] = static_cast<unsigned int>(std::lround(virtual_pointer_position[axis]));
+		}
+	}
 
 	// Clipboard integration via the core 'wl_data_device' protocol (no per-surface exclusivity,
 	// unlike 'wp-fractional-scale-v1', so unlike output scaling this is always safe to use).
@@ -118,6 +138,7 @@ struct reshade::wayland_input_context
 		// for this context so every such proxy is accounted for before destroying the queue.
 		if (display != nullptr && queue != nullptr)
 			wl_display_dispatch_queue_pending(display, queue);
+		surface_scale_probe.reset();
 		if (clipboard_source != nullptr)
 			wl_data_source_destroy(clipboard_source);
 		for (const auto &[offer, info] : data_offers)
@@ -252,23 +273,12 @@ struct reshade::wayland_input_context
 		}
 		output_scale = scale;
 	}
-	// Wayland pointer coordinates are already in the surface's own logical coordinate space, and a
-	// client that never calls 'wl_surface_set_buffer_scale' - which is true of most Vulkan
-	// applications, since they typically size their swapchain in pixels directly rather than
-	// opting into a toolkit-style logical/physical split - has a buffer scale of 1, meaning that
-	// logical coordinate space is identical to its swapchain's pixel space. Verified directly
-	// against a live KWin session (nested compositor, single output, output_scale=1.350): for
-	// vkcube (500x500 swapchain, no buffer scale set), logical pointer coordinates ranged up to
-	// ~494 of 500 - i.e. 1:1 with the swapchain, not with a "physical" 500*1.35 space. Multiplying
-	// by 'output_scale' here previously clamped the cursor well short of the real window edge for
-	// this - the common - case. A compositor-wide output scale is therefore not a safe stand-in for
-	// an unknown client's own buffer scale, so coordinates are passed through unscaled always; the
-	// verbose log records what a scaled value would have been, to let a future investigation with a
-	// buffer-scale-aware client confirm whether that case needs different handling instead of
-	// guessing at it here.
+	// Best-effort native fallback: assume the host follows its surface's compositor preference.
+	// This is NOT the actual buffer/viewport transform (a scale-1 host can ignore the preference).
+	// Never use the compositor-wide output scale, or apply this fallback to Wine coordinates.
 	double to_framebuffer_pointer_position(double logical, uint32_t axis_extent) const
 	{
-		return std::clamp(logical, 0.0, static_cast<double>(axis_extent));
+		return std::clamp(logical * pointer_scale, 0.0, static_cast<double>(axis_extent));
 	}
 	void clear_keyboard_state()
 	{
@@ -339,6 +349,8 @@ struct reshade::wayland_input_context
 	static void registry_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
 	{
 		auto *context = static_cast<wayland_input_context *>(data);
+		if (!context->wine_compatibility)
+			context->surface_scale_probe.bind(registry, name, interface);
 		if (std::strcmp(interface, wl_seat_interface.name) == 0 && context->seat == nullptr)
 		{
 			context->seat = static_cast<wl_seat *>(wl_registry_bind(registry, name, &wl_seat_interface, std::min(version, 5u)));
@@ -707,10 +719,7 @@ struct reshade::wayland_input_context
 		const double framebuffer_x = to_framebuffer_pointer_position(logical_x, std::max(1u, width));
 		const double framebuffer_y = to_framebuffer_pointer_position(logical_y, std::max(1u, height));
 #if RESHADE_VERBOSE_LOG
-		// 'framebuffer' is what a 'coordinate * output_scale' guess would produce; it is NOT applied
-		// (see 'to_framebuffer_pointer_position') - logged only so a future investigation on a
-		// buffer-scale-aware client can compare it against the observed cursor behavior.
-		reshade::log::message(reshade::log::level::debug, "Wayland pointer motion logical=(%.2f, %.2f) output_scale=%.3f would_be_scaled=(%.2f, %.2f).", logical_x, logical_y, output_scale, logical_x * (output_scale > 0.0 ? output_scale : 1.0), logical_y * (output_scale > 0.0 ? output_scale : 1.0));
+		reshade::log::message(reshade::log::level::debug, "Wayland pointer motion logical=(%.2f, %.2f) fallback_scale=%.3f framebuffer=(%.2f, %.2f).", logical_x, logical_y, pointer_scale, framebuffer_x, framebuffer_y);
 #endif
 		if (pointer_event_batch_active)
 		{
@@ -750,7 +759,7 @@ struct reshade::wayland_input_context
 			max_pointer_position(maximum);
 			for (unsigned int axis = 0; axis < 2; ++axis)
 			{
-				virtual_pointer_position[axis] = std::clamp(virtual_pointer_position[axis] + relative_pointer_delta[axis], 0.0, static_cast<double>(maximum[axis]));
+				virtual_pointer_position[axis] = std::clamp(virtual_pointer_position[axis] + relative_pointer_delta[axis] * pointer_scale, 0.0, static_cast<double>(maximum[axis]));
 				owner->_mouse_position[axis] = static_cast<unsigned int>(std::lround(virtual_pointer_position[axis]));
 			}
 		}
@@ -879,6 +888,8 @@ struct reshade::wayland_input_context
 		wl_registry_add_listener(registry, &registry_listener, this);
 		if (wl_display_roundtrip_queue(display, queue) < 0 || seat == nullptr)
 			return false;
+		if (!wine_compatibility)
+			surface_scale_probe.attach(surface);
 
 		if (data_device_manager != nullptr)
 		{
@@ -909,6 +920,7 @@ struct reshade::wayland_input_context
 		if (wl_display_roundtrip_queue(display, queue) < 0)
 			return false;
 		compute_output_scale();
+		update_pointer_scale(surface_scale_probe.preferred());
 		reshade::log::message(reshade::log::level::info, "Wayland input: wl_display=%p vulkan_surface=%p seat=%s keyboard=%s pointer=%s xkb_state=%s relative_pointer=%s xdg_output=%s.", display, surface, seat != nullptr ? "yes" : "no", keyboard != nullptr ? "yes" : "no", pointer != nullptr ? "yes" : "no", state != nullptr ? "yes" : "no", relative_pointer != nullptr ? "yes" : "no", xdg_output_manager != nullptr ? "yes" : "no");
 #if RESHADE_VERBOSE_LOG
 		reshade::log::message(reshade::log::level::debug, "Wayland backend ready surface=%p keyboard_focus=%d pointer_focus=%d data_device=%s.", surface, keyboard_focused, pointer_focused, data_device != nullptr ? "yes" : "no");
@@ -922,6 +934,13 @@ struct reshade::wayland_input_context
 	{
 		begin_pointer_event_batch();
 		const int result = wl_display_dispatch_queue_pending(display, queue);
+		const double preferred_scale = surface_scale_probe.preferred();
+		if (preferred_scale != last_preferred_surface_scale)
+		{
+			last_preferred_surface_scale = preferred_scale;
+			update_pointer_scale(preferred_scale);
+			reshade::log::message(reshade::log::level::info, "Wayland surface %p compositor-preferred scale fallback=%.3f (host viewport mapping is unknown).", surface, pointer_scale);
+		}
 		finish_pointer_event_batch();
 		return result >= 0;
 	}

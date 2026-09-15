@@ -208,6 +208,42 @@ static void test_pointer_coordinate_scaling()
 	assert(context.to_framebuffer_pointer_position(-10.0, 1920) == 0.0);
 }
 
+static void test_wayland_surface_scale_fallback()
+{
+	reshade::input input(nullptr);
+	wayland_input_context context;
+	context.owner = &input;
+	context.width = 3840;
+	context.height = 2160;
+	context.pointer_focused = true;
+	context.set_absolute_pointer_position(wl_fixed_from_int(100), wl_fixed_from_int(200));
+	context.update_pointer_scale(1.5);
+	assert(input.mouse_position_x() == 150 && input.mouse_position_y() == 300);
+	assert(context.to_framebuffer_pointer_position(2560, 3840) == 3840);
+	context.set_software_cursor_active(true);
+	context.begin_pointer_event_batch();
+	wayland_input_context::relative_pointer_motion(&context, nullptr, 0, 0, wl_fixed_from_int(10), wl_fixed_from_int(20), 0, 0);
+	context.update_pointer_scale(1.35);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 149 && input.mouse_position_y() == 297);
+	assert(std::abs(context.virtual_pointer_position[0] - 148.5) < 0.0001);
+	context.update_pointer_scale(0);
+	assert(context.pointer_scale == 1.35);
+	context.update_pointer_scale(1);
+	assert(input.mouse_position_x() == 110 && input.mouse_position_y() == 220);
+	context.set_software_cursor_active(false);
+	context.begin_pointer_event_batch();
+	context.set_absolute_pointer_position(wl_fixed_from_int(100), wl_fixed_from_int(200));
+	context.update_pointer_scale(1.5);
+	context.finish_pointer_event_batch();
+	assert(input.mouse_position_x() == 150 && input.mouse_position_y() == 300);
+
+	wayland_input_context wine;
+	wine.wine_compatibility = true;
+	wine.update_pointer_scale(1.5);
+	assert(wine.to_framebuffer_pointer_position(100, 1000) == 100);
+}
+
 static void test_wayland_pointer_source_stays_stable()
 {
 	reshade::input input(nullptr);
@@ -523,6 +559,7 @@ int main()
 	test_x11_keyboard_focus_selection();
 	test_polled_button_transitions();
 	test_pointer_coordinate_scaling();
+	test_wayland_surface_scale_fallback();
 	test_wayland_pointer_source_stays_stable();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();
