@@ -19,8 +19,8 @@ bool reshade::wine_input_bridge::initialize()
 	_call_hwnd_param = reinterpret_cast<call_hwnd_param_fn>(lookup("NtUserCallHwndParam"));
 	_call_hwnd = reinterpret_cast<call_hwnd_fn>(lookup("NtUserCallHwnd"));
 	_get_async_key_state = reinterpret_cast<get_async_key_state_fn>(lookup("NtUserGetAsyncKeyState"));
-	_get_cursor = reinterpret_cast<get_cursor_fn>(lookup("NtUserGetCursor"));
-	_set_cursor = reinterpret_cast<set_cursor_fn>(lookup("NtUserSetCursor"));
+	_clip_cursor = reinterpret_cast<clip_cursor_fn>(lookup("NtUserClipCursor"));
+	_get_clip_cursor = reinterpret_cast<get_clip_cursor_fn>(lookup("NtUserGetClipCursor"));
 	if (module != nullptr)
 		dlclose(module);
 	return available();
@@ -61,29 +61,29 @@ bool reshade::wine_input_bridge::button_down(int virtual_key) const
 	return _get_async_key_state != nullptr && (_get_async_key_state(virtual_key) & 0x8000) != 0;
 }
 
-bool reshade::wine_input_bridge::cursor_hiding_available() const
+void reshade::wine_input_bridge::release_cursor_clip(bool release)
 {
-	return _get_cursor != nullptr && _set_cursor != nullptr;
-}
-
-void reshade::wine_input_bridge::set_cursor_hidden(bool hidden)
-{
-	if (!cursor_hiding_available())
+	if (_clip_cursor == nullptr || _get_clip_cursor == nullptr)
 		return;
-	if (hidden)
-	{
-		_saved_cursor = _get_cursor();
-		_set_cursor(nullptr);
-	}
-	else if (_saved_cursor != nullptr)
-	{
-		_set_cursor(_saved_cursor);
-		_saved_cursor = nullptr;
-	}
-}
 
-void reshade::wine_input_bridge::maintain_hidden_cursor() const
-{
-	if (_set_cursor != nullptr)
-		_set_cursor(nullptr);
+	if (!release)
+	{
+		if (_clip_released)
+			_clip_cursor(&_application_clip);
+		_clip_released = false;
+		return;
+	}
+
+	rect current = {};
+	if (!_get_clip_cursor(&current))
+		return;
+	const auto equal = [](const rect &lhs, const rect &rhs) { return lhs.left == rhs.left && lhs.top == rhs.top && lhs.right == rhs.right && lhs.bottom == rhs.bottom; };
+	if (_clip_released && equal(current, _released_clip))
+		return;
+
+	// Unclipped reads back as the whole screen, which restores to no clipping as well.
+	_application_clip = current;
+	_clip_cursor(nullptr);
+	_get_clip_cursor(&_released_clip);
+	_clip_released = true;
 }

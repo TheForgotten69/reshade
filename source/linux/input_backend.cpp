@@ -4,14 +4,28 @@
 
 void reshade::input_backend::set_overlay_active(bool active)
 {
+	if (active == _overlay_active)
+		return;
+
 	_overlay_active = active;
-	update_cursor_policy();
+	on_overlay_active_changed();
 }
 
 void reshade::input_backend::set_extent(unsigned int width, unsigned int height)
 {
 	_width = std::max(1u, width);
 	_height = std::max(1u, height);
+}
+
+bool reshade::input_backend::is_pointer_in_capture() const
+{
+	if (!_pointer_focused)
+		return false;
+
+	const float x = static_cast<float>(_owner._mouse_position[0]) / _width;
+	const float y = static_cast<float>(_owner._mouse_position[1]) / _height;
+	return std::any_of(pointer_capture().begin(), pointer_capture().end(),
+		[x, y](const input::capture_rect &rect) { return x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height; });
 }
 
 void reshade::input_backend::set_key(unsigned int key, bool down)

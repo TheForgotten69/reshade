@@ -439,9 +439,6 @@ namespace reshade
 		unsigned int _fps_pos = 1;
 		unsigned int _clock_format = 0;
 		unsigned int _input_processing_mode = 2;
-#if defined(__linux__)
-		bool _wayland_use_host_cursor = false;
-#endif
 
 		api::pipeline _imgui_pipeline = {};
 		api::pipeline_layout _imgui_pipeline_layout = {};

@@ -349,9 +349,6 @@ void reshade::runtime::load_config_gui(const ini_file &config)
 	config_get("INPUT", "KeyFPS", _fps_key_data);
 	config_get("INPUT", "KeyFrameTime", _frametime_key_data);
 	config_get("INPUT", "InputProcessing", _input_processing_mode);
-#if defined(__linux__)
-	config_get("INPUT", "WaylandUseHostCursor", _wayland_use_host_cursor);
-#endif
 
 #if RESHADE_LOCALIZATION
 	config_get("OVERLAY", "Language", _selected_language);
@@ -455,9 +452,6 @@ void reshade::runtime::save_config_gui(ini_file &config) const
 	config.set("INPUT", "KeyFPS", _fps_key_data);
 	config.set("INPUT", "KeyFrametime", _frametime_key_data);
 	config.set("INPUT", "InputProcessing", _input_processing_mode);
-#if defined(__linux__)
-	config.set("INPUT", "WaylandUseHostCursor", _wayland_use_host_cursor);
-#endif
 
 #if RESHADE_LOCALIZATION
 	config.set("OVERLAY", "Language", _selected_language);
@@ -902,6 +896,9 @@ void reshade::runtime::draw_gui()
 			_input->block_mouse_input(_block_input_next_frame);
 			_input->block_keyboard_input(_block_input_next_frame);
 			_input->block_mouse_cursor_warping(_block_input_next_frame);
+#if defined(__linux__)
+			_input->set_pointer_capture(_block_input_next_frame ? std::vector<input::capture_rect> { { 0.0f, 0.0f, 1.0f, 1.0f } } : std::vector<input::capture_rect> {});
+#endif
 		}
 		return; // Early-out to avoid costly ImGui calls when no GUI elements are on the screen
 	}
@@ -921,8 +918,7 @@ void reshade::runtime::draw_gui()
 		imgui_io.MouseDrawCursor = _show_overlay && (!_should_save_screenshot || !_screenshot_save_gui);
 
 #if defined(__linux__)
-		_input->use_host_cursor(_wayland_use_host_cursor);
-		if (!_input->is_mouse_position_valid() || (_input->uses_wayland() && _wayland_use_host_cursor))
+		if (!_input->is_mouse_position_valid() || !_input->needs_overlay_cursor())
 			imgui_io.MouseDrawCursor = false;
 		_imgui_context->PlatformIO.Platform_ClipboardUserData = _input.get();
 #endif
@@ -1598,6 +1594,18 @@ void reshade::runtime::draw_gui()
 		_input->block_mouse_input(block_mouse_input);
 		_input->block_keyboard_input(block_keyboard_input);
 		_input->block_mouse_cursor_warping(_show_overlay || _block_input_next_frame || block_mouse_input);
+
+#if defined(__linux__)
+		// Block everything, or only what is on top of overlay windows (the Linux equivalent of 'WantCaptureMouse').
+		std::vector<input::capture_rect> capture;
+		if (block_input && _input_processing_mode == 2)
+			capture.push_back({ 0.0f, 0.0f, 1.0f, 1.0f });
+		else if (block_input)
+			for (const ImGuiWindow *const window : _imgui_context->Windows)
+				if (window->Active && !window->Hidden && (window->Flags & ImGuiWindowFlags_NoMouseInputs) == 0)
+					capture.push_back({ window->Pos.x / imgui_io.DisplaySize.x, window->Pos.y / imgui_io.DisplaySize.y, window->Size.x / imgui_io.DisplaySize.x, window->Size.y / imgui_io.DisplaySize.y });
+		_input->set_pointer_capture(std::move(capture));
+#endif
 	}
 
 	if (ImDrawData *const draw_data = ImGui::GetDrawData();
@@ -2172,12 +2180,8 @@ void reshade::runtime::draw_gui_settings()
 			std::replace(input_processing_mode_items.begin(), input_processing_mode_items.end(), '\n', '\0');
 			modified |= ImGui::Combo(_("Input processing"), reinterpret_cast<int *>(&_input_processing_mode), input_processing_mode_items.c_str());
 #if defined(__linux__)
-			if (_input != nullptr && _input->uses_wayland())
-			{
-				modified |= ImGui::Checkbox("Use host cursor (Wayland)", &_wayland_use_host_cursor);
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("Avoids a duplicate cursor in windowed applications. Disable when the application hides or locks its cursor, especially in fullscreen.");
-			}
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("On native Wayland the application keeps receiving keyboard input while the overlay is open.");
 #endif
 
 			modified |= imgui::key_input_box(_("Overlay key"), _overlay_key_data, *_input);

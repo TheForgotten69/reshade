@@ -140,14 +140,14 @@ void reshade::input::max_mouse_position(unsigned int position[2]) const
 	position[1] = _backend != nullptr ? _backend->height() : 1;
 }
 
-bool reshade::input::uses_wayland() const
-{
-	return _backend != nullptr && _backend->is_wayland();
-}
-
 bool reshade::input::is_mouse_position_valid() const
 {
 	return _backend != nullptr && _backend->pointer_focused();
+}
+
+bool reshade::input::needs_overlay_cursor() const
+{
+	return _backend != nullptr && _backend->needs_overlay_cursor();
 }
 
 void reshade::input::block_mouse_cursor_warping(bool enable)
@@ -155,13 +155,6 @@ void reshade::input::block_mouse_cursor_warping(bool enable)
 	_block_cursor_warping = enable;
 	if (_backend != nullptr)
 		_backend->set_overlay_active(enable);
-}
-
-void reshade::input::use_host_cursor(bool enable)
-{
-	_use_host_cursor = enable;
-	if (_backend != nullptr)
-		_backend->set_overlay_active(_block_cursor_warping);
 }
 
 std::shared_ptr<reshade::input_gamepad> reshade::input_gamepad::load()

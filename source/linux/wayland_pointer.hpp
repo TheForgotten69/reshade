@@ -2,26 +2,30 @@
 
 namespace reshade
 {
-	// Protocol-free pointer model for one Wayland surface. Wayland reports surface-local logical
-	// coordinates; 'scale' maps them to swapchain pixels. Motion is collected per dispatch batch and
-	// resolved once in 'end_batch', so a host recenter within a batch cannot overwrite a relative
-	// movement from the same batch.
+	// Protocol-free pointer model for one Wayland surface. Motion is collected per dispatch batch and
+	// resolved once in 'end_batch'.
+	//
+	// ReShade cannot hide or move the host's cursor, so while the overlay is open it either follows
+	// the host cursor ('host_absolute') or, when the host has locked the pointer (and so hides it),
+	// draws its own cursor driven by relative motion ('software_relative'). A lock is recognized by
+	// its protocol guarantee: while it is active, no client pointer receives absolute motion.
 	class wayland_pointer
 	{
 	public:
+		enum class mode { passive, host_absolute, software_relative };
+
 		void set_extent(unsigned int width, unsigned int height);
-		// Switches the logical-to-framebuffer factor, keeping the cursor on the same logical point.
-		// Non-positive or non-finite values are ignored.
-		void set_scale(double scale);
+		// The compositor's preferred scale for the surface, 0 while unknown. It maps logical to swapchain
+		// coordinates unless the host is observed to render at 1:1 instead (see 'absolute_motion').
+		void set_preferred_scale(double scale);
 		double scale() const { return _scale; }
-		// While the overlay draws its own cursor, relative motion drives it (see 'relative_motion').
-		void set_software_cursor(bool active);
+		bool scale_refuted() const { return _scale_refuted; }
+		void set_overlay_active(bool active);
+		mode current_mode() const { return _mode; }
 
 		void enter(double x, double y);
 		void leave();
 		void absolute_motion(double x, double y);
-		// Once relative motion arrives during a software cursor session, it keeps driving the cursor
-		// until the session ends, and absolute motion is ignored.
 		void relative_motion(double dx, double dy);
 		void end_batch();
 
@@ -34,14 +38,31 @@ namespace reshade
 		unsigned int y() const { return _position[1]; }
 
 	private:
+		// Batches with relative but without absolute motion before the pointer counts as locked.
+		static constexpr unsigned int lock_batches = 2;
+		// Batches the extent and scale must stay unchanged for, before pointer coordinates beyond the
+		// extent refute the preferred scale. A window that grows or moves to a monitor with another
+		// scale reports coordinates before its new swapchain exists.
+		static constexpr unsigned int stable_batches_required = 30;
+
+		void apply_scale(double scale);
+		void set_mode(mode mode);
+		bool is_on_edge() const;
 		double clamp(double value, unsigned int axis) const;
 		void publish(const double position[2]);
 
 		unsigned int _extent[2] = { 1, 1 };
+		unsigned int _stable_batches = 0;
 		double _scale = 1.0;
-		bool _software_cursor = false;
-		bool _relative_session = false;
+		bool _scale_refuted = false;
+
+		bool _overlay_active = false;
+		mode _mode = mode::passive;
+		unsigned int _lock_evidence = 0;
 		bool _absolute_in_batch = false;
+		bool _relative_in_batch = false;
+		double _logical[2] = {};
+		double _lock_anchor[2] = {};
 		double _absolute[2] = {};
 		double _virtual[2] = {};
 		double _relative_delta[2] = {};

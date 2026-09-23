@@ -10,8 +10,6 @@ void reshade::log::message(level, const char *, ...) {}
 
 struct reshade::input_test_access
 {
-	static xcb_atom_t wm_state_atom(const x11_input &backend) { return backend._wm_state_atom; }
-	static const xcb_atom_t *fullscreen_atom(const x11_input &backend) { return &backend._fullscreen_atom; }
 	static bool uses_relative_motion(const x11_input &backend) { return backend.uses_relative_motion(); }
 	static xcb_keycode_t keycode_of(const x11_input &backend, xcb_keysym_t keysym)
 	{
@@ -22,6 +20,17 @@ struct reshade::input_test_access
 	}
 };
 using test_access = reshade::input_test_access;
+
+// Waits until the backend observed the cursor change the host just made.
+static void settle(reshade::x11_input &backend, xcb_connection_t *host)
+{
+	xcb_flush(host);
+	for (int i = 0; i < 20; ++i)
+	{
+		backend.next_frame();
+		usleep(1000);
+	}
+}
 
 int main()
 {
@@ -50,10 +59,16 @@ int main()
 		backend.next_frame();
 		assert(backend.keyboard_focused() && backend.pointer_focused());
 		backend.set_overlay_active(true);
-		xcb_change_property(host, XCB_PROP_MODE_REPLACE, top_level, test_access::wm_state_atom(backend), XCB_ATOM_ATOM, 32, 1, test_access::fullscreen_atom(backend));
-		free(xcb_get_input_focus_reply(host, xcb_get_input_focus(host), nullptr));
-		backend.next_frame();
-		assert(test_access::uses_relative_motion(backend));
+		assert(!test_access::uses_relative_motion(backend) && !backend.needs_overlay_cursor());
+
+		// A host hiding its cursor gets the overlay cursor, driven by raw motion.
+		const xcb_pixmap_t blank = xcb_generate_id(host);
+		xcb_create_pixmap(host, 1, blank, window, 1, 1);
+		const xcb_cursor_t invisible = xcb_generate_id(host);
+		xcb_create_cursor(host, invisible, blank, blank, 0, 0, 0, 0, 0, 0, 0, 0);
+		xcb_change_window_attributes(host, window, XCB_CW_CURSOR, &invisible);
+		settle(backend, host);
+		assert(test_access::uses_relative_motion(backend) && backend.needs_overlay_cursor());
 		const auto start_x = owner.mouse_position_x();
 		auto *grab = xcb_grab_pointer_reply(host, xcb_grab_pointer(host, false, window, 0, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC, window, XCB_CURSOR_NONE, XCB_CURRENT_TIME), nullptr);
 		assert(grab && grab->status == XCB_GRAB_STATUS_SUCCESS);
@@ -85,7 +100,9 @@ int main()
 		std::cout << "Home tap and cursor motion during host grabs: PASS" << std::endl;
 		// A windowed overlay must follow the server pointer, not retain a separate
 		// raw-delta position when the host pointer moves towards the menu bar.
-		xcb_delete_property(host, top_level, test_access::wm_state_atom(backend));
+		const uint32_t default_cursor = XCB_CURSOR_NONE;
+		xcb_change_window_attributes(host, window, XCB_CW_CURSOR, &default_cursor);
+		settle(backend, host);
 		xcb_warp_pointer(host, XCB_WINDOW_NONE, window, 0, 0, 0, 0, 200, 1);
 		free(xcb_get_input_focus_reply(host, xcb_get_input_focus(host), nullptr));
 		backend.next_frame();

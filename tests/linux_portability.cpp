@@ -66,6 +66,8 @@ struct reshade::input_test_access
 		return target.contains_window(window);
 	}
 	static void release_pointer(x11_input &target) { target.release_pointer(); }
+	static void set_mouse_position(x11_input &target, unsigned int x, unsigned int y) { target.set_mouse_position(x, y); }
+	static void set_host_cursor_visible(x11_input &target, bool visible) { target._host_cursor_visible = visible; }
 	static void release_keyboard(x11_input &target) { target.release_keyboard(); }
 };
 
@@ -160,6 +162,12 @@ static void test_translation_tables()
 	assert(x11_input::keysym_to_utf32('a') == 'a');
 	assert(x11_input::keysym_to_utf32(0x010020ACu) == 0x20AC);
 	assert(x11_input::keysym_to_utf32(XKB_KEY_Home) == 0);
+
+	const uint32_t blank[] = { 0x00FFFFFF, 0x00000000 };
+	const uint32_t arrow[] = { 0x00000000, 0xFF000000 };
+	assert(!x11_input::is_cursor_image_visible(blank, 2));
+	assert(x11_input::is_cursor_image_visible(arrow, 2));
+	assert(!x11_input::is_cursor_image_visible(nullptr, 0));
 }
 
 static void test_pointer_absolute_mapping()
@@ -181,96 +189,178 @@ static void test_pointer_scale_changes()
 	wayland_pointer pointer;
 	pointer.set_extent(3840, 2160);
 	pointer.enter(100.0, 200.0);
-	pointer.set_scale(1.5);
+	pointer.set_preferred_scale(1.5);
 	assert(pointer.x() == 150 && pointer.y() == 300);
 
-	// A scale change within a batch applies to the deltas received before it.
-	pointer.set_software_cursor(true);
-	pointer.relative_motion(10.0, 20.0);
-	pointer.set_scale(1.35);
-	pointer.end_batch();
-	assert(pointer.x() == 149 && pointer.y() == 297);
+	pointer.set_preferred_scale(0.0);
+	pointer.set_preferred_scale(std::numeric_limits<double>::quiet_NaN());
+	assert(pointer.scale() == 1.5);
+	pointer.set_preferred_scale(1.0);
+	assert(pointer.x() == 100 && pointer.y() == 200);
 
-	pointer.set_scale(0.0);
-	pointer.set_scale(std::numeric_limits<double>::quiet_NaN());
-	assert(pointer.scale() == 1.35);
-	pointer.set_scale(1.0);
-	assert(pointer.x() == 110 && pointer.y() == 220);
-
-	pointer.set_software_cursor(false);
+	// A scale change within a batch applies to the motion received before it.
 	pointer.absolute_motion(100.0, 200.0);
-	pointer.set_scale(1.5);
+	pointer.set_preferred_scale(1.35);
 	pointer.end_batch();
-	assert(pointer.x() == 150 && pointer.y() == 300);
+	assert(pointer.x() == 135 && pointer.y() == 270);
 }
 
-static void test_pointer_relative_session()
+// A host rendering at 1:1 reports points beyond the scaled swapchain, which refutes the preference.
+static void test_pointer_scale_refutation()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(1000, 800);
+	pointer.set_preferred_scale(1.5);
+	pointer.enter(600.0, 100.0);
+	for (unsigned int batch = 0; batch < 30; ++batch)
+		pointer.end_batch();
+	assert(!pointer.scale_refuted());
+
+	pointer.absolute_motion(660.0, 100.0); // 990 at 1.5 still fits
+	pointer.end_batch();
+	assert(!pointer.scale_refuted() && pointer.x() == 990);
+	pointer.absolute_motion(900.0, 100.0);
+	pointer.end_batch();
+	assert(pointer.scale_refuted() && pointer.scale() == 1.0 && pointer.x() == 900);
+
+	pointer.set_preferred_scale(2.0);
+	assert(pointer.scale() == 1.0);
+
+	// Moving to a monitor with another scale changes the preference before the swapchain.
+	wayland_pointer moving;
+	moving.set_extent(1350, 800);
+	moving.set_preferred_scale(1.35);
+	moving.enter(0.0, 0.0);
+	for (unsigned int batch = 0; batch < 30; ++batch)
+		moving.end_batch();
+	moving.set_preferred_scale(1.5);
+	moving.absolute_motion(990.0, 100.0);
+	moving.end_batch();
+	assert(!moving.scale_refuted());
+
+	// Right after a resize the new swapchain may not exist yet, which is not evidence.
+	wayland_pointer resizing;
+	resizing.set_extent(1000, 800);
+	resizing.set_preferred_scale(1.5);
+	resizing.enter(0.0, 0.0);
+	for (unsigned int batch = 0; batch < 30; ++batch)
+		resizing.end_batch();
+	resizing.set_extent(1500, 800);
+	resizing.absolute_motion(1200.0, 100.0);
+	resizing.end_batch();
+	assert(!resizing.scale_refuted());
+}
+
+static void test_pointer_follows_host_cursor()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(200, 100);
+	pointer.enter(20.0, 30.0);
+	pointer.set_overlay_active(true);
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+
+	// An unlocked pointer reports both kinds of motion, the absolute one is authoritative.
+	for (int batch = 0; batch < 5; ++batch)
+	{
+		pointer.relative_motion(5.0, 5.0);
+		pointer.absolute_motion(40.0 + batch, 50.0);
+		pointer.end_batch();
+	}
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 44 && pointer.y() == 50);
+
+	// A single batch without absolute motion is not yet a lock.
+	pointer.relative_motion(5.0, 5.0);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 44 && pointer.y() == 50);
+
+	// Neither is pushing the pointer against a screen edge, however long.
+	pointer.absolute_motion(10.0, 0.0);
+	pointer.end_batch();
+	for (int batch = 0; batch < 10; ++batch)
+	{
+		pointer.relative_motion(0.0, -5.0);
+		pointer.end_batch();
+	}
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+}
+
+static void test_pointer_lock_drives_overlay_cursor()
 {
 	wayland_pointer pointer;
 	pointer.set_extent(200, 100);
 	pointer.enter(20.0, 30.0);
 	pointer.end_batch();
-	pointer.set_software_cursor(true);
+	pointer.set_overlay_active(true);
 
+	// The first batch without absolute motion only counts as evidence, the second one locks.
 	pointer.relative_motion(5.0, 7.0);
 	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	pointer.relative_motion(5.0, 7.0);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
 	assert(pointer.x() == 25 && pointer.y() == 37);
 
-	// A locked host may keep reporting the same absolute anchor, within or outside the batch.
+	// Repeats of the lock position carry no movement.
 	pointer.absolute_motion(20.0, 30.0);
-	pointer.relative_motion(5.0, 7.0);
+	pointer.relative_motion(0.25, 0.0);
 	pointer.end_batch();
-	assert(pointer.x() == 30 && pointer.y() == 44);
-	pointer.absolute_motion(20.0, 30.0);
-	pointer.end_batch();
-	assert(pointer.x() == 30 && pointer.y() == 44);
-	pointer.relative_motion(10.0, 10.0);
-	pointer.absolute_motion(80.0, 60.0);
-	pointer.end_batch();
-	assert(pointer.x() == 40 && pointer.y() == 54);
-
-	// Setting the same state every frame must not reset the accumulated sub-pixel position.
-	for (int frame = 0; frame < 4; ++frame)
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
+	for (int batch = 0; batch < 3; ++batch)
 	{
-		pointer.set_software_cursor(true);
 		pointer.relative_motion(0.25, 0.0);
 		pointer.end_batch();
 	}
-	assert(pointer.x() == 41 && pointer.y() == 54);
+	assert(pointer.x() == 26 && pointer.y() == 37);
 
 	pointer.relative_motion(500.0, -500.0);
 	pointer.end_batch();
 	assert(pointer.x() == 200 && pointer.y() == 0);
 
-	// Leaving ends the session, and entering starts from the enter position.
-	pointer.relative_motion(-20.0, 0.0);
-	pointer.leave();
+	// Unlocking resumes absolute motion, back at the host's cursor.
+	pointer.absolute_motion(60.0, 70.0);
 	pointer.end_batch();
-	assert(pointer.x() == 200 && pointer.y() == 0);
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 60 && pointer.y() == 70);
+}
+
+static void test_pointer_resets_with_overlay_and_focus()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(200, 100);
+	pointer.enter(20.0, 30.0);
+	pointer.end_batch();
+	for (int batch = 0; batch < 2; ++batch)
+	{
+		pointer.relative_motion(1.0, 1.0);
+		pointer.end_batch();
+	}
+	assert(pointer.current_mode() == wayland_pointer::mode::passive);
+
+	// Opening the overlay while the host is locked starts with the overlay cursor.
+	pointer.set_overlay_active(true);
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
+	pointer.set_overlay_active(false);
+	assert(pointer.current_mode() == wayland_pointer::mode::passive);
+
+	// Leaving the surface ends a lock session, entering starts from the enter position.
+	pointer.set_overlay_active(true);
+	pointer.leave();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
 	pointer.enter(10.0, 20.0);
 	pointer.relative_motion(2.0, 3.0);
 	pointer.end_batch();
-	assert(pointer.x() == 12 && pointer.y() == 23);
-
-	// Without a software cursor, relative motion is ignored.
-	pointer.set_software_cursor(false);
-	pointer.absolute_motion(40.0, 50.0);
-	pointer.relative_motion(10.0, 10.0);
-	pointer.end_batch();
-	assert(pointer.x() == 40 && pointer.y() == 50);
-
-	// Servers without relative pointer support keep working with absolute motion.
-	pointer.set_software_cursor(true);
-	pointer.absolute_motion(60.0, 70.0);
-	pointer.end_batch();
-	assert(pointer.x() == 60 && pointer.y() == 70);
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 10 && pointer.y() == 20);
 }
 
 static void test_wayland_scroll()
 {
 	input owner(nullptr);
 	wayland_input backend(owner, nullptr, test_surface);
-	backend.on_pointer_enter(test_surface, 0.0, 0.0);
+	backend.on_pointer_enter(0, test_surface, 0.0, 0.0);
 
 	// Discrete and continuous values of one frame describe the same wheel event.
 	backend.on_pointer_axis_discrete(WL_POINTER_AXIS_VERTICAL_SCROLL, 1);
@@ -319,7 +409,7 @@ static void test_wayland_parent_keyboard_focus()
 	auto *const parent = reinterpret_cast<wl_surface *>(uintptr_t(0x200));
 	backend.on_keyboard_enter(parent);
 	assert(!backend.keyboard_focused());
-	backend.on_pointer_enter(test_surface, 0.0, 0.0);
+	backend.on_pointer_enter(0, test_surface, 0.0, 0.0);
 	assert(backend.keyboard_focused());
 
 	backend.on_key(1, home, WL_KEYBOARD_KEY_STATE_PRESSED);
@@ -423,6 +513,30 @@ static void test_x11_key_and_button_taps()
 	assert(owner.key_transitions().size() == 1 && owner.key_transitions()[0].key == input::key_home);
 	input_test_access::release_keyboard(backend);
 	assert(!owner.is_key_down(input::key_home) && owner.key_transitions().empty());
+}
+
+// Over a capture region the host's cursor is hidden by the layer, so the overlay draws its own.
+static void test_pointer_capture_cursor()
+{
+	input owner(nullptr);
+	x11_input backend(owner, 30, nullptr, input::wsi_kind::xcb);
+	backend.set_extent(200, 100);
+	input_test_access::set_focus(backend, true, true);
+	input_test_access::set_mouse_position(backend, 150, 50);
+	assert(!backend.needs_overlay_cursor());
+
+	owner.set_pointer_capture({ { 0.5f, 0.0f, 0.5f, 1.0f } });
+	assert(backend.needs_overlay_cursor());
+	input_test_access::set_mouse_position(backend, 50, 50);
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_host_cursor_visible(backend, false);
+	assert(backend.needs_overlay_cursor());
+	input_test_access::set_host_cursor_visible(backend, true);
+
+	owner.set_pointer_capture({ { 0.0f, 0.0f, 1.0f, 1.0f } });
+	assert(backend.needs_overlay_cursor());
+	input_test_access::set_focus(backend, true, false);
+	assert(!backend.needs_overlay_cursor());
 }
 
 static void test_input_lifetime_follows_native_surface()
@@ -545,11 +659,15 @@ int main()
 	test_translation_tables();
 	test_pointer_absolute_mapping();
 	test_pointer_scale_changes();
-	test_pointer_relative_session();
+	test_pointer_scale_refutation();
+	test_pointer_follows_host_cursor();
+	test_pointer_lock_drives_overlay_cursor();
+	test_pointer_resets_with_overlay_and_focus();
 	test_wayland_scroll();
 	test_wayland_parent_keyboard_focus();
 	test_x11_keyboard_focus_selection();
 	test_x11_key_and_button_taps();
+	test_pointer_capture_cursor();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();
 	test_depth_detection();

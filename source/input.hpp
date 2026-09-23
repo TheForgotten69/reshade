@@ -199,9 +199,14 @@ namespace reshade
 		void block_mouse_cursor_warping(bool enable);
 		bool is_blocking_mouse_cursor_warping() const { return _block_cursor_warping; }
 #if defined(__linux__)
-		bool uses_wayland() const;
 		bool is_mouse_position_valid() const;
-		void use_host_cursor(bool enable);
+		// Whether the overlay has to draw a cursor, because the application's one is hidden where the pointer is.
+		bool needs_overlay_cursor() const;
+
+		// Linux cannot filter the application's events like 'block_mouse_input' does on Windows. Instead the
+		// backend covers these areas (relative to the window size) with a layer that takes pointer input.
+		struct capture_rect { float x, y, width, height; };
+		void set_pointer_capture(std::vector<capture_rect> regions) { _pointer_capture = std::move(regions); }
 		struct key_transition { unsigned int key; bool down; };
 		const std::vector<key_transition> &key_transitions() const { return _key_transitions; }
 #endif
@@ -262,7 +267,7 @@ namespace reshade
 
 		uint8_t _key_press_modifiers[256] = {};
 		std::vector<key_transition> _key_transitions;
-		bool _use_host_cursor = false;
+		std::vector<capture_rect> _pointer_capture;
 		input_backend *_backend = nullptr;
 
 		friend class input_backend;

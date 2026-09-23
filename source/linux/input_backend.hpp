@@ -23,7 +23,8 @@ namespace reshade
 		// Consumes the events received since the previous frame.
 		virtual void next_frame() = 0;
 		virtual const char *name() const = 0;
-		virtual bool is_wayland() const { return false; }
+		// Over a capture layer the host's cursor is hidden, elsewhere the overlay draws a cursor only while the host shows none.
+		bool needs_overlay_cursor() const { return is_pointer_in_capture() || is_host_cursor_hidden(); }
 		virtual std::string clipboard_text() { return {}; }
 		virtual void set_clipboard_text(const char *) {}
 
@@ -38,10 +39,11 @@ namespace reshade
 	protected:
 		static constexpr unsigned int mouse_keys[] = { input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2 };
 
-		// Called on every 'set_overlay_active' and whenever the cursor policy inputs change.
-		virtual void update_cursor_policy() {}
+		virtual void on_overlay_active_changed() {}
+		virtual bool is_host_cursor_hidden() const = 0;
 		bool overlay_active() const { return _overlay_active; }
-		bool host_cursor_preferred() const { return _owner._use_host_cursor; }
+		const std::vector<input::capture_rect> &pointer_capture() const { return _owner._pointer_capture; }
+		bool is_pointer_in_capture() const;
 		bool is_key_down(unsigned int key) const { return _owner.is_key_down(key); }
 
 		// Updates 'key' and keeps the side-agnostic Ctrl/Shift/Alt keys in sync with their sides.

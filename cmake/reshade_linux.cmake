@@ -39,6 +39,7 @@ pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
 pkg_check_modules(XCB_XINPUT REQUIRED IMPORTED_TARGET xcb-xinput)
 pkg_check_modules(XCB_XFIXES REQUIRED IMPORTED_TARGET xcb-xfixes)
+pkg_check_modules(XCB_SHAPE REQUIRED IMPORTED_TARGET xcb-shape)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -61,6 +62,7 @@ function(reshade_wayland_protocol var xml)
 endfunction()
 reshade_wayland_protocol(RESHADE_WAYLAND_RELATIVE_POINTER "${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml")
 reshade_wayland_protocol(RESHADE_WAYLAND_FRACTIONAL_SCALE "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
+reshade_wayland_protocol(RESHADE_WAYLAND_VIEWPORTER "${WAYLAND_PROTOCOLS_DIR}/stable/viewporter/viewporter.xml")
 
 set(RESHADE_LINUX_INPUT_SOURCES
   source/input.cpp
@@ -70,14 +72,15 @@ set(RESHADE_LINUX_INPUT_SOURCES
   source/linux/wayland_clipboard.cpp
   source/linux/wayland_input.cpp
   source/linux/wayland_pointer.cpp
-  source/linux/wayland_scale_probe.cpp
+  source/linux/wayland_overlay_surface.cpp
   source/linux/window_registry.cpp
   source/linux/wine_input_bridge.cpp
   source/linux/x11_input.cpp
   ${RESHADE_WAYLAND_RELATIVE_POINTER}
   ${RESHADE_WAYLAND_FRACTIONAL_SCALE}
+  ${RESHADE_WAYLAND_VIEWPORTER}
 )
-set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES)
+set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::XCB_SHAPE)
 
 # Generate a native lookup table from the same localization resources used by Windows.
 file(GLOB RESHADE_LOCALIZATION_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/lang_*.rc2")
@@ -185,8 +188,8 @@ if(RESHADE_BUILD_LINUX_TESTS)
   set_tests_properties(linux_portability PROPERTIES TIMEOUT 15)
   # Manual integration test. Run only inside an isolated compositor (creates a toplevel).
   reshade_wayland_protocol(RESHADE_WAYLAND_XDG_SHELL "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
-  add_executable(reshade_wayland_scale_test tests/linux_wayland_scale.c tests/linux_wayland_scale_bridge.cpp source/linux/wayland_scale_probe.cpp
-    ${RESHADE_WAYLAND_XDG_SHELL} ${RESHADE_WAYLAND_FRACTIONAL_SCALE})
+  add_executable(reshade_wayland_scale_test tests/linux_wayland_scale.c tests/linux_wayland_scale_bridge.cpp source/linux/wayland_overlay_surface.cpp
+    ${RESHADE_WAYLAND_XDG_SHELL} ${RESHADE_WAYLAND_FRACTIONAL_SCALE} ${RESHADE_WAYLAND_VIEWPORTER})
   target_include_directories(reshade_wayland_scale_test PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
   target_compile_options(reshade_wayland_scale_test PRIVATE -UNDEBUG)
   target_link_libraries(reshade_wayland_scale_test PRIVATE PkgConfig::WAYLAND_CLIENT)

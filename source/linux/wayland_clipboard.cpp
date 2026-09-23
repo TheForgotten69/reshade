@@ -5,6 +5,7 @@
 #include <cstring>
 #include <thread>
 #include <poll.h>
+#include <wayland-client.h>
 #include <unistd.h>
 
 namespace
@@ -23,6 +24,10 @@ namespace
 
 	auto self(void *data) { return static_cast<reshade::wayland_clipboard *>(data); }
 
+	const wl_registry_listener registry_listener = {
+		[](void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version) { self(data)->on_global(registry, name, interface, version); },
+		[](void *, wl_registry *, uint32_t) {},
+	};
 	const wl_data_offer_listener offer_listener = {
 		[](void *data, wl_data_offer *offer, const char *mime_type) { self(data)->on_offer_mime_type(offer, mime_type); },
 		[](void *, wl_data_offer *, uint32_t) {},
@@ -57,49 +62,67 @@ void reshade::wayland_clipboard::offer_info::add_mime_type(const char *type)
 		mime_type = type;
 }
 
-void reshade::wayland_clipboard::bind_manager(wl_registry *registry, uint32_t name, uint32_t version, wl_event_queue *queue)
+reshade::wayland_clipboard *reshade::wayland_clipboard::get(wl_display *display)
 {
-	if (_manager != nullptr)
-		return;
+	// Never destroyed, see the class description. Freeing it at exit could also touch a connection
+	// the host already closed.
+	static std::mutex s_mutex;
+	static std::unordered_map<wl_display *, wayland_clipboard *> s_clipboards;
 
-	_manager = static_cast<wl_data_device_manager *>(wl_registry_bind(registry, name, &wl_data_device_manager_interface, std::min(version, 3u)));
-	set_queue(_manager, queue);
+	const std::lock_guard<std::mutex> lock(s_mutex);
+	const auto [it, inserted] = s_clipboards.try_emplace(display, nullptr);
+	if (inserted)
+	{
+		auto *const clipboard = new wayland_clipboard(display);
+		it->second = clipboard->initialize() ? clipboard : nullptr;
+	}
+	return it->second;
 }
 
-void reshade::wayland_clipboard::attach(wl_display *display, wl_seat *seat, wl_event_queue *queue)
+bool reshade::wayland_clipboard::initialize()
 {
-	if (_manager == nullptr || _device != nullptr)
-		return;
+	_queue = wl_display_create_queue(_display);
+	auto *const display_wrapper = _queue != nullptr ? static_cast<wl_display *>(wl_proxy_create_wrapper(_display)) : nullptr;
+	if (display_wrapper == nullptr)
+		return false;
+	set_queue(display_wrapper, _queue);
+	_registry = wl_display_get_registry(display_wrapper);
+	wl_proxy_wrapper_destroy(display_wrapper);
+	if (_registry == nullptr)
+		return false;
+	wl_registry_add_listener(_registry, &registry_listener, this);
 
-	_display = display;
-	_queue = queue;
-	_device = wl_data_device_manager_get_data_device(_manager, seat);
-	set_queue(_device, queue);
+	if (wl_display_roundtrip_queue(_display, _queue) < 0 || _manager == nullptr || _seat == nullptr)
+		return false;
+	_device = wl_data_device_manager_get_data_device(_manager, _seat);
+	set_queue(_device, _queue);
 	wl_data_device_add_listener(_device, &device_listener, this);
+	return true;
 }
 
-void reshade::wayland_clipboard::reset()
+void reshade::wayland_clipboard::dispatch()
 {
-	if (_source != nullptr)
-		wl_data_source_destroy(_source);
-	for (const auto &[proxy, info] : _offers)
-		wl_data_offer_destroy(proxy);
-	if (_device != nullptr)
-		wl_data_device_destroy(_device);
-	if (_manager != nullptr)
-		wl_data_device_manager_destroy(_manager);
+	const std::lock_guard<std::mutex> lock(_mutex);
+	wl_display_dispatch_queue_pending(_display, _queue);
+}
 
-	_source = nullptr;
-	_offers.clear();
-	_selection = nullptr;
-	_device = nullptr;
-	_manager = nullptr;
+void reshade::wayland_clipboard::on_global(wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
+{
+	if (_manager == nullptr && std::strcmp(interface, wl_data_device_manager_interface.name) == 0)
+	{
+		_manager = static_cast<wl_data_device_manager *>(wl_registry_bind(registry, name, &wl_data_device_manager_interface, std::min(version, 3u)));
+		set_queue(_manager, _queue);
+	}
+	else if (_seat == nullptr && std::strcmp(interface, wl_seat_interface.name) == 0)
+	{
+		_seat = static_cast<wl_seat *>(wl_registry_bind(registry, name, &wl_seat_interface, 1));
+		set_queue(_seat, _queue);
+	}
 }
 
 void reshade::wayland_clipboard::set_text(const char *text, uint32_t serial)
 {
-	if (_device == nullptr)
-		return;
+	const std::lock_guard<std::mutex> lock(_mutex);
 
 	_source_text.assign(text, std::min(std::strlen(text), max_text_size));
 	if (_source != nullptr)
@@ -114,6 +137,8 @@ void reshade::wayland_clipboard::set_text(const char *text, uint32_t serial)
 
 std::string reshade::wayland_clipboard::text()
 {
+	const std::lock_guard<std::mutex> lock(_mutex);
+
 	// Our own source is served on the same queue, which cannot dispatch while waiting here.
 	if (_source != nullptr)
 		return _source_text;

@@ -19,6 +19,26 @@ namespace
 
 	auto self(void *data) { return static_cast<reshade::wayland_input *>(data); }
 
+	// Only a release request makes the compositor stop sending events to these objects.
+	void release_pointer_proxy(wl_pointer *pointer)
+	{
+		if (pointer == nullptr)
+			return;
+		if (wl_pointer_get_version(pointer) >= WL_POINTER_RELEASE_SINCE_VERSION)
+			wl_pointer_release(pointer);
+		else
+			wl_pointer_destroy(pointer);
+	}
+	void release_keyboard_proxy(wl_keyboard *keyboard)
+	{
+		if (keyboard == nullptr)
+			return;
+		if (wl_keyboard_get_version(keyboard) >= WL_KEYBOARD_RELEASE_SINCE_VERSION)
+			wl_keyboard_release(keyboard);
+		else
+			wl_keyboard_destroy(keyboard);
+	}
+
 	const wl_registry_listener registry_listener = {
 		[](void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version) { self(data)->on_global(registry, name, interface, version); },
 		[](void *data, wl_registry *, uint32_t name) { self(data)->on_global_remove(name); },
@@ -36,7 +56,7 @@ namespace
 		[](void *, wl_keyboard *, int32_t, int32_t) {},
 	};
 	const wl_pointer_listener pointer_listener = {
-		[](void *data, wl_pointer *, uint32_t, wl_surface *surface, wl_fixed_t x, wl_fixed_t y) { self(data)->on_pointer_enter(surface, wl_fixed_to_double(x), wl_fixed_to_double(y)); },
+		[](void *data, wl_pointer *, uint32_t serial, wl_surface *surface, wl_fixed_t x, wl_fixed_t y) { self(data)->on_pointer_enter(serial, surface, wl_fixed_to_double(x), wl_fixed_to_double(y)); },
 		[](void *data, wl_pointer *, uint32_t, wl_surface *) { self(data)->on_pointer_leave(); },
 		[](void *data, wl_pointer *, uint32_t, wl_fixed_t x, wl_fixed_t y) { self(data)->on_pointer_motion(wl_fixed_to_double(x), wl_fixed_to_double(y)); },
 		[](void *data, wl_pointer *, uint32_t serial, uint32_t, uint32_t button, uint32_t state) { self(data)->on_pointer_button(serial, button, state); },
@@ -66,23 +86,21 @@ reshade::wayland_input::wayland_input(input &owner, wl_display *display, wl_surf
 
 reshade::wayland_input::~wayland_input()
 {
-	// Offers are created while their messages are demarshaled, before any listener runs. Dispatch
-	// what is already queued, so every one of them is tracked and destroyed below.
-	if (_queue != nullptr)
-		wl_display_dispatch_queue_pending(_display, _queue);
-
-	_scale_probe.reset();
-	_clipboard.reset();
+	_wine.release_cursor_clip(false);
+	_overlay.reset();
 	if (_relative_pointer != nullptr)
 		zwp_relative_pointer_v1_destroy(_relative_pointer);
 	if (_relative_pointer_manager != nullptr)
 		zwp_relative_pointer_manager_v1_destroy(_relative_pointer_manager);
-	if (_pointer_device != nullptr)
-		wl_pointer_destroy(_pointer_device);
-	if (_keyboard != nullptr)
-		wl_keyboard_destroy(_keyboard);
+	release_pointer_proxy(_pointer_device);
+	release_keyboard_proxy(_keyboard);
 	if (_seat != nullptr)
-		wl_seat_destroy(_seat);
+	{
+		if (wl_seat_get_version(_seat) >= WL_SEAT_RELEASE_SINCE_VERSION)
+			wl_seat_release(_seat);
+		else
+			wl_seat_destroy(_seat);
+	}
 	if (_registry != nullptr)
 		wl_registry_destroy(_registry);
 	if (_queue != nullptr)
@@ -96,6 +114,8 @@ reshade::wayland_input::~wayland_input()
 bool reshade::wayland_input::initialize()
 {
 	_wine_host = wine_input_bridge::is_wine_process();
+	if (_wine_host)
+		_wine.initialize();
 	_queue = wl_display_create_queue(_display);
 	if (_queue == nullptr || _xkb_context == nullptr)
 		return false;
@@ -120,12 +140,11 @@ bool reshade::wayland_input::initialize()
 			return false;
 		if (i == 0)
 		{
-			if (!_wine_host)
-				_scale_probe.attach(_surface);
-			_clipboard.attach(_display, _seat, _queue);
+			_overlay.attach(_surface);
 		}
 	}
 
+	_clipboard = wayland_clipboard::get(_display);
 	_pointer.set_extent(width(), height());
 	update_pointer_scale();
 	publish_pointer();
@@ -141,8 +160,12 @@ void reshade::wayland_input::next_frame()
 	// a host thread that prepared a read, so only events already routed to the queue are handled.
 	_pointer.set_extent(width(), height());
 	const int result = wl_display_dispatch_queue_pending(_display, _queue);
+	if (_clipboard != nullptr)
+		_clipboard->dispatch();
 	update_pointer_scale();
 	publish_pointer();
+	update_capture();
+	_wine.release_cursor_clip(overlay_active());
 
 	if (result < 0)
 		log::message(log::level::warning, "Wayland input pending-event dispatch failed for surface %p.", _surface);
@@ -150,8 +173,7 @@ void reshade::wayland_input::next_frame()
 
 void reshade::wayland_input::on_global(wl_registry *registry, uint32_t name, const char *interface, uint32_t version)
 {
-	if (!_wine_host)
-		_scale_probe.bind(registry, name, interface);
+	_overlay.bind(registry, name, interface);
 
 	if (std::strcmp(interface, wl_seat_interface.name) == 0 && _seat == nullptr)
 	{
@@ -159,10 +181,6 @@ void reshade::wayland_input::on_global(wl_registry *registry, uint32_t name, con
 		_seat_name = name;
 		set_queue(_seat, _queue);
 		wl_seat_add_listener(_seat, &seat_listener, this);
-	}
-	else if (std::strcmp(interface, wl_data_device_manager_interface.name) == 0)
-	{
-		_clipboard.bind_manager(registry, name, version, _queue);
 	}
 	else if (std::strcmp(interface, zwp_relative_pointer_manager_v1_interface.name) == 0 && _relative_pointer_manager == nullptr)
 	{
@@ -278,10 +296,20 @@ void reshade::wayland_input::on_modifiers(uint32_t depressed, uint32_t latched, 
 	update_keyboard_layout_german(_keymap, group);
 }
 
-void reshade::wayland_input::on_pointer_enter(wl_surface *surface, double x, double y)
+void reshade::wayland_input::on_pointer_enter(uint32_t serial, wl_surface *surface, double x, double y)
 {
 	release_pointer();
-	_pointer_focused = accepts_focus(surface, "pointer");
+	// The capture layer covers the host surface at the same origin, and hides the host's cursor.
+	if (surface != nullptr && surface == _overlay.surface())
+	{
+		_pointer_focused = true;
+		if (_pointer_device != nullptr)
+			wl_pointer_set_cursor(_pointer_device, serial, nullptr, 0, 0);
+	}
+	else
+	{
+		_pointer_focused = accepts_focus(surface, "pointer");
+	}
 	if (_pointer_focused)
 		_pointer.enter(x, y);
 	else
@@ -336,20 +364,35 @@ void reshade::wayland_input::on_relative_motion(double dx, double dy)
 		_pointer.relative_motion(dx, dy);
 }
 
-void reshade::wayland_input::update_cursor_policy()
+void reshade::wayland_input::on_overlay_active_changed()
 {
-	_pointer.set_software_cursor(overlay_active() && !host_cursor_preferred());
+	_pointer.set_overlay_active(overlay_active());
+	log_pointer_changes();
 }
 
 void reshade::wayland_input::update_pointer_scale()
 {
-	const double preferred = _scale_probe.preferred();
-	if (_wine_host || preferred == _preferred_scale)
+	// Wine maps its own coordinates, so they already match the swapchain.
+	if (!_wine_host)
+		_pointer.set_preferred_scale(_overlay.preferred());
+}
+
+void reshade::wayland_input::update_capture()
+{
+	// Size the layer by the lowest plausible scale, so it can never extend beyond the host surface.
+	double scale = _wine_host ? _overlay.preferred() : _pointer.scale();
+	if (scale < 1.0)
+		scale = 1.0;
+	const auto logical_width = static_cast<unsigned int>(width() / scale);
+	const auto logical_height = static_cast<unsigned int>(height() / scale);
+	if (!_overlay.set_capture(pointer_capture(), logical_width, logical_height))
 		return;
 
-	_preferred_scale = preferred;
-	_pointer.set_scale(preferred);
-	log::message(log::level::info, "Wayland surface %p compositor-preferred scale fallback=%.3f (host viewport mapping is unknown).", _surface, _pointer.scale());
+	wl_display_flush(_display);
+	const bool capturing = !pointer_capture().empty();
+	if (capturing != _capturing)
+		log::message(log::level::info, "Wayland surface %p input capture %s (%ux%u).", _surface, capturing ? "on" : "off", logical_width, logical_height);
+	_capturing = capturing;
 }
 
 void reshade::wayland_input::publish_pointer()
@@ -357,6 +400,24 @@ void reshade::wayland_input::publish_pointer()
 	_pointer.end_batch();
 	if (_pointer_focused)
 		set_mouse_position(_pointer.x(), _pointer.y());
+	log_pointer_changes();
+}
+
+void reshade::wayland_input::log_pointer_changes()
+{
+	if (_pointer.scale() != _logged_scale)
+	{
+		_logged_scale = _pointer.scale();
+		log::message(log::level::info, "Wayland surface %p pointer scale=%.3f (%s).", _surface, _logged_scale,
+			_pointer.scale_refuted() ? "host renders at 1:1, compositor preference ignored" : "compositor preference");
+	}
+	if (_pointer.current_mode() != _logged_mode)
+	{
+		constexpr const char *mode_names[] = { "passive", "host cursor", "overlay cursor (pointer locked)" };
+		log::message(log::level::info, "Wayland surface %p pointer mode: %s -> %s.", _surface,
+			mode_names[static_cast<int>(_logged_mode)], mode_names[static_cast<int>(_pointer.current_mode())]);
+		_logged_mode = _pointer.current_mode();
+	}
 }
 
 bool reshade::wayland_input::accepts_focus(wl_surface *focused_surface, const char *device) const
@@ -404,7 +465,7 @@ void reshade::wayland_input::release_keyboard_device()
 		return;
 
 	on_keyboard_leave();
-	wl_keyboard_destroy(_keyboard);
+	release_keyboard_proxy(_keyboard);
 	_keyboard = nullptr;
 }
 
@@ -417,6 +478,6 @@ void reshade::wayland_input::release_pointer_device()
 	if (_relative_pointer != nullptr)
 		zwp_relative_pointer_v1_destroy(_relative_pointer);
 	_relative_pointer = nullptr;
-	wl_pointer_destroy(_pointer_device);
+	release_pointer_proxy(_pointer_device);
 	_pointer_device = nullptr;
 }
