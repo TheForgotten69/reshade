@@ -14,12 +14,20 @@
 #include "lockfree_linear_map.hpp"
 #include <cstring> // std::strncmp, std::strncpy
 #include <algorithm> // std::find_if
+#include <mutex>
+#include <unordered_set>
 #if defined(__linux__)
 #include <dlfcn.h>
 #endif
 
 lockfree_linear_map<VkSurfaceKHR, vulkan_surface, 16> g_vulkan_surfaces;
 lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
+
+// Some applications destroy a surface twice on error paths, possibly from two threads at once (e.g.
+// PCSX2 when creating a swap chain fails), which drivers do not tolerate. Remember destroyed handles
+// until they are handed out again. The mutex also orders updates of 'g_vulkan_surfaces' against it.
+static std::mutex s_surfaces_mutex;
+static std::unordered_set<VkSurfaceKHR> s_destroyed_surfaces;
 
 static const char *get_wsi_kind_name(vulkan_wsi_kind kind)
 {
@@ -31,6 +39,16 @@ static const char *get_wsi_kind_name(vulkan_wsi_kind kind)
 	case vulkan_wsi_kind::xlib: return "xlib";
 	default: return "unknown";
 	}
+}
+
+static void track_surface(VkSurfaceKHR surface, const vulkan_surface &surface_info)
+{
+	{
+		const std::lock_guard<std::mutex> lock(s_surfaces_mutex);
+		s_destroyed_surfaces.erase(surface);
+		g_vulkan_surfaces.emplace(surface, surface_info);
+	}
+	reshade::log::message(reshade::log::level::info, "Vulkan WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), surface, surface_info.window, surface_info.display);
 }
 
 struct VkLayerInstanceLink
@@ -261,9 +279,7 @@ VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Su
 		return result;
 	}
 
-	const vulkan_surface surface_info { vulkan_wsi_kind::win32, pCreateInfo->hwnd, nullptr };
-	g_vulkan_surfaces.emplace(*pSurface, surface_info);
-	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
+	track_surface(*pSurface, { vulkan_wsi_kind::win32, pCreateInfo->hwnd, nullptr });
 
 	return VK_SUCCESS;
 }
@@ -281,9 +297,7 @@ VkResult VKAPI_CALL vkCreateWaylandSurfaceKHR(VkInstance instance, const VkWayla
 		return result;
 	}
 
-	const vulkan_surface surface_info { vulkan_wsi_kind::wayland, pCreateInfo->surface, pCreateInfo->display };
-	g_vulkan_surfaces.emplace(*pSurface, surface_info);
-	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
+	track_surface(*pSurface, { vulkan_wsi_kind::wayland, pCreateInfo->surface, pCreateInfo->display });
 
 	return VK_SUCCESS;
 }
@@ -301,9 +315,7 @@ VkResult VKAPI_CALL vkCreateXcbSurfaceKHR(VkInstance instance, const VkXcbSurfac
 		return result;
 	}
 
-	const vulkan_surface surface_info { vulkan_wsi_kind::xcb, reinterpret_cast<void *>(static_cast<uintptr_t>(pCreateInfo->window)), pCreateInfo->connection };
-	g_vulkan_surfaces.emplace(*pSurface, surface_info);
-	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
+	track_surface(*pSurface, { vulkan_wsi_kind::xcb, reinterpret_cast<void *>(static_cast<uintptr_t>(pCreateInfo->window)), pCreateInfo->connection });
 	return VK_SUCCESS;
 }
 #endif
@@ -320,9 +332,7 @@ VkResult VKAPI_CALL vkCreateXlibSurfaceKHR(VkInstance instance, const VkXlibSurf
 		return result;
 	}
 
-	const vulkan_surface surface_info { vulkan_wsi_kind::xlib, reinterpret_cast<void *>(static_cast<uintptr_t>(pCreateInfo->window)), pCreateInfo->dpy };
-	g_vulkan_surfaces.emplace(*pSurface, surface_info);
-	reshade::log::message(reshade::log::level::info, "Linux WSI surface: kind=%s VkSurfaceKHR=%p native_window=%p native_display=%p.", get_wsi_kind_name(surface_info.kind), *pSurface, surface_info.window, surface_info.display);
+	track_surface(*pSurface, { vulkan_wsi_kind::xlib, reinterpret_cast<void *>(static_cast<uintptr_t>(pCreateInfo->window)), pCreateInfo->dpy });
 	return VK_SUCCESS;
 }
 #endif
@@ -331,11 +341,24 @@ void     VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surfac
 {
 	reshade::log::message(reshade::log::level::info, "Redirecting vkDestroySurfaceKHR(instance = %p, surface = %p, pAllocator = %p) ...", instance, surface, pAllocator);
 
-
+	vulkan_surface surface_info;
+	{
+		// Decide under one lock, the repeated call may come from another thread at the same time.
+		const std::lock_guard<std::mutex> lock(s_surfaces_mutex);
+		if (g_vulkan_surfaces.erase(surface, surface_info))
+		{
+			s_destroyed_surfaces.insert(surface);
+		}
+		else if (s_destroyed_surfaces.count(surface) != 0)
+		{
+			reshade::log::message(reshade::log::level::warning, "Ignoring repeated vkDestroySurfaceKHR for surface %p.", surface);
+			return;
+		}
+	}
 #if defined(__linux__)
-	reshade::input::unregister_surface(g_vulkan_surfaces.at(surface).window, reinterpret_cast<uintptr_t>(surface));
+	if (surface_info.window != nullptr)
+		reshade::input::unregister_surface(surface_info.window, reinterpret_cast<uintptr_t>(surface));
 #endif
-	g_vulkan_surfaces.erase(surface);
 
 	RESHADE_VULKAN_GET_INSTANCE_DISPATCH_PTR(DestroySurfaceKHR, instance);
 	trampoline(instance, surface, pAllocator);
