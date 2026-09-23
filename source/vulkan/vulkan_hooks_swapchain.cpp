@@ -338,10 +338,13 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	}
 
 #if defined(__linux__)
-	if (surface_info.kind == vulkan_wsi_kind::wayland)
-		reshade::input::register_wayland_surface(hwnd, surface_info.display, reinterpret_cast<uintptr_t>(create_info.surface), create_info.imageExtent.width, create_info.imageExtent.height);
-	else if (surface_info.kind == vulkan_wsi_kind::xcb || surface_info.kind == vulkan_wsi_kind::xlib)
-		reshade::input::register_x11_window(hwnd, surface_info.display, surface_info.kind == vulkan_wsi_kind::xcb ? reshade::input::x11_display_kind::xcb : reshade::input::x11_display_kind::xlib, reinterpret_cast<uintptr_t>(create_info.surface), create_info.imageExtent.width, create_info.imageExtent.height);
+	if (surface_info.kind == vulkan_wsi_kind::wayland || surface_info.kind == vulkan_wsi_kind::xcb || surface_info.kind == vulkan_wsi_kind::xlib)
+	{
+		const reshade::input::wsi_kind input_kind =
+			surface_info.kind == vulkan_wsi_kind::wayland ? reshade::input::wsi_kind::wayland :
+			surface_info.kind == vulkan_wsi_kind::xcb ? reshade::input::wsi_kind::xcb : reshade::input::wsi_kind::xlib;
+		reshade::input::register_surface(hwnd, input_kind, surface_info.display, reinterpret_cast<uintptr_t>(create_info.surface), create_info.imageExtent.width, create_info.imageExtent.height);
+	}
 #endif
 
 	auto *const swapchain_impl = new reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR>(device_impl, *pSwapchain, create_info, hwnd);

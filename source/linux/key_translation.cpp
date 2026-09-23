@@ -1,6 +1,7 @@
 #include "key_translation.hpp"
 #include "input.hpp"
 #include <cstring>
+#include <linux/input-event-codes.h>
 
 namespace reshade
 {
@@ -111,6 +112,44 @@ namespace reshade
 			return reshade::input::key_apostrophe;
 		case XKB_KEY_grave:
 			return reshade::input::key_grave_accent;
+		default:
+			return 0;
+		}
+	}
+
+	unsigned int virtual_key_from_evdev_button(uint32_t button)
+	{
+		switch (button)
+		{
+		case BTN_LEFT:
+			return reshade::input::key_button_left;
+		case BTN_RIGHT:
+			return reshade::input::key_button_right;
+		case BTN_MIDDLE:
+			return reshade::input::key_button_middle;
+		case BTN_SIDE:
+			return reshade::input::key_button_xbutton1;
+		case BTN_EXTRA:
+			return reshade::input::key_button_xbutton2;
+		default:
+			return 0;
+		}
+	}
+
+	unsigned int virtual_key_from_x11_button(uint32_t button)
+	{
+		switch (button)
+		{
+		case 1:
+			return reshade::input::key_button_left;
+		case 2:
+			return reshade::input::key_button_middle;
+		case 3:
+			return reshade::input::key_button_right;
+		case 8:
+			return reshade::input::key_button_xbutton1;
+		case 9:
+			return reshade::input::key_button_xbutton2;
 		default:
 			return 0;
 		}

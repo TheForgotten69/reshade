@@ -46,52 +46,38 @@ find_program(WAYLAND_SCANNER_EXECUTABLE NAMES wayland-scanner REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 find_package(Threads REQUIRED)
 
-# Generate xdg-output bindings used to reconcile logical Wayland pointer coordinates
-# with physical Vulkan swapchain dimensions under fractional display scaling.
-set(RESHADE_WAYLAND_XDG_OUTPUT_XML "${WAYLAND_PROTOCOLS_DIR}/unstable/xdg-output/xdg-output-unstable-v1.xml")
-if(NOT EXISTS "${RESHADE_WAYLAND_XDG_OUTPUT_XML}")
-  message(FATAL_ERROR "Wayland xdg-output protocol XML not found: ${RESHADE_WAYLAND_XDG_OUTPUT_XML}")
-endif()
-set(RESHADE_WAYLAND_XDG_OUTPUT_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/xdg-output-unstable-v1-client-protocol.h")
-set(RESHADE_WAYLAND_XDG_OUTPUT_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/xdg-output-unstable-v1-protocol.c")
-add_custom_command(
-  OUTPUT "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER}"
-  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${RESHADE_WAYLAND_XDG_OUTPUT_XML}" "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER}"
-  DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_XML}"
+# Generates client bindings for a Wayland protocol XML, setting <var> to the header and source.
+function(reshade_wayland_protocol var xml)
+  get_filename_component(name "${xml}" NAME_WE)
+  set(header "${RESHADE_GENERATED_INCLUDE_DIR}/${name}-client-protocol.h")
+  set(source "${CMAKE_CURRENT_BINARY_DIR}/${name}-protocol.c")
+  add_custom_command(
+    OUTPUT "${header}" "${source}"
+    COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${xml}" "${header}"
+    COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${xml}" "${source}"
+    DEPENDS "${xml}"
+  )
+  set(${var} "${header}" "${source}" PARENT_SCOPE)
+endfunction()
+reshade_wayland_protocol(RESHADE_WAYLAND_RELATIVE_POINTER "${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml")
+reshade_wayland_protocol(RESHADE_WAYLAND_FRACTIONAL_SCALE "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
+
+set(RESHADE_LINUX_INPUT_SOURCES
+  source/input.cpp
+  source/linux/input_backend.cpp
+  source/linux/input_linux.cpp
+  source/linux/key_translation.cpp
+  source/linux/wayland_clipboard.cpp
+  source/linux/wayland_input.cpp
+  source/linux/wayland_pointer.cpp
+  source/linux/wayland_scale_probe.cpp
+  source/linux/window_registry.cpp
+  source/linux/wine_input_bridge.cpp
+  source/linux/x11_input.cpp
+  ${RESHADE_WAYLAND_RELATIVE_POINTER}
+  ${RESHADE_WAYLAND_FRACTIONAL_SCALE}
 )
-add_custom_command(
-  OUTPUT "${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}"
-  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_XDG_OUTPUT_XML}" "${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}"
-  DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_XML}"
-)
-set(RESHADE_WAYLAND_RELATIVE_POINTER_XML "${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml")
-set(RESHADE_WAYLAND_RELATIVE_POINTER_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/relative-pointer-unstable-v1-client-protocol.h")
-set(RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/relative-pointer-unstable-v1-protocol.c")
-add_custom_command(
-  OUTPUT "${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}"
-  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}" "${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}"
-  DEPENDS "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}"
-)
-add_custom_command(
-  OUTPUT "${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}"
-  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}" "${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}"
-  DEPENDS "${RESHADE_WAYLAND_RELATIVE_POINTER_XML}"
-)
-set(RESHADE_WAYLAND_FRACTIONAL_XML "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
-set(RESHADE_WAYLAND_FRACTIONAL_HEADER "${RESHADE_GENERATED_INCLUDE_DIR}/fractional-scale-v1-client-protocol.h")
-set(RESHADE_WAYLAND_FRACTIONAL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/fractional-scale-v1-protocol.c")
-add_custom_command(OUTPUT "${RESHADE_WAYLAND_FRACTIONAL_HEADER}" "${RESHADE_WAYLAND_FRACTIONAL_SOURCE}"
-  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${RESHADE_WAYLAND_FRACTIONAL_XML}" "${RESHADE_WAYLAND_FRACTIONAL_HEADER}"
-  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_FRACTIONAL_XML}" "${RESHADE_WAYLAND_FRACTIONAL_SOURCE}"
-  DEPENDS "${RESHADE_WAYLAND_FRACTIONAL_XML}")
-set(RESHADE_WAYLAND_TABLET_XML "${WAYLAND_PROTOCOLS_DIR}/stable/tablet/tablet-v2.xml")
-set(RESHADE_WAYLAND_TABLET_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/tablet-v2-protocol.c")
-add_custom_command(
-  OUTPUT "${RESHADE_WAYLAND_TABLET_SOURCE}"
-  COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${RESHADE_WAYLAND_TABLET_XML}" "${RESHADE_WAYLAND_TABLET_SOURCE}"
-  DEPENDS "${RESHADE_WAYLAND_TABLET_XML}"
-)
-set_source_files_properties(source/linux/input_linux.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER};${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}")
+set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES)
 
 # Generate a native lookup table from the same localization resources used by Windows.
 file(GLOB RESHADE_LOCALIZATION_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/lang_*.rc2")
@@ -130,7 +116,6 @@ function(reshade_configure_linux_target target)
       source/addon.hpp
       source/addon_manager.cpp
       source/addon_manager.hpp
-      source/input.cpp
       source/runtime.cpp
       source/runtime_api.cpp
       source/runtime_manager.cpp
@@ -145,21 +130,12 @@ function(reshade_configure_linux_target target)
       source/imgui_function_table_19222.cpp
       source/imgui_function_table_19250.cpp
       ${RESHADE_SOURCE_VULKAN}
-      ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER}
-      ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
-      ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}
-      ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
-      ${RESHADE_WAYLAND_TABLET_SOURCE}
-      ${RESHADE_WAYLAND_FRACTIONAL_HEADER} ${RESHADE_WAYLAND_FRACTIONAL_SOURCE}
+      ${RESHADE_LINUX_INPUT_SOURCES}
       ${RESHADE_LOCALIZATION_HEADER}
       ${RESHADE_LOCALIZATION_SOURCE}
       source/imgui_code_editor.cpp
       source/imgui_widgets.cpp
       source/dll_log.cpp
-      source/linux/input_linux.cpp
-      source/linux/key_translation.cpp
-      source/linux/window_registry.cpp
-	  source/linux/wine_input_bridge.cpp
       source/linux/platform_utils.cpp
       source/linux/process_environment.cpp
       source/linux/runtime_platform.cpp
@@ -186,7 +162,7 @@ function(reshade_configure_linux_target target)
     ${target}
     PRIVATE
       ReShadeFX fpng glad ImGui jxl stb utfcpp VMA Threads::Threads ${CMAKE_DL_LIBS}
-      PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::FONTCONFIG
+      ${RESHADE_LINUX_INPUT_LIBRARIES} PkgConfig::FONTCONFIG
   )
   target_link_options(${target} PRIVATE -Wl,--no-undefined)
 
@@ -201,39 +177,26 @@ option(RESHADE_BUILD_LINUX_ADDON_EXAMPLES "Build native Linux add-on examples" O
 option(RESHADE_BUILD_LINUX_TESTS "Build Linux portability regression tests" OFF)
 if(RESHADE_BUILD_LINUX_TESTS)
   enable_testing()
-  add_executable(reshade_linux_tests tests/linux_portability.cpp source/input.cpp
-    source/linux/input_linux.cpp source/linux/key_translation.cpp source/linux/window_registry.cpp source/linux/wine_input_bridge.cpp
-    ${RESHADE_WAYLAND_XDG_OUTPUT_HEADER} ${RESHADE_WAYLAND_XDG_OUTPUT_SOURCE}
-    ${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER} ${RESHADE_WAYLAND_RELATIVE_POINTER_SOURCE}
-    ${RESHADE_WAYLAND_TABLET_SOURCE} ${RESHADE_WAYLAND_FRACTIONAL_HEADER} ${RESHADE_WAYLAND_FRACTIONAL_SOURCE})
+  add_executable(reshade_linux_tests tests/linux_portability.cpp ${RESHADE_LINUX_INPUT_SOURCES})
   target_include_directories(reshade_linux_tests PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
-  set_source_files_properties(source/linux/input_linux.cpp tests/linux_portability.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_WAYLAND_XDG_OUTPUT_HEADER};${RESHADE_WAYLAND_RELATIVE_POINTER_HEADER}")
   target_compile_options(reshade_linux_tests PRIVATE -UNDEBUG $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
-  target_link_libraries(reshade_linux_tests PRIVATE glad Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES)
+  target_link_libraries(reshade_linux_tests PRIVATE glad Threads::Threads ${RESHADE_LINUX_INPUT_LIBRARIES})
   add_test(NAME linux_portability COMMAND reshade_linux_tests)
   set_tests_properties(linux_portability PROPERTIES TIMEOUT 15)
   # Manual integration test. Run only inside an isolated compositor (creates a toplevel).
-  set(scale_test_xdg_xml "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
-  set(scale_test_xdg_header "${RESHADE_GENERATED_INCLUDE_DIR}/xdg-shell-client-protocol.h")
-  set(scale_test_xdg_source "${CMAKE_CURRENT_BINARY_DIR}/scale-test-xdg-shell.c")
-  add_custom_command(OUTPUT "${scale_test_xdg_header}" "${scale_test_xdg_source}"
-    COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header "${scale_test_xdg_xml}" "${scale_test_xdg_header}"
-    COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${scale_test_xdg_xml}" "${scale_test_xdg_source}"
-    DEPENDS "${scale_test_xdg_xml}")
-  add_executable(reshade_wayland_scale_test tests/linux_wayland_scale.c tests/linux_wayland_scale_bridge.cpp
-    "${scale_test_xdg_header}" "${scale_test_xdg_source}" "${RESHADE_WAYLAND_FRACTIONAL_HEADER}" "${RESHADE_WAYLAND_FRACTIONAL_SOURCE}")
+  reshade_wayland_protocol(RESHADE_WAYLAND_XDG_SHELL "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
+  add_executable(reshade_wayland_scale_test tests/linux_wayland_scale.c tests/linux_wayland_scale_bridge.cpp source/linux/wayland_scale_probe.cpp
+    ${RESHADE_WAYLAND_XDG_SHELL} ${RESHADE_WAYLAND_FRACTIONAL_SCALE})
   target_include_directories(reshade_wayland_scale_test PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
   target_compile_options(reshade_wayland_scale_test PRIVATE -UNDEBUG)
   target_link_libraries(reshade_wayland_scale_test PRIVATE PkgConfig::WAYLAND_CLIENT)
   option(RESHADE_BUILD_X11_GRAB_TEST "Build manual X11 grab regression (run on an isolated X server only)" OFF)
   if(RESHADE_BUILD_X11_GRAB_TEST)
     pkg_check_modules(XCB_XTEST REQUIRED IMPORTED_TARGET xcb-xtest)
-    get_target_property(input_test_sources reshade_linux_tests SOURCES)
-    list(REMOVE_ITEM input_test_sources tests/linux_portability.cpp)
-    add_executable(reshade_x11_grab_test tests/linux_x11_grab.cpp ${input_test_sources})
+    add_executable(reshade_x11_grab_test tests/linux_x11_grab.cpp ${RESHADE_LINUX_INPUT_SOURCES})
     target_include_directories(reshade_x11_grab_test PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
     target_compile_options(reshade_x11_grab_test PRIVATE -UNDEBUG $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
-    target_link_libraries(reshade_x11_grab_test PRIVATE glad Threads::Threads PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::XCB_XTEST)
+    target_link_libraries(reshade_x11_grab_test PRIVATE glad Threads::Threads ${RESHADE_LINUX_INPUT_LIBRARIES} PkgConfig::XCB_XTEST)
   endif()
 endif()
 

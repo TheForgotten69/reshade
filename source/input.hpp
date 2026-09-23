@@ -15,8 +15,7 @@
 namespace reshade
 {
 	#if defined(__linux__)
-	struct wayland_input_context;
-	struct x11_input_context;
+	class input_backend;
 	#endif
 
 	class input
@@ -140,15 +139,13 @@ namespace reshade
 		bool try_acquire_primary_handler();
 		void release_primary_handler();
 #if defined(__linux__)
-		enum class x11_display_kind { xcb, xlib };
-		static void register_wayland_surface(window_handle surface, void *display, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
-		static void unregister_wayland_surface(window_handle surface, uintptr_t vulkan_surface);
-		static void register_x11_window(window_handle window, void *display, x11_display_kind display_kind, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
-		static void unregister_x11_window(window_handle window, uintptr_t vulkan_surface);
+		enum class wsi_kind { wayland, xcb, xlib };
+		// Called by the Vulkan WSI hooks, so 'register_window' knows which backend a window needs.
+		// A window stays registered while any of its Vulkan surfaces exists.
+		static void register_surface(window_handle window, wsi_kind kind, void *display, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
+		static void unregister_surface(window_handle window, uintptr_t vulkan_surface);
 
-		// Wayland clipboard integration; 'user_data' is expected to be the 'reshade::input'
-		// instance owning the Wayland connection, matching the shape ImGui's clipboard
-		// callbacks expect (see 'ImGuiIO::GetClipboardTextFn'/'SetClipboardTextFn').
+		// ImGui clipboard callbacks, 'user_data' is the 'reshade::input' instance.
 		static const char *get_clipboard_text(void *user_data);
 		static void set_clipboard_text(void *user_data, const char *text);
 #endif
@@ -202,7 +199,7 @@ namespace reshade
 		void block_mouse_cursor_warping(bool enable);
 		bool is_blocking_mouse_cursor_warping() const { return _block_cursor_warping; }
 #if defined(__linux__)
-		bool uses_wayland() const { return _wayland != nullptr; }
+		bool uses_wayland() const;
 		bool is_mouse_position_valid() const;
 		void use_host_cursor(bool enable);
 		struct key_transition { unsigned int key; bool down; };
@@ -258,15 +255,17 @@ namespace reshade
 		uint64_t _frame_count = 0; // Keep track of frame count to identify windows with a lot of rendering
 		std::wstring _text_input;
 	#if defined(__linux__)
-		void update_key_state(unsigned int key, bool down);
+		// Backends deliver events asynchronously to rendering, so a key can go down and up within
+		// one frame. These '_keys' bits latch such edges until 'next_frame'.
+		static constexpr uint8_t key_pressed_in_frame = 0x10;
+		static constexpr uint8_t key_released_in_frame = 0x20;
+
 		uint8_t _key_press_modifiers[256] = {};
 		std::vector<key_transition> _key_transitions;
 		bool _use_host_cursor = false;
-		wayland_input_context *_wayland = nullptr;
-		x11_input_context *_x11 = nullptr;
+		input_backend *_backend = nullptr;
 
-		friend struct wayland_input_context;
-		friend struct x11_input_context;
+		friend class input_backend;
 	#endif
 	};
 

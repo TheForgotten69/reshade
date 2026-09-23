@@ -15,6 +15,9 @@ namespace reshade
 			int32_t y;
 		};
 
+		// Whether this process is a Wine host, i.e. has 'win32u.so' loaded.
+		static bool is_wine_process();
+
 		bool initialize();
 		bool available() const;
 		bool is_foreground_process() const;

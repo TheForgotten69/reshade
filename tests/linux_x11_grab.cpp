@@ -1,4 +1,5 @@
 // Run only against an isolated X server: this test grabs its pointer and injects input.
+#include "dll_log.hpp"
 #include "linux/x11_input.hpp"
 #include <xcb/xtest.h>
 #include <cassert>
@@ -6,6 +7,21 @@
 #include <unistd.h>
 
 void reshade::log::message(level, const char *, ...) {}
+
+struct reshade::input_test_access
+{
+	static xcb_atom_t wm_state_atom(const x11_input &backend) { return backend._wm_state_atom; }
+	static const xcb_atom_t *fullscreen_atom(const x11_input &backend) { return &backend._fullscreen_atom; }
+	static bool uses_relative_motion(const x11_input &backend) { return backend.uses_relative_motion(); }
+	static xcb_keycode_t keycode_of(const x11_input &backend, xcb_keysym_t keysym)
+	{
+		for (unsigned int key = 1; key < backend._key_translations.size(); ++key)
+			if (backend._key_translations[key].keysym == keysym)
+				return static_cast<xcb_keycode_t>(key);
+		return 0;
+	}
+};
+using test_access = reshade::input_test_access;
 
 int main()
 {
@@ -28,19 +44,16 @@ int main()
 	free(xcb_get_input_focus_reply(host, xcb_get_input_focus(host), nullptr));
 	{
 		reshade::input owner(nullptr);
-		reshade::x11_input_context backend;
-		backend.owner = &owner;
-		backend.window = window;
-		backend.width = 800;
-		backend.height = 600;
+		reshade::x11_input backend(owner, window, host, reshade::input::wsi_kind::xcb);
+		backend.set_extent(800, 600);
 		assert(backend.initialize());
 		backend.next_frame();
-		assert(backend.keyboard_focused && backend.pointer_focused);
-		owner.block_mouse_cursor_warping(true);
-		xcb_change_property(host, XCB_PROP_MODE_REPLACE, top_level, backend.wm_state_atom, XCB_ATOM_ATOM, 32, 1, &backend.fullscreen_atom);
+		assert(backend.keyboard_focused() && backend.pointer_focused());
+		backend.set_overlay_active(true);
+		xcb_change_property(host, XCB_PROP_MODE_REPLACE, top_level, test_access::wm_state_atom(backend), XCB_ATOM_ATOM, 32, 1, test_access::fullscreen_atom(backend));
 		free(xcb_get_input_focus_reply(host, xcb_get_input_focus(host), nullptr));
 		backend.next_frame();
-		assert(backend.uses_relative_motion());
+		assert(test_access::uses_relative_motion(backend));
 		const auto start_x = owner.mouse_position_x();
 		auto *grab = xcb_grab_pointer_reply(host, xcb_grab_pointer(host, false, window, 0, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC, window, XCB_CURSOR_NONE, XCB_CURRENT_TIME), nullptr);
 		assert(grab && grab->status == XCB_GRAB_STATUS_SUCCESS);
@@ -48,10 +61,7 @@ int main()
 		auto *keyboard_grab = xcb_grab_keyboard_reply(host, xcb_grab_keyboard(host, false, window, XCB_CURRENT_TIME, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC), nullptr);
 		assert(keyboard_grab && keyboard_grab->status == XCB_GRAB_STATUS_SUCCESS);
 		free(keyboard_grab);
-		xcb_keycode_t home = 0;
-		for (unsigned int key = 1; key < backend.key_translation.size(); ++key)
-			if (backend.key_translation[key].keysym == XKB_KEY_Home)
-				home = static_cast<xcb_keycode_t>(key);
+		const xcb_keycode_t home = test_access::keycode_of(backend, XKB_KEY_Home);
 		assert(home != 0);
 		xcb_test_fake_input(host, XCB_KEY_PRESS, home, XCB_CURRENT_TIME, screen->root, 0, 0, 0);
 		xcb_test_fake_input(host, XCB_KEY_RELEASE, home, XCB_CURRENT_TIME, screen->root, 0, 0, 0);
@@ -75,13 +85,13 @@ int main()
 		std::cout << "Home tap and cursor motion during host grabs: PASS" << std::endl;
 		// A windowed overlay must follow the server pointer, not retain a separate
 		// raw-delta position when the host pointer moves towards the menu bar.
-		xcb_delete_property(host, top_level, backend.wm_state_atom);
+		xcb_delete_property(host, top_level, test_access::wm_state_atom(backend));
 		xcb_warp_pointer(host, XCB_WINDOW_NONE, window, 0, 0, 0, 0, 200, 1);
 		free(xcb_get_input_focus_reply(host, xcb_get_input_focus(host), nullptr));
 		backend.next_frame();
 		std::cout << "Windowed top edge: y=" << owner.mouse_position_y() << " (expected 1)" << std::endl;
 		assert(owner.mouse_position_y() == 1);
-		assert(!backend.uses_relative_motion());
+		assert(!test_access::uses_relative_motion(backend));
 		for (const auto &point : { std::pair<int16_t, int16_t>{1, 1}, {799, 1}, {799, 599}, {1, 599} })
 		{
 			xcb_warp_pointer(host, XCB_WINDOW_NONE, window, 0, 0, 0, 0, point.first, point.second);
@@ -98,7 +108,7 @@ int main()
 	xcb_warp_pointer(host, XCB_WINDOW_NONE, window, 0, 0, 0, 0, 100, 100);
 	free(xcb_get_input_focus_reply(host, xcb_get_input_focus(host), nullptr));
 	const auto native_window = reinterpret_cast<void *>(static_cast<uintptr_t>(window));
-	reshade::input::register_x11_window(native_window, host, reshade::input::x11_display_kind::xcb, 1, 400, 300);
+	reshade::input::register_surface(native_window, reshade::input::wsi_kind::xcb, host, 1, 400, 300);
 	auto registered_input = reshade::input::register_window(native_window);
 	assert(registered_input);
 	registered_input->next_frame();
@@ -111,7 +121,7 @@ int main()
 	free(xcb_get_input_focus_reply(host, xcb_get_input_focus(host), nullptr));
 	registered_input->next_frame();
 	assert(registered_input->is_mouse_position_valid());
-	reshade::input::unregister_x11_window(native_window, 1);
+	reshade::input::unregister_surface(native_window, 1);
 	registered_input.reset();
 	std::cout << "Render-surface pointer leave/reenter validity: PASS" << std::endl;
 	xcb_destroy_window(host, window);

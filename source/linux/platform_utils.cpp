@@ -13,12 +13,8 @@ extern char **environ;
 
 namespace
 {
-	// Launches 'argv' (execvp-style, nullptr-terminated) as a detached child process without
-	// blocking the calling thread. 'hide_window' redirects the child's stdio to /dev/null, the
-	// closest Linux equivalent of Windows' hidden-window process creation; 'working_directory', if
-	// non-empty, becomes the child's current directory and never affects this process. The child is
-	// reaped by a short-lived detached thread rather than left a zombie; that thread only captures
-	// the child pid by value, so it cannot outlive or dangle off any ReShade runtime state.
+	// Starts 'argv' (nullptr-terminated, resolved through $PATH) without waiting for it. 'hide_window'
+	// redirects its stdio to /dev/null. A detached thread reaps the child so it does not stay a zombie.
 	bool spawn_detached(const std::vector<const char *> &argv, const std::filesystem::path &working_directory, bool hide_window)
 	{
 		posix_spawn_file_actions_t file_actions;
@@ -36,8 +32,6 @@ namespace
 				posix_spawn_file_actions_addopen(&file_actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0;
 		}
 
-		// 'posix_spawnp' (not 'posix_spawn') so a bare command name like "xdg-open" resolves
-		// against $PATH the same way the shell would, instead of requiring a full path.
 		pid_t child = -1;
 		if (ok)
 			ok = posix_spawnp(&child, argv[0], &file_actions, nullptr, const_cast<char *const *>(argv.data()), environ) == 0;
@@ -55,9 +49,7 @@ namespace
 		}
 		catch (...)
 		{
-			// The reaper thread failed to start; the child becomes a zombie until this process
-			// exits. That is a resource leak, not a crash, and no worse than the outcome of a
-			// failed process launch on any platform, so it is not treated as failure here.
+			// The child was started, it just stays a zombie until this process exits.
 		}
 		return true;
 	}
@@ -96,10 +88,7 @@ std::filesystem::path reshade::utils::find_system_font(const char *family)
 	return result;
 }
 
-// Opens the freedesktop-default file manager on the directory containing 'path' via 'xdg-open'.
-// Unlike Windows' Explorer integration, this cannot select 'path' itself within that folder view -
-// doing so portably across file managers requires the org.freedesktop.FileManager1 D-Bus interface,
-// which is a materially larger dependency (a D-Bus client) not justified purely for this.
+// Opens the directory containing 'path'. Selecting the file itself would need the FileManager1 D-Bus interface.
 bool reshade::utils::open_explorer(const std::filesystem::path &path)
 {
 	std::error_code ec;
@@ -110,10 +99,7 @@ bool reshade::utils::open_explorer(const std::filesystem::path &path)
 	return false;
 }
 
-// Interprets 'command_line' as a shell command, matching how the equivalent Windows
-// 'CreateProcess' call treats it: both accept a single string the user configured themselves
-// (ReShade's screenshot post-save command setting) rather than externally supplied input, so
-// shell interpretation is the intended behavior, not an injection risk.
+// 'command_line' is the user's own post-save command setting, so it runs through the shell like on Windows.
 bool reshade::utils::execute_command(const std::string &command_line, const std::filesystem::path &working_directory, bool hide_window)
 {
 	if (command_line.empty())
@@ -124,10 +110,7 @@ bool reshade::utils::execute_command(const std::string &command_line, const std:
 	return false;
 }
 
-// No lightweight, dependency-free way to play audio exists on Linux the way 'PlaySound' does on
-// Windows; pulling in a full audio library only for the screenshot sound is not justified. Left
-// unimplemented rather than silently pretending to succeed - callers only ever fire-and-forget
-// this, so there is nothing else to report a failure to.
+// Not implemented, Linux has no dependency-free equivalent of 'PlaySound'.
 void reshade::utils::play_sound_async(const std::filesystem::path &)
 {
 }

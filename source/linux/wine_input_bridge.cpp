@@ -2,6 +2,14 @@
 
 #include <dlfcn.h>
 
+bool reshade::wine_input_bridge::is_wine_process()
+{
+	void *const module = dlopen("win32u.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+	if (module != nullptr)
+		dlclose(module);
+	return module != nullptr;
+}
+
 bool reshade::wine_input_bridge::initialize()
 {
 	void *const module = dlopen("win32u.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
