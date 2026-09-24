@@ -33,6 +33,8 @@ For a Steam game using a Proton build with native Wayland support, set:
 RESHADE_ENABLE=1 PROTON_ENABLE_WAYLAND=1 %command%
 ```
 
+In this mode Wine receives input on a Wayland connection of its own, so the overlay works but ReShade cannot block input from reaching the game. Use the default Proton setup (without `PROTON_ENABLE_WAYLAND`) if you need input blocking.
+
 Configurations are created under `${XDG_CONFIG_HOME:-~/.config}/reshade`; logs and add-ons live below `${XDG_DATA_HOME:-~/.local/share}/reshade`.
 
 ## Shaders and add-ons
