@@ -41,6 +41,7 @@ namespace reshade
 		};
 
 		bool is_host_cursor_hidden() const override { return !_host_cursor_visible; }
+		bool is_capture_layer_shown() const override { return _capture_mapped; }
 		bool cache_key_translations();
 		bool is_ancestor_window(xcb_window_t ancestor, xcb_window_t window) const;
 		bool contains_window(xcb_window_t window) const;
@@ -50,6 +51,7 @@ namespace reshade
 		bool uses_relative_motion() const;
 		void query_pointer();
 		void query_wine_buttons();
+		void query_wine_keys();
 		void on_raw_motion(double dx, double dy);
 		void update_host_cursor_visibility();
 		void update_capture();
@@ -84,6 +86,8 @@ namespace reshade
 		std::array<key_translation, 256> _key_translations = {};
 		wine_input_bridge _wine;
 		bool _wine_available = false;
+		// Wine uses its Wayland driver, so keys are read from Wine instead of the X server.
+		bool _wine_wayland = false;
 
 		friend struct input_test_access;
 	};

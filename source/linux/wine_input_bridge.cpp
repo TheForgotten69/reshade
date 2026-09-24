@@ -2,12 +2,26 @@
 
 #include <dlfcn.h>
 
+namespace
+{
+	bool is_module_loaded(const char *name)
+	{
+		void *const module = dlopen(name, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+		if (module != nullptr)
+			dlclose(module);
+		return module != nullptr;
+	}
+}
+
 bool reshade::wine_input_bridge::is_wine_process()
 {
-	void *const module = dlopen("win32u.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-	if (module != nullptr)
-		dlclose(module);
-	return module != nullptr;
+	return is_module_loaded("win32u.so");
+}
+
+bool reshade::wine_input_bridge::uses_wayland_driver()
+{
+	// Wine loads a single user driver per process.
+	return is_module_loaded("winewayland.so");
 }
 
 bool reshade::wine_input_bridge::initialize()
@@ -21,6 +35,7 @@ bool reshade::wine_input_bridge::initialize()
 	_get_async_key_state = reinterpret_cast<get_async_key_state_fn>(lookup("NtUserGetAsyncKeyState"));
 	_clip_cursor = reinterpret_cast<clip_cursor_fn>(lookup("NtUserClipCursor"));
 	_get_clip_cursor = reinterpret_cast<get_clip_cursor_fn>(lookup("NtUserGetClipCursor"));
+	_get_cursor_info = reinterpret_cast<get_cursor_info_fn>(lookup("NtUserGetCursorInfo"));
 	if (module != nullptr)
 		dlclose(module);
 	return available();
@@ -56,9 +71,19 @@ bool reshade::wine_input_bridge::query_pointer_position(point &position, unsigne
 	return true;
 }
 
-bool reshade::wine_input_bridge::button_down(int virtual_key) const
+bool reshade::wine_input_bridge::key_down(int virtual_key) const
 {
 	return _get_async_key_state != nullptr && (_get_async_key_state(virtual_key) & 0x8000) != 0;
+}
+
+bool reshade::wine_input_bridge::is_cursor_visible() const
+{
+	// Hidden is a negative show count ('ShowCursor(FALSE)') or no cursor image ('SetCursor(NULL)').
+	constexpr uint32_t cursor_showing = 0x1;
+	cursor_info info = { sizeof(cursor_info) };
+	if (_get_cursor_info == nullptr || !_get_cursor_info(&info))
+		return true;
+	return (info.flags & cursor_showing) != 0 && info.cursor != nullptr;
 }
 
 void reshade::wine_input_bridge::release_cursor_clip(bool release)

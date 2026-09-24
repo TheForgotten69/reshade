@@ -68,6 +68,7 @@ struct reshade::input_test_access
 	static void release_pointer(x11_input &target) { target.release_pointer(); }
 	static void set_mouse_position(x11_input &target, unsigned int x, unsigned int y) { target.set_mouse_position(x, y); }
 	static void set_host_cursor_visible(x11_input &target, bool visible) { target._host_cursor_visible = visible; }
+	static void set_capture_mapped(x11_input &target, bool mapped) { target._capture_mapped = mapped; }
 	static void release_keyboard(x11_input &target) { target.release_keyboard(); }
 };
 
@@ -538,7 +539,10 @@ static void test_pointer_capture_cursor()
 	input_test_access::set_mouse_position(backend, 150, 50);
 	assert(!backend.needs_overlay_cursor());
 
+	// Capture regions without a shown layer (no visible window to cover) leave the host's cursor alone.
 	owner.set_pointer_capture({ { 0.5f, 0.0f, 0.5f, 1.0f } });
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_capture_mapped(backend, true);
 	assert(backend.needs_overlay_cursor());
 	input_test_access::set_mouse_position(backend, 50, 50);
 	assert(!backend.needs_overlay_cursor());

@@ -42,7 +42,7 @@ void reshade::input_backend::set_extent(unsigned int width, unsigned int height)
 
 bool reshade::input_backend::is_pointer_in_capture() const
 {
-	if (!_pointer_focused)
+	if (!_pointer_focused || !is_capture_layer_shown())
 		return false;
 
 	const float x = static_cast<float>(_owner._mouse_position[0]) / _width;

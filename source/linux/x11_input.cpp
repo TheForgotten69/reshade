@@ -123,6 +123,7 @@ bool reshade::x11_input::initialize()
 	_shape_available = shape_extension != nullptr && shape_extension->present;
 
 	_wine_available = _wine.initialize();
+	_wine_wayland = _wine_available && wine_input_bridge::uses_wayland_driver();
 	// X11 does not replay focus events that happened before this connection subscribed.
 	refresh_keyboard_focus();
 
@@ -131,8 +132,8 @@ bool reshade::x11_input::initialize()
 	const auto origin = owned(xcb_translate_coordinates_reply(_connection, xcb_translate_coordinates(_connection, _window, _root, 0, 0), nullptr));
 	log::message(log::level::info, "X11 input: xcb_window=%#x viewable=%d origin=(%d, %d) keyboard=%s pointer=%s cursor_tracking=%s capture_shape=%s.",
 		_window, attributes != nullptr && attributes->map_state == XCB_MAP_STATE_VIEWABLE, origin != nullptr ? origin->dst_x : 0, origin != nullptr ? origin->dst_y : 0,
-		keyboard_ready ? "yes" : "no", _wine_available ? "wine-win32u" : "xinput2", _xfixes_first_event != 0 ? "xfixes" : "no", _shape_available ? "yes" : "no");
-	return keyboard_ready;
+		_wine_wayland ? "wine-wayland" : keyboard_ready ? "yes" : "no", _wine_available ? "wine-win32u" : "xinput2", _xfixes_first_event != 0 ? "xfixes" : "no", _shape_available ? "yes" : "no");
+	return keyboard_ready || _wine_wayland;
 }
 
 void reshade::x11_input::next_frame()
@@ -145,6 +146,8 @@ void reshade::x11_input::next_frame()
 	// Wine does not see clicks on the capture layer, the raw events deliver them instead.
 	if (_wine_available && !_capture_mapped)
 		query_wine_buttons();
+	if (_wine_wayland)
+		query_wine_keys();
 	_wine.release_cursor_clip(overlay_active());
 
 	bool cursor_changed = false;
@@ -181,7 +184,8 @@ void reshade::x11_input::next_frame()
 		}
 		}
 	}
-	if (cursor_changed)
+	// Wine does not notify cursor changes, so poll it.
+	if (cursor_changed || _wine_wayland)
 		update_host_cursor_visibility();
 }
 
@@ -211,7 +215,7 @@ xcb_window_t reshade::x11_input::select_keyboard_window(xcb_window_t surface_win
 
 void reshade::x11_input::on_raw_key(xcb_keycode_t keycode, bool pressed)
 {
-	if (!_keyboard_focused)
+	if (!_keyboard_focused || _wine_wayland)
 		return;
 
 	const key_translation &translation = _key_translations[keycode];
@@ -295,6 +299,15 @@ void reshade::x11_input::refresh_keyboard_focus()
 	if (_keyboard_grabbed)
 		return;
 
+	if (_wine_wayland)
+	{
+		const bool focused = _wine.is_foreground_process();
+		if (_keyboard_focused && !focused)
+			release_keyboard();
+		_keyboard_focused = focused;
+		return;
+	}
+
 	const auto focus = owned(xcb_get_input_focus_reply(_connection, xcb_get_input_focus(_connection), nullptr));
 	if (focus == nullptr)
 		return;
@@ -313,7 +326,8 @@ void reshade::x11_input::refresh_keyboard_focus()
 
 bool reshade::x11_input::uses_relative_motion() const
 {
-	return overlay_active() && !_host_cursor_visible && !is_pointer_in_capture();
+	// Raw motion only reaches the X server while it has pointer focus, which Wine's Wayland driver never gives it.
+	return overlay_active() && !_host_cursor_visible && !is_pointer_in_capture() && !_wine_wayland;
 }
 
 void reshade::x11_input::query_pointer()
@@ -348,22 +362,41 @@ void reshade::x11_input::query_wine_buttons()
 	if (!_wine.available() || !_keyboard_focused)
 		return;
 
-	// Wine's virtual-key codes for mouse buttons are the ones ReShade uses.
 	for (const unsigned int key : mouse_keys)
-		set_key(key, _wine.button_down(static_cast<int>(key)));
+		set_key(key, _wine.key_down(static_cast<int>(key)));
+}
+
+void reshade::x11_input::query_wine_keys()
+{
+	if (!_keyboard_focused)
+		return;
+
+	// Polling misses taps shorter than a frame and produces no text, but it is the only keyboard
+	// state that reaches this process.
+	for (unsigned int key = input::key_button_xbutton2 + 1; key < 256; ++key)
+		set_key(key, _wine.key_down(static_cast<int>(key)));
 }
 
 void reshade::x11_input::update_host_cursor_visibility()
 {
-	// Over the capture layer the displayed cursor is the layer's own invisible one.
-	if (_capture_mapped && is_pointer_in_capture())
-		return;
+	bool visible = true;
+	if (_wine_wayland)
+	{
+		// The X server's cursor is not the one Wine shows over its Wayland window.
+		visible = _wine.is_cursor_visible();
+	}
+	else
+	{
+		// Over the capture layer the displayed cursor is the layer's own invisible one.
+		if (is_pointer_in_capture())
+			return;
 
-	const auto image = owned(xcb_xfixes_get_cursor_image_reply(_connection, xcb_xfixes_get_cursor_image(_connection), nullptr));
-	if (image == nullptr)
-		return;
+		const auto image = owned(xcb_xfixes_get_cursor_image_reply(_connection, xcb_xfixes_get_cursor_image(_connection), nullptr));
+		if (image == nullptr)
+			return;
+		visible = is_cursor_image_visible(xcb_xfixes_get_cursor_image_cursor_image(image.get()), xcb_xfixes_get_cursor_image_cursor_image_length(image.get()));
+	}
 
-	const bool visible = is_cursor_image_visible(xcb_xfixes_get_cursor_image_cursor_image(image.get()), xcb_xfixes_get_cursor_image_cursor_image_length(image.get()));
 	if (visible != _host_cursor_visible)
 		log::message(log::level::info, "X11 window %#x host cursor %s.", _window, visible ? "shown, following it" : "hidden, drawing the overlay cursor");
 	_host_cursor_visible = visible;
@@ -517,7 +550,8 @@ void reshade::x11_input::apply_capture_shape()
 
 void reshade::x11_input::update_keyboard_grab()
 {
-	const bool wanted = _owner.is_blocking_keyboard_input() && _keyboard_focused;
+	// The X server cannot hold back keys it never receives.
+	const bool wanted = _owner.is_blocking_keyboard_input() && _keyboard_focused && !_wine_wayland;
 	if (wanted == _keyboard_grabbed)
 		return;
 

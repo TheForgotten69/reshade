@@ -51,8 +51,11 @@ namespace reshade
 
 		virtual void on_overlay_active_changed() {}
 		virtual bool is_host_cursor_hidden() const = 0;
+		// Whether the layer implementing 'pointer_capture' is shown, which it cannot always be.
+		virtual bool is_capture_layer_shown() const = 0;
 		bool overlay_active() const { return _overlay_active; }
 		const std::vector<input::capture_rect> &pointer_capture() const { return _owner._pointer_capture; }
+		// Whether the pointer is over a shown capture layer, which hides the host's cursor.
 		bool is_pointer_in_capture() const;
 		bool is_key_down(unsigned int key) const { return _owner.is_key_down(key); }
 

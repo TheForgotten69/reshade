@@ -48,6 +48,7 @@ namespace reshade
 	private:
 		void on_overlay_active_changed() override;
 		bool is_host_cursor_hidden() const override { return _pointer.current_mode() == wayland_pointer::mode::software_relative; }
+		bool is_capture_layer_shown() const override { return _capturing; }
 		void update_pointer_scale();
 		void update_capture();
 		void publish_pointer();
