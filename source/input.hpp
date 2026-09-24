@@ -5,15 +5,17 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace reshade
 {
 	#if defined(__linux__)
-	struct wayland_input_context;
+	class input_backend;
 	#endif
 
 	class input
@@ -134,13 +136,16 @@ namespace reshade
 		/// <param name="window">Window handle of the target window.</param>
 		/// <returns>Pointer to the input manager registered for this <paramref name="window"/>.</returns>
 		static std::shared_ptr<input> register_window(window_handle window);
+		bool try_acquire_primary_handler();
+		void release_primary_handler();
 #if defined(__linux__)
-		static void register_wayland_surface(window_handle surface, void *display, unsigned int width, unsigned int height);
-		static void unregister_wayland_surface(window_handle surface);
+		enum class wsi_kind { wayland, xcb, xlib };
+		// Called by the Vulkan WSI hooks, so 'register_window' knows which backend a window needs.
+		// A window stays registered while any of its Vulkan surfaces exists.
+		static void register_surface(window_handle window, wsi_kind kind, void *display, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
+		static void unregister_surface(window_handle window, uintptr_t vulkan_surface);
 
-		// Wayland clipboard integration; 'user_data' is expected to be the 'reshade::input'
-		// instance owning the Wayland connection, matching the shape ImGui's clipboard
-		// callbacks expect (see 'ImGuiIO::GetClipboardTextFn'/'SetClipboardTextFn').
+		// ImGui clipboard callbacks, 'user_data' is the 'reshade::input' instance.
 		static const char *get_clipboard_text(void *user_data);
 		static void set_clipboard_text(void *user_data, const char *text);
 #endif
@@ -193,6 +198,18 @@ namespace reshade
 		/// </summary>
 		void block_mouse_cursor_warping(bool enable);
 		bool is_blocking_mouse_cursor_warping() const { return _block_cursor_warping; }
+#if defined(__linux__)
+		bool is_mouse_position_valid() const;
+		// Whether the overlay has to draw a cursor, because the application's one is hidden where the pointer is.
+		bool needs_overlay_cursor() const;
+
+		// Linux cannot filter the application's events like 'block_mouse_input' does on Windows. Instead the
+		// backend covers these areas (relative to the window size) with a layer that takes pointer input.
+		struct capture_rect { float x, y, width, height; };
+		void set_pointer_capture(std::vector<capture_rect> regions) { _pointer_capture = std::move(regions); }
+		struct key_transition { unsigned int key; bool down; };
+		const std::vector<key_transition> &key_transitions() const { return _key_transitions; }
+#endif
 		static bool is_blocking_any_mouse_cursor_warping();
 
 		/// <summary>
@@ -233,6 +250,7 @@ namespace reshade
 		bool _block_mouse = false;
 		bool _block_keyboard = false;
 		bool _block_cursor_warping = false;
+		std::atomic_bool _primary_handler_claimed = false;
 		uint8_t _keys[256] = {};
 		uint8_t _last_keys[256] = {};
 		unsigned int _keys_time[256] = {};
@@ -242,9 +260,17 @@ namespace reshade
 		uint64_t _frame_count = 0; // Keep track of frame count to identify windows with a lot of rendering
 		std::wstring _text_input;
 	#if defined(__linux__)
-		wayland_input_context *_wayland = nullptr;
+		// Backends deliver events asynchronously to rendering, so a key can go down and up within
+		// one frame. These '_keys' bits latch such edges until 'next_frame'.
+		static constexpr uint8_t key_pressed_in_frame = 0x10;
+		static constexpr uint8_t key_released_in_frame = 0x20;
 
-		friend struct wayland_input_context;
+		uint8_t _key_press_modifiers[256] = {};
+		std::vector<key_transition> _key_transitions;
+		std::vector<capture_rect> _pointer_capture;
+		input_backend *_backend = nullptr;
+
+		friend class input_backend;
 	#endif
 	};
 

@@ -1,6 +1,6 @@
 # ReShade native Linux/Vulkan beta 2
 
-Experimental x86-64 ReShade for native Vulkan applications running under Wayland. It does not use Wine or Proton.
+Experimental x86-64 ReShade for Vulkan applications running under Wayland, X11, XWayland, and compatible Wine/Proton hosts.
 
 ## Install
 
@@ -27,6 +27,14 @@ Launch an application with:
 RESHADE_ENABLE=1 /path/to/application
 ```
 
+For a Steam game using a Proton build with native Wayland support, set:
+
+```sh
+RESHADE_ENABLE=1 PROTON_ENABLE_WAYLAND=1 %command%
+```
+
+In this mode Wine receives input on a Wayland connection of its own, so the overlay works but ReShade cannot block input from reaching the game. Use the default Proton setup (without `PROTON_ENABLE_WAYLAND`) if you need input blocking.
+
 Configurations are created under `${XDG_CONFIG_HOME:-~/.config}/reshade`; logs and add-ons live below `${XDG_DATA_HOME:-~/.local/share}/reshade`.
 
 ## Shaders and add-ons
@@ -52,7 +60,7 @@ This removes only the ReShade host and Vulkan layer manifest. It deliberately pr
 
 ## Scope
 
-- Linux x86-64, Vulkan and Wayland
+- Linux x86-64 Vulkan on Wayland, X11, or XWayland, with experimental Wine/Proton hosting
 - Native Linux add-ons only; Windows `.addon64` binaries are reported as incompatible and are not loaded
-- No Wine/Proton integration, OpenGL injection or gamepad navigation
+- No Windows add-on binaries, OpenGL injection, or gamepad navigation
 - Editor input is still experimental in non-fullscreen applications; Wayland cannot fully stop the application receiving input while the overlay is open

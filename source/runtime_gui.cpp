@@ -129,7 +129,10 @@ void reshade::runtime::init_gui()
 	ImGuiIO &imgui_io = _imgui_context->IO;
 	imgui_io.IniFilename = nullptr;
 	imgui_io.ConfigFlags = ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
-	imgui_io.BackendFlags = ImGuiBackendFlags_HasMouseCursors | ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
+	imgui_io.BackendFlags = ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
+#if !defined(__linux__)
+	imgui_io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
+#endif
 #if defined(__linux__)
 	// Dear ImGui's built-in clipboard default implementation only has native support for
 	// Windows and macOS; wire up the Wayland data-device based implementation here instead
@@ -821,10 +824,12 @@ void reshade::runtime::draw_gui()
 
 	if (_input != nullptr)
 	{
+		const bool overlay_key_pressed = _input->is_key_pressed(_overlay_key_data, _force_shortcut_modifiers);
+
 		if (_show_overlay && !_ignore_shortcuts && _input->is_key_pressed(input::key_escape) &&
 			(_input_processing_mode == 2 || (_input_processing_mode == 1 && (_imgui_context->IO.WantCaptureMouse || _imgui_context->IO.WantCaptureKeyboard))) && !_imgui_context->IO.NavVisible)
 			show_overlay = false; // Close when pressing the escape button, input focus is on the overlay and not currently navigating with the keyboard
-		else if (!_ignore_shortcuts && _input->is_key_pressed(_overlay_key_data, _force_shortcut_modifiers) && _imgui_context->ActiveId == 0)
+		else if (!_ignore_shortcuts && overlay_key_pressed && _imgui_context->ActiveId == 0)
 			show_overlay = !_show_overlay;
 
 		if (!_ignore_shortcuts)
@@ -891,6 +896,9 @@ void reshade::runtime::draw_gui()
 			_input->block_mouse_input(_block_input_next_frame);
 			_input->block_keyboard_input(_block_input_next_frame);
 			_input->block_mouse_cursor_warping(_block_input_next_frame);
+#if defined(__linux__)
+			_input->set_pointer_capture(_block_input_next_frame ? std::vector<input::capture_rect> { { 0.0f, 0.0f, 1.0f, 1.0f } } : std::vector<input::capture_rect> {});
+#endif
 		}
 		return; // Early-out to avoid costly ImGui calls when no GUI elements are on the screen
 	}
@@ -910,12 +918,21 @@ void reshade::runtime::draw_gui()
 		imgui_io.MouseDrawCursor = _show_overlay && (!_should_save_screenshot || !_screenshot_save_gui);
 
 #if defined(__linux__)
+		if (!_input->is_mouse_position_valid() || !_input->needs_overlay_cursor())
+			imgui_io.MouseDrawCursor = false;
 		_imgui_context->PlatformIO.Platform_ClipboardUserData = _input.get();
 #endif
 
 		// Scale mouse position in case render resolution does not match the window size
 		unsigned int max_position[2];
 		_input->max_mouse_position(max_position);
+#if defined(__linux__)
+		// The compositor owns the pointer outside the render surface. Do not leave
+		// a second cursor or an active hover target at its last in-surface position.
+		if (!_input->is_mouse_position_valid())
+			imgui_io.AddMousePosEvent(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+		else
+#endif
 		imgui_io.AddMousePosEvent(
 			_input->mouse_position_x() * (imgui_io.DisplaySize.x / max_position[0]),
 			_input->mouse_position_y() * (imgui_io.DisplaySize.y / max_position[1]));
@@ -1031,15 +1048,34 @@ void reshade::runtime::draw_gui()
 			{ ImGuiMod_Ctrl, input::key_ctrl },
 			{ ImGuiMod_Shift, input::key_shift },
 			{ ImGuiMod_Alt, input::key_alt },
-			{ ImGuiMod_Super, input::key_application },
 		};
 
+#if defined(__linux__)
+		// Submit complete taps in event order. A pressed-or-down snapshot merges
+		// consecutive short taps into one held key (or mouse button).
+		constexpr unsigned int mouse_keys[] = { input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2 };
+		for (const auto &event : _input->key_transitions())
+		{
+			for (const auto &mapping : key_mappings)
+				if (mapping.second == event.key)
+					imgui_io.AddKeyEvent(mapping.first, event.down);
+			for (ImGuiMouseButton i = 0; i < ImGuiMouseButton_COUNT; ++i)
+				if (mouse_keys[i] == event.key)
+					imgui_io.AddMouseButtonEvent(i, event.down);
+		}
+#endif
+		// Reconcile polled inputs and focus-loss releases as well.
 		for (const std::pair<ImGuiKey, unsigned int> &mapping : key_mappings)
 			imgui_io.AddKeyEvent(mapping.first, _input->is_key_down(mapping.second));
+		imgui_io.AddKeyEvent(ImGuiMod_Super, _input->is_key_down(input::key_left_windows) || _input->is_key_down(input::key_right_windows));
 		for (ImGuiMouseButton i = 0; i < ImGuiMouseButton_COUNT; i++)
 			imgui_io.AddMouseButtonEvent(i, _input->is_mouse_button_down(i));
-		for (ImWchar16 c : _input->text_input())
-			imgui_io.AddInputCharacterUTF16(c);
+		for (wchar_t c : _input->text_input())
+#if defined(__linux__)
+			imgui_io.AddInputCharacter(static_cast<unsigned int>(c));
+#else
+			imgui_io.AddInputCharacterUTF16(static_cast<ImWchar16>(c));
+#endif
 	}
 
 	if (_input_gamepad != nullptr)
@@ -1558,6 +1594,18 @@ void reshade::runtime::draw_gui()
 		_input->block_mouse_input(block_mouse_input);
 		_input->block_keyboard_input(block_keyboard_input);
 		_input->block_mouse_cursor_warping(_show_overlay || _block_input_next_frame || block_mouse_input);
+
+#if defined(__linux__)
+		// Block everything, or only what is on top of overlay windows (the Linux equivalent of 'WantCaptureMouse').
+		std::vector<input::capture_rect> capture;
+		if (block_input && _input_processing_mode == 2)
+			capture.push_back({ 0.0f, 0.0f, 1.0f, 1.0f });
+		else if (block_input)
+			for (const ImGuiWindow *const window : _imgui_context->Windows)
+				if (window->Active && !window->Hidden && (window->Flags & ImGuiWindowFlags_NoMouseInputs) == 0)
+					capture.push_back({ window->Pos.x / imgui_io.DisplaySize.x, window->Pos.y / imgui_io.DisplaySize.y, window->Size.x / imgui_io.DisplaySize.x, window->Size.y / imgui_io.DisplaySize.y });
+		_input->set_pointer_capture(std::move(capture));
+#endif
 	}
 
 	if (ImDrawData *const draw_data = ImGui::GetDrawData();
@@ -2131,6 +2179,10 @@ void reshade::runtime::draw_gui_settings()
 				"Block all input when overlay is visible\n");
 			std::replace(input_processing_mode_items.begin(), input_processing_mode_items.end(), '\n', '\0');
 			modified |= ImGui::Combo(_("Input processing"), reinterpret_cast<int *>(&_input_processing_mode), input_processing_mode_items.c_str());
+#if defined(__linux__)
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("On native Wayland the application keeps receiving keyboard input while the overlay is open.");
+#endif
 
 			modified |= imgui::key_input_box(_("Overlay key"), _overlay_key_data, *_input);
 
