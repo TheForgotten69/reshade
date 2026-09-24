@@ -262,7 +262,7 @@ static void test_pointer_follows_host_cursor()
 	// An unlocked pointer reports both kinds of motion, the absolute one is authoritative.
 	for (int batch = 0; batch < 5; ++batch)
 	{
-		pointer.relative_motion(5.0, 5.0);
+		pointer.relative_motion(5.0, 5.0, batch * 30000);
 		pointer.absolute_motion(40.0 + batch, 50.0);
 		pointer.end_batch();
 	}
@@ -270,7 +270,7 @@ static void test_pointer_follows_host_cursor()
 	assert(pointer.x() == 44 && pointer.y() == 50);
 
 	// A single batch without absolute motion is not yet a lock.
-	pointer.relative_motion(5.0, 5.0);
+	pointer.relative_motion(5.0, 5.0, 150000);
 	pointer.end_batch();
 	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
 	assert(pointer.x() == 44 && pointer.y() == 50);
@@ -280,10 +280,23 @@ static void test_pointer_follows_host_cursor()
 	pointer.end_batch();
 	for (int batch = 0; batch < 10; ++batch)
 	{
-		pointer.relative_motion(0.0, -5.0);
+		pointer.relative_motion(0.0, -5.0, 200000 + batch * 30000);
 		pointer.end_batch();
 	}
 	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+
+	// Nor are many batches in a short time, at a high frame rate.
+	pointer.absolute_motion(100.0, 50.0);
+	pointer.end_batch();
+	for (uint64_t time = 600000; time < 625000; time += 4000)
+	{
+		pointer.relative_motion(1.0, 0.0, time);
+		pointer.end_batch();
+		assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	}
+	pointer.relative_motion(1.0, 0.0, 625000);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
 }
 
 static void test_pointer_lock_drives_overlay_cursor()
@@ -295,27 +308,27 @@ static void test_pointer_lock_drives_overlay_cursor()
 	pointer.set_overlay_active(true);
 
 	// The first batch without absolute motion only counts as evidence, the second one locks.
-	pointer.relative_motion(5.0, 7.0);
+	pointer.relative_motion(5.0, 7.0, 0);
 	pointer.end_batch();
 	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
-	pointer.relative_motion(5.0, 7.0);
+	pointer.relative_motion(5.0, 7.0, 30000);
 	pointer.end_batch();
 	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
 	assert(pointer.x() == 25 && pointer.y() == 37);
 
 	// Repeats of the lock position carry no movement.
 	pointer.absolute_motion(20.0, 30.0);
-	pointer.relative_motion(0.25, 0.0);
+	pointer.relative_motion(0.25, 0.0, 60000);
 	pointer.end_batch();
 	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
 	for (int batch = 0; batch < 3; ++batch)
 	{
-		pointer.relative_motion(0.25, 0.0);
+		pointer.relative_motion(0.25, 0.0, 90000 + batch * 30000);
 		pointer.end_batch();
 	}
 	assert(pointer.x() == 26 && pointer.y() == 37);
 
-	pointer.relative_motion(500.0, -500.0);
+	pointer.relative_motion(500.0, -500.0, 200000);
 	pointer.end_batch();
 	assert(pointer.x() == 200 && pointer.y() == 0);
 
@@ -334,7 +347,7 @@ static void test_pointer_resets_with_overlay_and_focus()
 	pointer.end_batch();
 	for (int batch = 0; batch < 2; ++batch)
 	{
-		pointer.relative_motion(1.0, 1.0);
+		pointer.relative_motion(1.0, 1.0, batch * 30000);
 		pointer.end_batch();
 	}
 	assert(pointer.current_mode() == wayland_pointer::mode::passive);
@@ -350,7 +363,7 @@ static void test_pointer_resets_with_overlay_and_focus()
 	pointer.leave();
 	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
 	pointer.enter(10.0, 20.0);
-	pointer.relative_motion(2.0, 3.0);
+	pointer.relative_motion(2.0, 3.0, 100000);
 	pointer.end_batch();
 	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
 	assert(pointer.x() == 10 && pointer.y() == 20);
@@ -539,6 +552,25 @@ static void test_pointer_capture_cursor()
 	assert(!backend.needs_overlay_cursor());
 }
 
+// Overlay windows may extend beyond the window, or be degenerate.
+static void test_capture_pixel_rects()
+{
+	using pixel_rect = input_backend::pixel_rect;
+	constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+	const std::vector<pixel_rect> rects = input_backend::to_pixel_rects({
+		{ 0.0f, 0.0f, 1.0f, 1.0f },
+		{ -0.5f, 0.75f, 1.0f, 1.0f },
+		{ 0.1f, 0.1f, 0.0f, 0.5f },
+		{ 1.5f, 0.0f, 0.5f, 1.0f },
+		{ nan, 0.0f, 0.5f, 0.5f },
+	}, 200, 100);
+	assert((rects == std::vector<pixel_rect> { { 0, 0, 200, 100 }, { 0, 75, 100, 25 } }));
+
+	// Edges are rounded, so adjacent regions stay adjacent.
+	const std::vector<pixel_rect> adjacent = input_backend::to_pixel_rects({ { 0.0f, 0.0f, 0.3333f, 1.0f }, { 0.3333f, 0.0f, 0.3333f, 1.0f } }, 100, 1);
+	assert(adjacent[0].x + adjacent[0].width == adjacent[1].x);
+}
+
 static void test_input_lifetime_follows_native_surface()
 {
 	const input::window_handle window = reinterpret_cast<void *>(uintptr_t(0x1234));
@@ -668,6 +700,7 @@ int main()
 	test_x11_keyboard_focus_selection();
 	test_x11_key_and_button_taps();
 	test_pointer_capture_cursor();
+	test_capture_pixel_rects();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();
 	test_depth_detection();

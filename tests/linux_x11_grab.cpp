@@ -1,4 +1,5 @@
-// Run only against an isolated X server: this test grabs its pointer and injects input.
+// Run only against an isolated X server without a window manager: this test grabs its pointer and
+// injects input. For example a rootful 'Xwayland :77' started inside a headless 'kwin_wayland --virtual'.
 #include "dll_log.hpp"
 #include "linux/x11_input.hpp"
 #include <xcb/xtest.h>
@@ -118,6 +119,23 @@ int main()
 			assert(owner.mouse_position_y() == static_cast<unsigned int>(point.second));
 		}
 		std::cout << "Windowed pointer alignment at all four corners: PASS" << std::endl;
+
+		// While the overlay blocks keyboard input the keyboard is grabbed, so the host cannot grab it.
+		const auto host_grab_status = [&]() {
+			auto *const reply = xcb_grab_keyboard_reply(host, xcb_grab_keyboard(host, false, window, XCB_CURRENT_TIME, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC), nullptr);
+			assert(reply);
+			const uint8_t status = reply->status;
+			free(reply);
+			xcb_ungrab_keyboard(host, XCB_CURRENT_TIME);
+			return status;
+		};
+		owner.block_keyboard_input(true);
+		backend.next_frame();
+		assert(host_grab_status() == XCB_GRAB_STATUS_ALREADY_GRABBED);
+		owner.block_keyboard_input(false);
+		backend.next_frame();
+		assert(host_grab_status() == XCB_GRAB_STATUS_SUCCESS);
+		std::cout << "Keyboard grab while blocking keyboard input: PASS" << std::endl;
 	}
 	// Exercise the public validity signal consumed by the ImGui cursor/hover path.
 	const uint32_t size[] = {400, 300};

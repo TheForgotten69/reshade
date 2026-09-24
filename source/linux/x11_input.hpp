@@ -74,9 +74,11 @@ namespace reshade
 		xcb_window_t _capture_parent = XCB_WINDOW_NONE;
 		bool _capture_mapped = false;
 		unsigned int _capture_size[2] = {};
-		std::vector<input::capture_rect> _capture_shape;
+		std::vector<pixel_rect> _capture_shape;
 		bool _keyboard_grabbed = false;
 		unsigned int _keyboard_grab_retry_delay = 0;
+		// Status of the latest grab attempt that was logged, so retries only log changes.
+		int _logged_grab_status = -2;
 		xcb_window_t _keyboard_window = XCB_WINDOW_NONE;
 		xcb_window_t _last_observed_focus = XCB_WINDOW_NONE;
 		std::array<key_translation, 256> _key_translations = {};

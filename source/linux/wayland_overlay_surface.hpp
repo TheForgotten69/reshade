@@ -1,6 +1,6 @@
 #pragma once
 
-#include "input.hpp"
+#include "input_backend.hpp"
 #include <cstdint>
 #include <vector>
 #include <wayland-client.h>
@@ -36,9 +36,9 @@ namespace reshade
 		double preferred() const { return _preferred / 120.0; }
 
 		// Maps the surface with the size of its parent in logical coordinates, taking pointer input
-		// in 'regions' (relative to that size), or unmaps it when 'regions' is empty. Returns whether
+		// in 'regions' (in those coordinates), or unmaps it when 'regions' is empty. Returns whether
 		// anything changed and needs to be flushed.
-		bool set_capture(const std::vector<input::capture_rect> &regions, unsigned int logical_width, unsigned int logical_height);
+		bool set_capture(const std::vector<input_backend::pixel_rect> &regions, unsigned int logical_width, unsigned int logical_height);
 
 	private:
 		static void on_preferred_scale(void *data, wp_fractional_scale_v1 *, uint32_t scale);
@@ -58,6 +58,6 @@ namespace reshade
 
 		bool _mapped = false;
 		unsigned int _mapped_size[2] = {};
-		std::vector<input::capture_rect> _mapped_regions;
+		std::vector<input_backend::pixel_rect> _mapped_regions;
 	};
 }

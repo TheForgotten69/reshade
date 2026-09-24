@@ -43,7 +43,7 @@ namespace reshade
 		void on_pointer_axis(uint32_t axis, double value);
 		void on_pointer_axis_discrete(uint32_t axis, int32_t steps);
 		void on_pointer_frame();
-		void on_relative_motion(double dx, double dy);
+		void on_relative_motion(double dx, double dy, uint64_t time);
 
 	private:
 		void on_overlay_active_changed() override;

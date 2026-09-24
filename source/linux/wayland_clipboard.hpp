@@ -47,6 +47,7 @@ namespace reshade
 
 	private:
 		explicit wayland_clipboard(wl_display *display) : _display(display) {}
+		~wayland_clipboard();
 		bool initialize();
 		void forget_offer(wl_data_offer *offer);
 

@@ -1,8 +1,6 @@
 #include "wayland_overlay_surface.hpp"
 #include "fractional-scale-v1-client-protocol.h"
 #include "viewporter-client-protocol.h"
-#include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -85,7 +83,7 @@ void reshade::wayland_overlay_surface::reset()
 	_mapped_regions.clear();
 }
 
-bool reshade::wayland_overlay_surface::set_capture(const std::vector<input::capture_rect> &regions, unsigned int logical_width, unsigned int logical_height)
+bool reshade::wayland_overlay_surface::set_capture(const std::vector<input_backend::pixel_rect> &regions, unsigned int logical_width, unsigned int logical_height)
 {
 	if (_surface == nullptr)
 		return false;
@@ -101,11 +99,7 @@ bool reshade::wayland_overlay_surface::set_capture(const std::vector<input::capt
 		return true;
 	}
 
-	const auto equal = [](const input::capture_rect &lhs, const input::capture_rect &rhs) {
-		return lhs.x == rhs.x && lhs.y == rhs.y && lhs.width == rhs.width && lhs.height == rhs.height;
-	};
-	if (_mapped && _mapped_size[0] == logical_width && _mapped_size[1] == logical_height &&
-		std::equal(regions.begin(), regions.end(), _mapped_regions.begin(), _mapped_regions.end(), equal))
+	if (_mapped && _mapped_size[0] == logical_width && _mapped_size[1] == logical_height && regions == _mapped_regions)
 		return false;
 	if (_buffer == nullptr && !create_transparent_buffer())
 		return false;
@@ -114,10 +108,8 @@ bool reshade::wayland_overlay_surface::set_capture(const std::vector<input::capt
 	wp_viewport_set_destination(_viewport, static_cast<int32_t>(logical_width), static_cast<int32_t>(logical_height));
 
 	wl_region *const input_region = wl_compositor_create_region(_compositor);
-	for (const input::capture_rect &region : regions)
-		wl_region_add(input_region,
-			static_cast<int32_t>(std::lround(region.x * logical_width)), static_cast<int32_t>(std::lround(region.y * logical_height)),
-			static_cast<int32_t>(std::lround(region.width * logical_width)), static_cast<int32_t>(std::lround(region.height * logical_height)));
+	for (const input_backend::pixel_rect &region : regions)
+		wl_region_add(input_region, region.x, region.y, region.width, region.height);
 	wl_surface_set_input_region(_surface, input_region);
 	wl_region_destroy(input_region);
 

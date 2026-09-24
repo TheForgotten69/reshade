@@ -1,6 +1,29 @@
 #include "input_backend.hpp"
 #include <algorithm>
+#include <cmath>
 #include <iterator>
+
+auto reshade::input_backend::to_pixel_rects(const std::vector<input::capture_rect> &regions, unsigned int width, unsigned int height) -> std::vector<pixel_rect>
+{
+	// Round the edges rather than the size, so adjacent regions stay adjacent.
+	const auto edge = [](float position, unsigned int extent) {
+		return static_cast<int32_t>(std::lround(std::clamp(static_cast<double>(position), 0.0, 1.0) * extent));
+	};
+
+	std::vector<pixel_rect> result;
+	result.reserve(regions.size());
+	for (const input::capture_rect &region : regions)
+	{
+		if (!std::isfinite(region.x) || !std::isfinite(region.y) || !std::isfinite(region.width) || !std::isfinite(region.height))
+			continue;
+
+		const int32_t left = edge(region.x, width), right = edge(region.x + region.width, width);
+		const int32_t top = edge(region.y, height), bottom = edge(region.y + region.height, height);
+		if (right > left && bottom > top)
+			result.push_back({ left, top, right - left, bottom - top });
+	}
+	return result;
+}
 
 void reshade::input_backend::set_overlay_active(bool active)
 {

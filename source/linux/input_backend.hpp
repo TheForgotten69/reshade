@@ -36,6 +36,16 @@ namespace reshade
 		bool keyboard_focused() const { return _keyboard_focused; }
 		bool pointer_focused() const { return _pointer_focused; }
 
+		// A capture region in pixels of the layer that implements it, clipped to that layer.
+		struct pixel_rect
+		{
+			int32_t x, y, width, height;
+
+			bool operator==(const pixel_rect &other) const { return x == other.x && y == other.y && width == other.width && height == other.height; }
+		};
+		// Converts the normalized capture regions, dropping those that are empty after clipping.
+		static std::vector<pixel_rect> to_pixel_rects(const std::vector<input::capture_rect> &regions, unsigned int width, unsigned int height);
+
 	protected:
 		static constexpr unsigned int mouse_keys[] = { input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2 };
 

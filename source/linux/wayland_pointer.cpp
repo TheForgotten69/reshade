@@ -29,7 +29,7 @@ void reshade::wayland_pointer::set_overlay_active(bool active)
 	if (!active)
 		set_mode(mode::passive);
 	else if (_mode == mode::passive)
-		set_mode(_lock_evidence >= lock_batches ? mode::software_relative : mode::host_absolute);
+		set_mode(is_lock_evident() ? mode::software_relative : mode::host_absolute);
 }
 
 void reshade::wayland_pointer::enter(double x, double y)
@@ -75,8 +75,11 @@ void reshade::wayland_pointer::absolute_motion(double x, double y)
 	_absolute_in_batch = true;
 }
 
-void reshade::wayland_pointer::relative_motion(double dx, double dy)
+void reshade::wayland_pointer::relative_motion(double dx, double dy, uint64_t time)
 {
+	if (!_relative_in_batch)
+		_batch_relative_start = time;
+	_last_relative_time = time;
 	_relative_delta[0] += dx;
 	_relative_delta[1] += dy;
 	_relative_in_batch = true;
@@ -87,14 +90,14 @@ void reshade::wayland_pointer::end_batch()
 	// A pointer pushed against a screen edge also moves relatively without moving absolutely.
 	if (_absolute_in_batch)
 		_lock_evidence = 0;
-	else if (_relative_in_batch && !is_on_edge() && _lock_evidence < lock_batches)
-		++_lock_evidence;
+	else if (_relative_in_batch && !is_on_edge() && _lock_evidence < lock_batches && _lock_evidence++ == 0)
+		_lock_evidence_start = _batch_relative_start;
 
 	if (_overlay_active)
 	{
 		if (_absolute_in_batch)
 			set_mode(mode::host_absolute);
-		else if (_lock_evidence >= lock_batches)
+		else if (is_lock_evident())
 			set_mode(mode::software_relative);
 	}
 

@@ -74,9 +74,25 @@ reshade::wayland_clipboard *reshade::wayland_clipboard::get(wl_display *display)
 	if (inserted)
 	{
 		auto *const clipboard = new wayland_clipboard(display);
-		it->second = clipboard->initialize() ? clipboard : nullptr;
+		if (clipboard->initialize())
+			it->second = clipboard;
+		else
+			delete clipboard;
 	}
 	return it->second;
+}
+
+reshade::wayland_clipboard::~wayland_clipboard()
+{
+	// Only reached when initialization failed, which is before the data device exists.
+	if (_seat != nullptr)
+		wl_seat_destroy(_seat);
+	if (_manager != nullptr)
+		wl_data_device_manager_destroy(_manager);
+	if (_registry != nullptr)
+		wl_registry_destroy(_registry);
+	if (_queue != nullptr)
+		wl_event_queue_destroy(_queue);
 }
 
 bool reshade::wayland_clipboard::initialize()

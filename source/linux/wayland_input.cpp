@@ -72,7 +72,9 @@ namespace
 		[](void *data, wl_pointer *, uint32_t axis, int32_t steps) { self(data)->on_pointer_axis_discrete(axis, steps); },
 	};
 	const zwp_relative_pointer_v1_listener relative_pointer_listener = {
-		[](void *data, zwp_relative_pointer_v1 *, uint32_t, uint32_t, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t, wl_fixed_t) { self(data)->on_relative_motion(wl_fixed_to_double(dx), wl_fixed_to_double(dy)); },
+		[](void *data, zwp_relative_pointer_v1 *, uint32_t utime_hi, uint32_t utime_lo, wl_fixed_t dx, wl_fixed_t dy, wl_fixed_t, wl_fixed_t) {
+			self(data)->on_relative_motion(wl_fixed_to_double(dx), wl_fixed_to_double(dy), (static_cast<uint64_t>(utime_hi) << 32) | utime_lo);
+		},
 	};
 }
 
@@ -358,10 +360,10 @@ void reshade::wayland_input::on_pointer_frame()
 	add_wheel_delta(_pointer.end_axis_frame());
 }
 
-void reshade::wayland_input::on_relative_motion(double dx, double dy)
+void reshade::wayland_input::on_relative_motion(double dx, double dy, uint64_t time)
 {
 	if (_pointer_focused)
-		_pointer.relative_motion(dx, dy);
+		_pointer.relative_motion(dx, dy, time);
 }
 
 void reshade::wayland_input::on_overlay_active_changed()
@@ -385,11 +387,12 @@ void reshade::wayland_input::update_capture()
 		scale = 1.0;
 	const auto logical_width = static_cast<unsigned int>(width() / scale);
 	const auto logical_height = static_cast<unsigned int>(height() / scale);
-	if (!_overlay.set_capture(pointer_capture(), logical_width, logical_height))
+	const std::vector<pixel_rect> regions = to_pixel_rects(pointer_capture(), logical_width, logical_height);
+	if (!_overlay.set_capture(regions, logical_width, logical_height))
 		return;
 
 	wl_display_flush(_display);
-	const bool capturing = !pointer_capture().empty();
+	const bool capturing = !regions.empty();
 	if (capturing != _capturing)
 		log::message(log::level::info, "Wayland surface %p input capture %s (%ux%u).", _surface, capturing ? "on" : "off", logical_width, logical_height);
 	_capturing = capturing;

@@ -500,21 +500,19 @@ bool reshade::x11_input::create_capture_window(xcb_window_t parent)
 
 void reshade::x11_input::apply_capture_shape()
 {
-	const std::vector<input::capture_rect> &regions = pointer_capture();
-	const auto equal = [](const input::capture_rect &lhs, const input::capture_rect &rhs) {
-		return lhs.x == rhs.x && lhs.y == rhs.y && lhs.width == rhs.width && lhs.height == rhs.height;
-	};
-	if (!_shape_available || std::equal(regions.begin(), regions.end(), _capture_shape.begin(), _capture_shape.end(), equal))
+	if (!_shape_available)
+		return;
+	std::vector<pixel_rect> regions = to_pixel_rects(pointer_capture(), _capture_size[0], _capture_size[1]);
+	if (regions == _capture_shape)
 		return;
 
+	// X11 window sizes are 16-bit, so are the clipped regions.
 	std::vector<xcb_rectangle_t> rectangles;
 	rectangles.reserve(regions.size());
-	for (const input::capture_rect &region : regions)
-		rectangles.push_back({
-			static_cast<int16_t>(std::lround(region.x * _capture_size[0])), static_cast<int16_t>(std::lround(region.y * _capture_size[1])),
-			static_cast<uint16_t>(std::lround(region.width * _capture_size[0])), static_cast<uint16_t>(std::lround(region.height * _capture_size[1])) });
+	for (const pixel_rect &region : regions)
+		rectangles.push_back({ static_cast<int16_t>(region.x), static_cast<int16_t>(region.y), static_cast<uint16_t>(region.width), static_cast<uint16_t>(region.height) });
 	xcb_shape_rectangles(_connection, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT, XCB_CLIP_ORDERING_UNSORTED, _capture_window, 0, 0, static_cast<uint32_t>(rectangles.size()), rectangles.data());
-	_capture_shape = regions;
+	_capture_shape = std::move(regions);
 }
 
 void reshade::x11_input::update_keyboard_grab()
@@ -536,8 +534,21 @@ void reshade::x11_input::update_keyboard_grab()
 	if (_owner.is_any_key_down() || (_keyboard_grab_retry_delay != 0 && --_keyboard_grab_retry_delay != 0))
 		return;
 
-	const auto grab = owned(xcb_grab_keyboard_reply(_connection, xcb_grab_keyboard(_connection, false, _window, XCB_CURRENT_TIME, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC), nullptr));
-	_keyboard_grabbed = grab != nullptr && grab->status == XCB_GRAB_STATUS_SUCCESS;
+	// A grab fails on a window that is not viewable, which the off-screen Vulkan window of a Wine host may be.
+	const xcb_window_t visible_window = find_visible_window();
+	const xcb_window_t target = visible_window != XCB_WINDOW_NONE ? visible_window : _window;
+	const auto grab = owned(xcb_grab_keyboard_reply(_connection, xcb_grab_keyboard(_connection, false, target, XCB_CURRENT_TIME, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC), nullptr));
+	// A missing reply is an error such as 'BadWindow', which has no grab status of its own.
+	const int status = grab != nullptr ? grab->status : -1;
+	if (status != _logged_grab_status)
+	{
+		constexpr const char *status_names[] = { "success", "already grabbed", "invalid time", "not viewable", "frozen" };
+		log::message(status == XCB_GRAB_STATUS_SUCCESS ? log::level::info : log::level::warning, "X11 keyboard grab on %#x for window %#x: %s.",
+			target, _window, status >= 0 && status < static_cast<int>(std::size(status_names)) ? status_names[status] : "error");
+		_logged_grab_status = status;
+	}
+
+	_keyboard_grabbed = status == XCB_GRAB_STATUS_SUCCESS;
 	if (!_keyboard_grabbed)
 		_keyboard_grab_retry_delay = 30;
 }

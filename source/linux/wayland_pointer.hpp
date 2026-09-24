@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace reshade
 {
 	// Protocol-free pointer model for one Wayland surface. Motion is collected per dispatch batch and
@@ -7,8 +9,10 @@ namespace reshade
 	//
 	// ReShade cannot hide or move the host's cursor, so while the overlay is open it either follows
 	// the host cursor ('host_absolute') or, when the host has locked the pointer (and so hides it),
-	// draws its own cursor driven by relative motion ('software_relative'). A lock is recognized by
-	// its protocol guarantee: while it is active, no client pointer receives absolute motion.
+	// draws its own cursor driven by relative motion ('software_relative'). The lock belongs to the
+	// host's objects and cannot be observed directly. It is inferred from relative motion without
+	// absolute motion away from a surface edge, sustained over several batches and a minimum time,
+	// because the protocol does not order the two kinds of motion against each other.
 	class wayland_pointer
 	{
 	public:
@@ -26,7 +30,8 @@ namespace reshade
 		void enter(double x, double y);
 		void leave();
 		void absolute_motion(double x, double y);
-		void relative_motion(double dx, double dy);
+		// 'time' is the relative motion's timestamp in microseconds.
+		void relative_motion(double dx, double dy, uint64_t time);
 		void end_batch();
 
 		void axis(double distance);
@@ -38,8 +43,11 @@ namespace reshade
 		unsigned int y() const { return _position[1]; }
 
 	private:
-		// Batches with relative but without absolute motion before the pointer counts as locked.
+		// Batches with relative but without absolute motion, and the time they have to span in
+		// microseconds, before the pointer counts as locked. Batches are frames, so their count
+		// alone would make the threshold depend on the frame rate.
 		static constexpr unsigned int lock_batches = 2;
+		static constexpr uint64_t lock_duration = 25000;
 		// Batches the extent and scale must stay unchanged for, before pointer coordinates beyond the
 		// extent refute the preferred scale. A window that grows or moves to a monitor with another
 		// scale reports coordinates before its new swapchain exists.
@@ -48,6 +56,7 @@ namespace reshade
 		void apply_scale(double scale);
 		void set_mode(mode mode);
 		bool is_on_edge() const;
+		bool is_lock_evident() const { return _lock_evidence >= lock_batches && _last_relative_time - _lock_evidence_start >= lock_duration; }
 		double clamp(double value, unsigned int axis) const;
 		void publish(const double position[2]);
 
@@ -59,6 +68,9 @@ namespace reshade
 		bool _overlay_active = false;
 		mode _mode = mode::passive;
 		unsigned int _lock_evidence = 0;
+		uint64_t _lock_evidence_start = 0;
+		uint64_t _batch_relative_start = 0;
+		uint64_t _last_relative_time = 0;
 		bool _absolute_in_batch = false;
 		bool _relative_in_batch = false;
 		double _logical[2] = {};
