@@ -21,7 +21,7 @@ You'll need Visual Studio 2017 or higher to build ReShade. And Python in the PAT
 
 ### Linux
 
-The native Linux build supports x86-64 Vulkan applications running on Wayland, native X11, or XWayland, plus experimental Wine/Proton hosts. The input backend is selected per window from the Vulkan presentation surface's actual WSI kind, not from `$XDG_SESSION_TYPE`. It requires CMake, a C++17 compiler, Python, pkg-config, and the development packages for Wayland client, Wayland protocols, xkbcommon, XCB (including `xcb-xinput` and `xcb-xfixes`), and Fontconfig.
+The native Linux build supports x86-64 Vulkan applications running on Wayland, native X11, or XWayland, plus experimental Wine/Proton hosts. The input backend is selected per window from the Vulkan presentation surface's actual WSI kind, not from `$XDG_SESSION_TYPE`. It requires CMake, a C++17 compiler, Python, pkg-config, and the development packages for Wayland client, Wayland protocols, xkbcommon, XCB (including `xcb-xinput`, `xcb-xfixes` and `xcb-cursor`), and Fontconfig.
 
 ```sh
 cmake -S . -B build-linux -DRESHADE_VERSION=<major.minor.patch>

@@ -40,6 +40,7 @@ pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
 pkg_check_modules(XCB_XINPUT REQUIRED IMPORTED_TARGET xcb-xinput)
 pkg_check_modules(XCB_XFIXES REQUIRED IMPORTED_TARGET xcb-xfixes)
 pkg_check_modules(XCB_SHAPE REQUIRED IMPORTED_TARGET xcb-shape)
+pkg_check_modules(XCB_CURSOR REQUIRED IMPORTED_TARGET xcb-cursor)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -85,7 +86,7 @@ set(RESHADE_LINUX_INPUT_SOURCES
   ${RESHADE_WAYLAND_CURSOR_SHAPE}
   ${RESHADE_WAYLAND_TABLET}
 )
-set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::XCB_SHAPE)
+set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::XCB_SHAPE PkgConfig::XCB_CURSOR)
 
 # Generate a native lookup table from the same localization resources used by Windows.
 file(GLOB RESHADE_LOCALIZATION_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/lang_*.rc2")

@@ -74,6 +74,8 @@ struct reshade::input_test_access
 	static void set_capture_mapped(x11_input &target, bool mapped) { target._capture_mapped = mapped; }
 	static void release_keyboard(x11_input &target) { target.release_keyboard(); }
 	static void set_capturing(wayland_input &target, bool capturing) { target._capturing = capturing; }
+	static void set_cursor_context(x11_input &target, xcb_cursor_context_t *context) { target._cursor_context = context; }
+	static void set_wine_wayland(x11_input &target, bool wine_wayland) { target._wine_wayland = wine_wayland; }
 	static void set_cursor_shape_device(wayland_input &target, wp_cursor_shape_device_v1 *device) { target._cursor_shape_device = device; }
 };
 
@@ -557,6 +559,15 @@ static void test_pointer_capture_cursor()
 
 	owner.set_pointer_capture({ { 0.0f, 0.0f, 1.0f, 1.0f } });
 	assert(backend.needs_overlay_cursor());
+
+	// With themed cursors the X server draws the layer's cursor, except under Wine's Wayland driver where the layer is not visible.
+	input_test_access::set_cursor_context(backend, reinterpret_cast<xcb_cursor_context_t *>(uintptr_t(0x200)));
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_wine_wayland(backend, true);
+	assert(backend.needs_overlay_cursor());
+	input_test_access::set_wine_wayland(backend, false);
+	input_test_access::set_cursor_context(backend, nullptr);
+
 	input_test_access::set_focus(backend, true, false);
 	assert(!backend.needs_overlay_cursor());
 }

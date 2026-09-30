@@ -5,6 +5,7 @@
 #include <array>
 #include <vector>
 #include <xcb/xcb.h>
+#include <xcb/xcb_cursor.h>
 #include <xkbcommon/xkbcommon.h>
 
 namespace reshade
@@ -22,6 +23,7 @@ namespace reshade
 		bool initialize() override;
 		void next_frame() override;
 		const char *name() const override { return "X11"; }
+		void set_overlay_cursor(int cursor) override;
 
 		static uint32_t keysym_to_utf32(xcb_keysym_t keysym);
 		// Hidden cursors are fully transparent images (Wine and most toolkits use a blank 1x1 one).
@@ -42,6 +44,9 @@ namespace reshade
 
 		bool is_host_cursor_hidden() const override { return !_host_cursor_visible; }
 		bool is_capture_layer_shown() const override { return _capture_mapped; }
+		// The capture layer is not visible over the Wayland window of Wine's Wayland driver
+		bool has_cursor_shapes() const override { return _cursor_context != nullptr && !_wine_wayland; }
+		xcb_cursor_t overlay_cursor();
 		bool cache_key_translations();
 		bool is_ancestor_window(xcb_window_t ancestor, xcb_window_t window) const;
 		bool contains_window(xcb_window_t window) const;
@@ -77,6 +82,11 @@ namespace reshade
 		bool _capture_mapped = false;
 		unsigned int _capture_size[2] = {};
 		std::vector<pixel_rect> _capture_shape;
+		xcb_cursor_context_t *_cursor_context = nullptr;
+		xcb_cursor_t _invisible_cursor = XCB_NONE;
+		// Themed cursors loaded on first use, indexed by 'ImGuiMouseCursor'
+		std::array<xcb_cursor_t, 11> _cursors = {};
+		int _overlay_cursor = -1;
 		bool _keyboard_grabbed = false;
 		unsigned int _keyboard_grab_retry_delay = 0;
 		// Status of the latest grab attempt that was logged, so retries only log changes.
