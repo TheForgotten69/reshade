@@ -97,11 +97,30 @@ add_custom_command(
 )
 set_source_files_properties(source/linux/runtime_platform.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_LOCALIZATION_HEADER}")
 
-# Embed the existing ReShade ImGui shaders without relying on Win32 resources.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/res/shaders/imgui_vs_450.spv" RESHADE_IMGUI_VS_SPIRV HEX)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/res/shaders/imgui_ps_450.spv" RESHADE_IMGUI_PS_SPIRV HEX)
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," RESHADE_IMGUI_VS_SPIRV "${RESHADE_IMGUI_VS_SPIRV}")
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," RESHADE_IMGUI_PS_SPIRV "${RESHADE_IMGUI_PS_SPIRV}")
+# Embed the data resources listed in 'res/resource.rc' without relying on Win32 resources.
+set(RESHADE_LINUX_DATA_RESOURCES
+  IDR_IMGUI_VS_SPIRV res/shaders/imgui_vs_450.spv
+  IDR_IMGUI_PS_SPIRV res/shaders/imgui_ps_450.spv
+  IDR_LICENSE_RESHADE LICENSE.md
+  IDR_LICENSE_IMGUI deps/imgui/LICENSE.txt
+  IDR_LICENSE_GLAD deps/glad/LICENSE
+  IDR_LICENSE_UTFCPP deps/utfcpp/LICENSE
+  IDR_LICENSE_STB deps/stb/LICENSE
+  IDR_LICENSE_SPIRV deps/spirv/LICENSE
+  IDR_LICENSE_VMA deps/vma/LICENSE.txt
+  IDR_LICENSE_S_JXL deps/jxl_simple_lossless/LICENSE
+)
+set(RESHADE_LINUX_DATA_RESOURCE_ARRAYS "")
+set(RESHADE_LINUX_DATA_RESOURCE_TABLE "")
+while(RESHADE_LINUX_DATA_RESOURCES)
+  list(POP_FRONT RESHADE_LINUX_DATA_RESOURCES resource_id resource_file)
+  set(resource_file "${CMAKE_CURRENT_SOURCE_DIR}/${resource_file}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${resource_file}")
+  file(READ "${resource_file}" resource_data HEX)
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," resource_data "${resource_data}")
+  string(APPEND RESHADE_LINUX_DATA_RESOURCE_ARRAYS "alignas(uint32_t) inline constexpr unsigned char ${resource_id}_DATA[] = { ${resource_data} };\n")
+  string(APPEND RESHADE_LINUX_DATA_RESOURCE_TABLE "\t{ ${resource_id}, ${resource_id}_DATA, sizeof(${resource_id}_DATA) },\n")
+endwhile()
 configure_file(source/linux/resources_linux.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/resources_linux.hpp @ONLY)
 
 function(reshade_configure_linux_target target)

@@ -37,15 +37,10 @@ void reshade::runtime::draw_gui_vr()
 
 reshade::resources::data_resource reshade::resources::load_data_resource(unsigned short id)
 {
-	switch (id)
-	{
-	case IDR_IMGUI_VS_SPIRV:
-		return { sizeof(reshade_imgui_vs_spirv), reshade_imgui_vs_spirv };
-	case IDR_IMGUI_PS_SPIRV:
-		return { sizeof(reshade_imgui_ps_spirv), reshade_imgui_ps_spirv };
-	default:
-		return { 0, nullptr };
-	}
+	for (const embedded_data_resource &resource : embedded_data_resources)
+		if (resource.id == id)
+			return { resource.size, resource.data };
+	return { 0, nullptr };
 }
 
 #if RESHADE_LOCALIZATION

@@ -1718,13 +1718,11 @@ void reshade::runtime::draw_gui_home()
 
 		ImGui::SameLine(0, button_spacing);
 
-#if defined(_WIN32)
 		if (ImGui::Button(ICON_FK_FOLDER, ImVec2(button_height, button_height)))
 			utils::open_explorer(_current_preset_path);
 		ImGui::SetItemTooltip(_("Open folder in explorer"));
 
 		ImGui::SameLine();
-#endif
 
 		// Cannot save in performance mode, since there are no variables to retrieve values from then
 		ImGui::BeginDisabled(_performance_mode || _is_in_preset_transition);
@@ -2159,12 +2157,10 @@ void reshade::runtime::draw_gui_home()
 }
 void reshade::runtime::draw_gui_settings()
 {
-#if defined(_WIN32)
 	if (ImGui::Button(ICON_FK_FOLDER " " + _("Open base folder in explorer"), ImVec2(ImGui::GetContentRegionAvail().x, 0)))
 		utils::open_explorer(_config_path);
 
 	ImGui::Spacing();
-#endif
 
 	bool modified = false;
 	bool modified_custom_style = false;
@@ -2291,11 +2287,14 @@ void reshade::runtime::draw_gui_settings()
 		modified |= ImGui::Checkbox(_("Save before and after images"), &_screenshot_save_before);
 		modified |= ImGui::Checkbox(_("Save separate image with the overlay visible"), &_screenshot_save_gui);
 
-#if defined(_WIN32)
 		modified |= imgui::file_input_box(_("Screenshot sound"), "sound.wav", _screenshot_sound_path, _file_selection_path, { L".wav" });
 		ImGui::SetItemTooltip(_("Audio file that is played when taking a screenshot."));
 
+#if defined(_WIN32)
 		modified |= imgui::file_input_box(_("Post-save command"), "command.bat", _screenshot_post_save_command, _file_selection_path, { L".exe", L".bat", L".cmd", L".ps1", L".py" });
+#else
+		modified |= imgui::file_input_box(_("Post-save command"), "command.sh", _screenshot_post_save_command, _file_selection_path, { L"", L".sh", L".py" });
+#endif
 		ImGui::SetItemTooltip(_(
 			"Executable or script that is called after saving a screenshot.\n"
 			"This can be used to perform additional processing on the image (e.g. compressing it with an image optimizer)."));
@@ -2360,7 +2359,6 @@ void reshade::runtime::draw_gui_settings()
 
 		modified |= imgui::directory_input_box(_("Post-save command working directory"), _screenshot_post_save_command_working_directory, _file_selection_path);
 		modified |= ImGui::Checkbox(_("Hide post-save command window"), &_screenshot_post_save_command_hide_window);
-#endif
 	}
 
 	if (ImGui::CollapsingHeader(_("Overlay & Styling"), ImGuiTreeNodeFlags_DefaultOpen))
@@ -3176,13 +3174,11 @@ void reshade::runtime::draw_gui_log()
 
 	ImGui::SameLine();
 
-#if defined(_WIN32)
 	if (ImGui::Button(ICON_FK_FOLDER, ImVec2(ImGui::GetFrameHeight(), 0.0f)))
 		utils::open_explorer(log_path);
 	ImGui::SetItemTooltip(_("Open folder in explorer"));
 
 	ImGui::SameLine();
-#endif
 
 	if (ImGui::Button(_("Clear Log"), ImVec2(8.0f * ImGui::GetFontSize(), 0.0f)))
 		// Close and open the stream again, which will clear the file too
@@ -3265,11 +3261,13 @@ void reshade::runtime::draw_gui_about()
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_RESHADE);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#if defined(_WIN32)
 	if (ImGui::CollapsingHeader("MinHook"))
 	{
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_MINHOOK);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#endif
 	if (ImGui::CollapsingHeader("Dear ImGui"))
 	{
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_IMGUI);
@@ -3277,12 +3275,12 @@ void reshade::runtime::draw_gui_about()
 	}
 	if (ImGui::CollapsingHeader("ImGuiColorTextEdit"))
 	{
-		ImGui::TextUnformatted("Copyright (C) 2017 BalazsJako\
-\
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\
-\
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\
-\
+		ImGui::TextUnformatted("Copyright (C) 2017 BalazsJako\n\
+\n\
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\
+\n\
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\
+\n\
 THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.");
 	}
 	if (ImGui::CollapsingHeader("glad"))
@@ -3318,6 +3316,7 @@ THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_VMA);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#if defined(_WIN32)
 	if (ImGui::CollapsingHeader("OpenVR"))
 	{
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_OPENVR);
@@ -3328,20 +3327,21 @@ THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_OPENXR);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#endif
 	if (ImGui::CollapsingHeader("Solarized"))
 	{
-		ImGui::TextUnformatted("Copyright (C) 2011 Ethan Schoonover\
-\
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\
-\
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\
-\
+		ImGui::TextUnformatted("Copyright (C) 2011 Ethan Schoonover\n\
+\n\
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\
+\n\
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\
+\n\
 THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.");
 	}
 	if (ImGui::CollapsingHeader("Fork Awesome"))
 	{
-		ImGui::TextUnformatted("Copyright (C) 2018 Fork Awesome (https://forkawesome.github.io)\
-\
+		ImGui::TextUnformatted("Copyright (C) 2018 Fork Awesome (https://forkawesome.github.io)\n\
+\n\
 This Font Software is licensed under the SIL Open Font License, Version 1.1. (http://scripts.sil.org/OFL)");
 	}
 	if (ImGui::CollapsingHeader("libjxl simple lossless encoder"))
@@ -4293,12 +4293,10 @@ void reshade::runtime::draw_technique_editor()
 
 			if (ImGui::BeginPopup("##context"))
 			{
-#if defined(_WIN32)
 				if (ImGui::Button(ICON_FK_FOLDER " " + _("Open folder in explorer"), ImVec2(18.0f * ImGui::GetFontSize(), 0)))
 					utils::open_explorer(effect.source_file);
 
 				ImGui::Separator();
-#endif
 
 				if (imgui::popup_button(ICON_FK_PENCIL " " + _("Edit source code"), 18.0f * ImGui::GetFontSize()))
 				{
@@ -4531,12 +4529,10 @@ void reshade::runtime::draw_technique_editor()
 				if (is_not_top || is_not_bottom || (_input != nullptr && !force_enabled))
 					ImGui::Separator();
 
-#if defined(_WIN32)
 				if (ImGui::Button(ICON_FK_FOLDER " " + _("Open folder in explorer"), ImVec2(18.0f * ImGui::GetFontSize(), 0)))
 					utils::open_explorer(effect.source_file);
 
 				ImGui::Separator();
-#endif
 
 				if (imgui::popup_button(ICON_FK_PENCIL " " + _("Edit source code"), 18.0f * ImGui::GetFontSize()))
 				{

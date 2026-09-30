@@ -1,11 +1,16 @@
 #pragma once
 
+#include "resource.h"
+#include <cstddef>
 #include <cstdint>
 
-alignas(uint32_t) inline constexpr unsigned char reshade_imgui_vs_spirv[] = {
-	@RESHADE_IMGUI_VS_SPIRV@
+@RESHADE_LINUX_DATA_RESOURCE_ARRAYS@
+struct embedded_data_resource
+{
+	unsigned short id;
+	const unsigned char *data;
+	size_t size;
 };
 
-alignas(uint32_t) inline constexpr unsigned char reshade_imgui_ps_spirv[] = {
-	@RESHADE_IMGUI_PS_SPIRV@
-};
+inline constexpr embedded_data_resource embedded_data_resources[] = {
+@RESHADE_LINUX_DATA_RESOURCE_TABLE@};
