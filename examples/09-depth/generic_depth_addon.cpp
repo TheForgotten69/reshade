@@ -399,8 +399,10 @@ struct RESHADE_API_UUID("e006e162-33ac-4b9f-b10f-0e15335c7bdb") generic_depth_de
 		{
 			reshade::log::message(reshade::log::level::error, "Failed to create backup depth-stencil texture!");
 
+		#if defined(_WIN32)
 			if (api <= device_api::d3d12)
 				reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
+		#endif
 
 			return nullptr;
 		}
