@@ -41,7 +41,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build pkg-config python3-jinja2 \
             libwayland-dev wayland-protocols libxkbcommon-dev libfontconfig-dev \
-            libxcb1-dev libxcb-xinput-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-cursor-dev
+            libx11-dev libxcb1-dev libxcb-xinput-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-cursor-dev
 
       - name: Determine archive name
         id: version
