@@ -542,7 +542,7 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 				0 == std::strcmp(name_without_prefix, "SubmitDebugUtilsMessageEXT") ||
 				0 == std::strcmp(name_without_prefix, "CreateDebugUtilsMessengerEXT") ||
 				0 == std::strcmp(name_without_prefix, "DestroyDebugUtilsMessengerEXT") ||
-				(std::strstr(name_without_prefix, "Properties") != nullptr && std::strstr(name_without_prefix, "AccelerationStructures") == nullptr && std::strstr(name_without_prefix, "Handle") == nullptr) ||
+				(std::strstr(name_without_prefix, "Properties") != nullptr && std::strstr(name_without_prefix, "AccelerationStructures") == nullptr && std::strstr(name_without_prefix, "Handle") == nullptr && std::strstr(name_without_prefix, "HostPointer") == nullptr) ||
 				(std::strstr(name_without_prefix, "Surface") != nullptr && std::strstr(name_without_prefix, "DeviceGroupSurface") == nullptr) ||
 				(std::strstr(name_without_prefix, "PhysicalDevice") != nullptr))
 				return reinterpret_cast<GLADapiproc>(device.dispatch_table.GetInstanceProcAddr(device.instance_handle, name));
