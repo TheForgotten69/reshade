@@ -8,7 +8,7 @@ if(RESHADE_VERSION)
   set(RESHADE_VERSION_TAG "v${RESHADE_VERSION}")
 else()
   execute_process(
-    COMMAND git describe --tags --match "v[0-9]*" --abbrev=0
+    COMMAND git describe --tags --match "v[0-9]*" --exclude "*-*" --abbrev=0
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     OUTPUT_VARIABLE RESHADE_VERSION_TAG
     OUTPUT_STRIP_TRAILING_WHITESPACE

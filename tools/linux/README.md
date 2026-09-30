@@ -1,4 +1,4 @@
-# ReShade native Linux/Vulkan beta 2
+# ReShade for native Linux (Vulkan)
 
 Experimental x86-64 ReShade for Vulkan applications running under Wayland, X11, XWayland, and compatible Wine/Proton hosts.
 
