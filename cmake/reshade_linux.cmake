@@ -139,6 +139,7 @@ function(reshade_configure_linux_target target)
       source/imgui_code_editor.cpp
       source/imgui_widgets.cpp
       source/dll_log.cpp
+      source/linux/game_identity.cpp
       source/linux/platform_utils.cpp
       source/linux/process_environment.cpp
       source/linux/runtime_platform.cpp
@@ -180,7 +181,7 @@ option(RESHADE_BUILD_LINUX_ADDON_EXAMPLES "Build native Linux add-on examples" O
 option(RESHADE_BUILD_LINUX_TESTS "Build Linux portability regression tests" OFF)
 if(RESHADE_BUILD_LINUX_TESTS)
   enable_testing()
-  add_executable(reshade_linux_tests tests/linux_portability.cpp ${RESHADE_LINUX_INPUT_SOURCES})
+  add_executable(reshade_linux_tests tests/linux_portability.cpp source/linux/game_identity.cpp ${RESHADE_LINUX_INPUT_SOURCES})
   target_include_directories(reshade_linux_tests PRIVATE source "${RESHADE_GENERATED_INCLUDE_DIR}")
   target_compile_options(reshade_linux_tests PRIVATE -UNDEBUG $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>)
   target_link_libraries(reshade_linux_tests PRIVATE glad Threads::Threads ${RESHADE_LINUX_INPUT_LIBRARIES})

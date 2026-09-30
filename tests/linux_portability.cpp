@@ -3,6 +3,7 @@
 #include "../source/dll_log.hpp"
 #include "../source/linux/wayland_input.hpp"
 #include "../source/linux/x11_input.hpp"
+#include "../source/linux/game_identity.hpp"
 #include "../source/linux/window_registry.hpp"
 #include "../source/linux/key_translation.hpp"
 #include "../source/linux/clipboard.hpp"
@@ -630,6 +631,30 @@ static void test_paths()
 	assert(std::find(files.begin(), files.end(), installed / "installed.addon64") != files.end());
 	assert(find_addon_files(user, {}).size() == 1);
 	assert(find_addon_files(root / "missing", installed).size() == 2);
+
+	std::error_code ec;
+	const auto published = root / "published.ini", first = root / "first.tmp", second = root / "second.tmp";
+	std::ofstream(first) << "first";
+	std::ofstream(second) << "second";
+	assert(publish_file(first, published, ec) && !ec);
+	assert(publish_file(second, published, ec) && !ec);
+	assert(!std::filesystem::exists(first) && !std::filesystem::exists(second));
+	std::string contents;
+	std::ifstream(published) >> contents;
+	assert(contents == "first");
+	assert(!publish_file(root / "missing.tmp", root / "unpublished.ini", ec) && ec);
+
+	const auto cased = root / "cased";
+	std::filesystem::create_directories(cased);
+	assert(!normalize_file_name_case(cased / "ReShade.ini"));
+	std::ofstream(cased / "reshade.ini") << "lower";
+	assert(normalize_file_name_case(cased / "ReShade.ini"));
+	assert(std::filesystem::exists(cased / "ReShade.ini") && !std::filesystem::exists(cased / "reshade.ini"));
+	std::ofstream(cased / "RESHADE.INI") << "upper";
+	assert(normalize_file_name_case(cased / "ReShade.ini"));
+	std::ifstream(cased / "ReShade.ini") >> contents;
+	assert(contents == "lower" && std::filesystem::exists(cased / "RESHADE.INI"));
+	assert(!normalize_file_name_case(root / "missing" / "ReShade.ini"));
 	std::filesystem::remove_all(root);
 }
 
@@ -688,8 +713,98 @@ static void test_depth_detection()
 	assert(clear_evidence(std::numeric_limits<float>::quiet_NaN()) == unknown);
 }
 
+static void test_game_identity()
+{
+	using reshade::process::game_identity_inputs;
+	using reshade::process::resolve_game_identity;
+
+	game_identity_inputs proton;
+	proton.executable_path = "/opt/proton/files/lib/wine/x86_64-unix/wine64-preloader";
+	proton.command_line = { "Z:\\games\\AoMRT_s.exe" };
+	proton.steam_app_id = "1934680";
+	proton.steam_install_path = "/games/steamapps/common/Age of Mythology Retold/";
+	const auto proton_identity = resolve_game_identity(proton);
+	assert(proton_identity.directory_name == "Age_of_Mythology_Retold-1934680");
+	assert(proton_identity.configuration_path("/home/test/.local/share") == "/home/test/.local/share/reshade/configurations/Age_of_Mythology_Retold-1934680/ReShade.ini");
+	assert(proton_identity.log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Age_of_Mythology_Retold-1934680/ReShade-AoMRT_s.log");
+	assert(proton_identity.wine_host);
+	proton.command_line = { "explorer.exe" };
+	const auto proton_helper_identity = resolve_game_identity(proton);
+	assert(proton_helper_identity.directory_name == proton_identity.directory_name);
+	assert(proton_helper_identity.log_path("/home/test/.local/share") != proton_identity.log_path("/home/test/.local/share"));
+	game_identity_inputs proton_launcher = proton;
+	proton_launcher.executable_path = "/usr/bin/python3.13";
+	proton_launcher.command_line = { "python3", "/opt/proton/proton", "waitforexitandrun" };
+	const auto proton_launcher_identity = resolve_game_identity(proton_launcher);
+	assert(proton_launcher_identity.directory_name == proton_identity.directory_name);
+	assert(proton_launcher_identity.log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Age_of_Mythology_Retold-1934680/ReShade-python3.log");
+
+	// Native Steam games outside the Steam Linux Runtime do not get STEAM_COMPAT_INSTALL_PATH
+	game_identity_inputs steam_native;
+	steam_native.executable_path = "/home/test/.local/share/Steam/steamapps/common/Hades II/Hades2";
+	steam_native.steam_app_id = "1145350";
+	const auto steam_native_identity = resolve_game_identity(steam_native);
+	assert(steam_native_identity.directory_name == "Hades_II-1145350");
+	assert(steam_native_identity.log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Hades_II-1145350/ReShade-Hades2.log");
+	// The Wine loader of a Proton build also lives below "steamapps/common", but names Proton rather than the game
+	game_identity_inputs proton_without_install_path;
+	proton_without_install_path.executable_path = "/home/test/.local/share/Steam/steamapps/common/Proton 9.0/files/bin/wine64-preloader";
+	proton_without_install_path.command_line = { "Z:\\games\\Game.exe" };
+	proton_without_install_path.steam_app_id = "123";
+	assert(resolve_game_identity(proton_without_install_path).directory_name == "Game-123");
+
+	game_identity_inputs vkcube;
+	vkcube.executable_path = "/usr/bin/vkcube";
+	assert(resolve_game_identity(vkcube).directory_name == "vkcube");
+
+	game_identity_inputs sweden;
+	sweden.executable_path = "/usr/bin/sweden-simulator";
+	sweden.command_line = { "sweden-simulator", "/data/map.bin" };
+	assert(resolve_game_identity(sweden).directory_name == "sweden-simulator");
+
+	game_identity_inputs rpcs3;
+	rpcs3.executable_path = "/opt/rpcs3/usr/bin/rpcs3";
+	rpcs3.vulkan_application_name = "RPCS3";
+	assert(resolve_game_identity(rpcs3).directory_name == "RPCS3");
+	rpcs3.command_line = { "rpcs3", "/games/inFamous/PS3_GAME/USRDIR/EBOOT.BIN" };
+	assert(resolve_game_identity(rpcs3).directory_name == "RPCS3-inFamous");
+
+	game_identity_inputs dolphin;
+	dolphin.executable_path = "/usr/bin/dolphin-emu";
+	dolphin.vulkan_application_name = "Dolphin Emulator";
+	dolphin.command_line = { "dolphin-emu", "--batch", "/games/Metroid Prime.rvz" };
+	assert(resolve_game_identity(dolphin).directory_name == "Dolphin_Emulator-Metroid_Prime");
+	dolphin.command_line = { "dolphin-emu", "/games/Reboot.iso" };
+	assert(resolve_game_identity(dolphin).directory_name == "Dolphin_Emulator-Reboot");
+
+	game_identity_inputs ppsspp;
+	ppsspp.executable_path = "/usr/bin/PPSSPPSDL";
+	ppsspp.command_line = { "PPSSPPSDL", "/games/Patapon.cso" };
+	assert(resolve_game_identity(ppsspp).directory_name == "PPSSPPSDL-Patapon");
+
+	game_identity_inputs eden;
+	eden.executable_path = "/home/test/Eden-Linux-ee73920d28-rog-ally-clang-pgo.appimage";
+	eden.vulkan_application_name = "yuzu Emulator";
+	assert(resolve_game_identity(eden).directory_name == "Eden");
+	assert(resolve_game_identity(eden).log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Eden/ReShade.log");
+
+	game_identity_inputs wine;
+	wine.executable_path = "/usr/lib/wine/wine64-preloader";
+	wine.command_line = { "C:\\Games\\Game.exe" };
+	wine.wine_prefix = "/home/test/Games/My Prefix/pfx";
+	assert(resolve_game_identity(wine).directory_name == "Game-My_Prefix");
+
+	game_identity_inputs profile;
+	profile.executable_path = "/usr/bin/vkcube";
+	profile.profile_name = "My custom/game";
+	assert(resolve_game_identity(profile).directory_name == "My_custom_game");
+	profile.profile_name = "Pokémon Colosseum";
+	assert(resolve_game_identity(profile).directory_name == "Pokémon_Colosseum");
+}
+
 int main()
 {
+	test_game_identity();
 	test_clipboard_offer_mime_types();
 	test_clipboard_write();
 	test_translation_tables();

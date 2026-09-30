@@ -5,7 +5,7 @@
 namespace reshade::process
 {
 #if defined(__linux__)
-	bool initialize();
+	bool initialize(const char *vulkan_application_name);
 	std::filesystem::path get_log_path();
 #elif defined(_WIN32)
 	inline bool initialize() { return true; }
