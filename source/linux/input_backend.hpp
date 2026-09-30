@@ -1,6 +1,7 @@
 #pragma once
 
 #include "input.hpp"
+#include "key_translation.hpp"
 #include <cstdint>
 #include <string>
 
@@ -68,6 +69,8 @@ namespace reshade
 		void set_key(unsigned int key, bool down);
 		void set_modifiers(bool ctrl, bool shift, bool alt);
 		void add_text(uint32_t utf32);
+		// Adds the text of a key press, applying dead keys and compose sequences.
+		void add_key_text(xkb_keysym_t keysym, uint32_t utf32) { for (const char32_t c : _composer.feed(keysym, utf32)) add_text(c); }
 		void add_wheel_delta(int delta);
 		void set_mouse_position(unsigned int x, unsigned int y);
 		// Releases every held key (or mouse button) and drops its pending transitions, e.g. on focus loss.
@@ -79,6 +82,7 @@ namespace reshade
 		unsigned int _height = 1;
 		bool _keyboard_focused = false;
 		bool _pointer_focused = false;
+		text_composer _composer;
 
 	private:
 		void update_key_state(unsigned int key, bool down);

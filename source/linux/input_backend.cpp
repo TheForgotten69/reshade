@@ -92,6 +92,7 @@ void reshade::input_backend::set_mouse_position(unsigned int x, unsigned int y)
 void reshade::input_backend::release_keyboard()
 {
 	release_keys(false);
+	_composer.reset();
 }
 
 void reshade::input_backend::release_pointer()

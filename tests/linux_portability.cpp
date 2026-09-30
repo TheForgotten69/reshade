@@ -57,11 +57,11 @@ struct reshade::input_test_access
 		target._keyboard_focused = keyboard;
 		target._pointer_focused = pointer;
 	}
-	static void set_key_translation(x11_input &target, xcb_keycode_t keycode, xcb_keysym_t keysym, uint32_t utf32 = 0)
+	static void set_key_translation(x11_input &target, xcb_keycode_t keycode, xcb_keysym_t keysym, xcb_keysym_t shifted_keysym = XKB_KEY_NoSymbol)
 	{
-		target._key_translations[keycode].keysym = keysym;
-		target._key_translations[keycode].utf32 = utf32;
+		target._key_translations[keycode] = { keysym, shifted_keysym != XKB_KEY_NoSymbol ? shifted_keysym : keysym };
 	}
+	static void set_compose_table(x11_input &target, xkb_compose_table *table) { target._composer.set_table(table); }
 	static bool contains_window(x11_input &target, xcb_window_t root, xcb_window_t window)
 	{
 		target._root = root;
@@ -485,7 +485,9 @@ static void test_x11_key_and_button_taps()
 	x11_input backend(owner, 30, nullptr, input::wsi_kind::xcb);
 	input_test_access::set_key_translation(backend, 10, XKB_KEY_Home);
 	input_test_access::set_key_translation(backend, 11, XKB_KEY_Control_L);
-	input_test_access::set_key_translation(backend, 12, XKB_KEY_a, 'a');
+	input_test_access::set_key_translation(backend, 12, XKB_KEY_a, XKB_KEY_A);
+	input_test_access::set_key_translation(backend, 13, XKB_KEY_dead_circumflex, XKB_KEY_dead_diaeresis);
+	input_test_access::set_key_translation(backend, 14, XKB_KEY_Shift_L);
 
 	backend.on_raw_key(10, true);
 	assert(!owner.is_key_down(input::key_home));
@@ -513,6 +515,30 @@ static void test_x11_key_and_button_taps()
 	backend.on_raw_key(12, true);
 	assert(owner.text_input() == L"a");
 	backend.on_raw_key(12, false);
+	owner.next_frame();
+
+	// Dead keys compose with the next key, also on their shifted level (AZERTY types '¨' with Shift and '^').
+	xkb_context *const context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	const char compose_rules[] = "<dead_circumflex> <a> : \"\u00e2\"\n<dead_diaeresis> <A> : \"\u00c4\"\n";
+	input_test_access::set_compose_table(backend, xkb_compose_table_new_from_buffer(context, compose_rules, sizeof(compose_rules) - 1, "C", XKB_COMPOSE_FORMAT_TEXT_V1, XKB_COMPOSE_COMPILE_NO_FLAGS));
+	xkb_context_unref(context);
+	const auto tap = [&backend](xcb_keycode_t keycode) { backend.on_raw_key(keycode, true); backend.on_raw_key(keycode, false); };
+	tap(13);
+	assert(owner.text_input().empty());
+	tap(12);
+	assert(owner.text_input() == L"\u00e2");
+	owner.next_frame();
+	backend.on_raw_key(14, true);
+	tap(13);
+	tap(12);
+	backend.on_raw_key(14, false);
+	assert(owner.text_input() == L"\u00c4");
+	owner.next_frame();
+	// A key that does not continue the sequence cancels it without typing anything.
+	tap(13);
+	tap(10);
+	tap(12);
+	assert(owner.text_input() == L"a");
 	owner.next_frame();
 
 	backend.on_raw_button(1, true);

@@ -134,6 +134,7 @@ bool reshade::x11_input::initialize()
 	refresh_keyboard_focus();
 
 	const bool keyboard_ready = cache_key_translations();
+	_composer.load_locale_table();
 	const auto attributes = owned(xcb_get_window_attributes_reply(_connection, xcb_get_window_attributes(_connection, _window), nullptr));
 	const auto origin = owned(xcb_translate_coordinates_reply(_connection, xcb_translate_coordinates(_connection, _window, _root, 0, 0), nullptr));
 	log::message(log::level::info, "X11 input: xcb_window=%#x viewable=%d origin=(%d, %d) keyboard=%s pointer=%s cursor_tracking=%s capture_shape=%s cursor_theme=%s.",
@@ -229,7 +230,10 @@ void reshade::x11_input::on_raw_key(xcb_keycode_t keycode, bool pressed)
 		set_key(virtual_key, pressed);
 
 	if (pressed && !is_key_down(input::key_ctrl) && !is_key_down(input::key_alt))
-		add_text(is_key_down(input::key_shift) && translation.shifted_utf32 != 0 ? translation.shifted_utf32 : translation.utf32);
+	{
+		const xcb_keysym_t keysym = is_key_down(input::key_shift) ? translation.shifted_keysym : translation.keysym;
+		add_key_text(keysym, keysym_to_utf32(keysym));
+	}
 }
 
 void reshade::x11_input::on_raw_button(uint32_t button, bool pressed)
@@ -271,7 +275,7 @@ bool reshade::x11_input::cache_key_translations()
 	{
 		const xcb_keysym_t base = keysyms[index * mapping->keysyms_per_keycode];
 		const xcb_keysym_t shifted = mapping->keysyms_per_keycode > 1 ? keysyms[index * mapping->keysyms_per_keycode + 1] : base;
-		_key_translations[setup->min_keycode + index] = { base != XCB_NO_SYMBOL ? base : shifted, keysym_to_utf32(base), keysym_to_utf32(shifted) };
+		_key_translations[setup->min_keycode + index] = { base != XCB_NO_SYMBOL ? base : shifted, shifted != XCB_NO_SYMBOL ? shifted : base };
 	}
 	return true;
 }

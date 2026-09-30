@@ -130,6 +130,7 @@ bool reshade::wayland_input::initialize()
 	_wine_host = wine_input_bridge::is_wine_process();
 	if (_wine_host)
 		_wine.initialize();
+	_composer.load_locale_table();
 	_queue = wl_display_create_queue(_display);
 	if (_queue == nullptr || _xkb_context == nullptr)
 		return false;
@@ -309,10 +310,11 @@ void reshade::wayland_input::on_key(uint32_t serial, uint32_t key, uint32_t stat
 	// Wayland sends evdev codes, XKB keycodes are offset by 8.
 	const xkb_keycode_t keycode = key + 8;
 	const bool pressed = state == WL_KEYBOARD_KEY_STATE_PRESSED;
-	if (const unsigned int virtual_key = virtual_key_from_keysym(xkb_state_key_get_one_sym(_xkb_state, keycode)))
+	const xkb_keysym_t keysym = xkb_state_key_get_one_sym(_xkb_state, keycode);
+	if (const unsigned int virtual_key = virtual_key_from_keysym(keysym))
 		set_key(virtual_key, pressed);
 	if (pressed)
-		add_text(xkb_state_key_get_utf32(_xkb_state, keycode));
+		add_key_text(keysym, xkb_state_key_get_utf32(_xkb_state, keycode));
 	xkb_state_update_key(_xkb_state, keycode, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
 }
 

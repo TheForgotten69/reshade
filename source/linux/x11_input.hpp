@@ -38,8 +38,7 @@ namespace reshade
 		struct key_translation
 		{
 			xcb_keysym_t keysym = XKB_KEY_NoSymbol;
-			uint32_t utf32 = 0;
-			uint32_t shifted_utf32 = 0;
+			xcb_keysym_t shifted_keysym = XKB_KEY_NoSymbol;
 		};
 
 		bool is_host_cursor_hidden() const override { return !_host_cursor_visible; }
