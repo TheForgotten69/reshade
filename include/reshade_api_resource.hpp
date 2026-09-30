@@ -244,6 +244,12 @@ namespace reshade::api
 		/// Resource is backed by sparse memory.
 		/// </summary>
 		sparse_binding = 0x40000,
+		/// <summary>
+		/// Used together with <see cref="shared"/> on a buffer to import existing host memory instead of allocating: the "shared_handle" parameter of <see cref="device::create_resource"/> points to a variable that holds the host pointer.
+		/// The pointer and the buffer size must satisfy the device's minimum imported host pointer alignment. The memory must stay valid until the resource is destroyed.
+		/// This flag is only supported in Vulkan, with VK_EXT_external_memory_host.
+		/// </summary>
+		shared_host = 0x100000,
 	};
 	RESHADE_DEFINE_ENUM_FLAG_OPERATORS(resource_flags);
 

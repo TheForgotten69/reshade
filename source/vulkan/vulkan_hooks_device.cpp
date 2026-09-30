@@ -282,6 +282,13 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 			add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, false);
 #endif
 
+#if VK_EXT_external_memory_host
+		// Lets add-ons import host memory shared with another process as a buffer (resource_flags::shared_host)
+		// The extension depends on external memory, which is core in Vulkan 1.1
+		if (instance.api_version >= VK_API_VERSION_1_1)
+			add_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, false);
+#endif
+
 #if VK_KHR_external_memory_win32
 		add_extension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, false);
 #endif
