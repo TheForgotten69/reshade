@@ -359,7 +359,7 @@ static void draw_overlay(effect_runtime *runtime)
 	ImGui::PopItemWidth();
 
 	const auto total_width = ImGui::GetContentRegionAvail().x;
-	const auto num_columns = static_cast<unsigned int>(std::ceilf(total_width / (50.0f * data->scale * 13)));
+	const auto num_columns = static_cast<unsigned int>(std::ceil(total_width / (50.0f * data->scale * 13)));
 	const auto single_image_max_size = (total_width / num_columns) - 5.0f;
 
 	data->replaced_texture_srv = { 0 };
