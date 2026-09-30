@@ -384,6 +384,7 @@ namespace reshade::api
 		/// <summary>
 		/// Instantly destroys a sampler that was previously created via <see cref="create_sampler"/>.
 		/// </summary>
+		/// <param name="sampler">Handle of the sampler to destroy. Passing a zero handle is valid and does nothing.</param>
 		virtual void destroy_sampler(sampler sampler) = 0;
 
 		/// <summary>
@@ -400,6 +401,7 @@ namespace reshade::api
 		/// Instantly destroys a resource that was previously created via <see cref="create_resource"/> and frees its memory.
 		/// Make sure the resource is no longer in use on the GPU (via any command list that may reference it and is still being executed) before doing this (e.g. with <see cref="command_queue::wait_idle"/>) and never try to destroy resources created by the application!
 		/// </summary>
+		/// <param name="resource">Handle of the resource to destroy. Passing a zero handle is valid and does nothing.</param>
 		virtual void destroy_resource(resource resource) = 0;
 
 		/// <summary>
@@ -419,6 +421,7 @@ namespace reshade::api
 		/// <summary>
 		/// Instantly destroys a resource view that was previously created via <see cref="create_resource_view"/>.
 		/// </summary>
+		/// <param name="view">Handle of the resource view to destroy. Passing a zero handle is valid and does nothing.</param>
 		virtual void destroy_resource_view(resource_view view) = 0;
 
 		/// <summary>
@@ -500,6 +503,7 @@ namespace reshade::api
 		/// <summary>
 		/// Instantly destroys a pipeline state object that was previously created via <see cref="create_pipeline"/>.
 		/// </summary>
+		/// <param name="pipeline">Handle of the pipeline state object to destroy. Passing a zero handle is valid and does nothing.</param>
 		virtual void destroy_pipeline(pipeline pipeline) = 0;
 
 		/// <summary>
@@ -513,6 +517,7 @@ namespace reshade::api
 		/// <summary>
 		/// Instantly destroys a pipeline layout that was previously created via <see cref="create_pipeline_layout"/>.
 		/// </summary>
+		/// <param name="layout">Handle of the pipeline layout to destroy. Passing a zero handle is valid and does nothing.</param>
 		virtual void destroy_pipeline_layout(pipeline_layout layout) = 0;
 
 		/// <summary>
@@ -535,10 +540,13 @@ namespace reshade::api
 		/// <summary>
 		/// Frees a descriptor table that was previously allocated via <see cref="allocate_descriptor_table"/>.
 		/// </summary>
+		/// <param name="table">Handle of the descriptor table to free.</param>
 		void free_descriptor_table(descriptor_table table) { free_descriptor_tables(1, &table); }
 		/// <summary>
 		/// Frees one or more descriptor tables that were previously allocated via <see cref="allocate_descriptor_tables"/>.
 		/// </summary>
+		/// <param name="count">Number of descriptor tables to free.</param>
+		/// <param name="tables">Pointer to the first element of an array of descriptor table handles with <paramref name="count"/> elements to free.</param>
 		virtual void free_descriptor_tables(uint32_t count, const descriptor_table *tables) = 0;
 
 		/// <summary>
@@ -585,6 +593,7 @@ namespace reshade::api
 		/// <summary>
 		/// Instantly destroys a query heap that was previously created via <see cref="create_query_heap"/>.
 		/// </summary>
+		/// <param name="heap">Handle of the query heap to destroy. Passing a zero handle is valid and does nothing.</param>
 		virtual void destroy_query_heap(query_heap heap) = 0;
 
 		/// <summary>
@@ -624,6 +633,7 @@ namespace reshade::api
 		/// <summary>
 		/// Instantly destroys a fence that was previously created via <see cref="create_fence"/>.
 		/// </summary>
+		/// <param name="fence">Handle of the fence to destroy. Passing a zero handle is valid and does nothing.</param>
 		virtual void destroy_fence(fence fence) = 0;
 
 		/// <summary>

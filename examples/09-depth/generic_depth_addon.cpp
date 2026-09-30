@@ -51,6 +51,8 @@ static unsigned int s_preserve_depth_buffers = 0;
 // behavior is unchanged.
 static bool s_auto_detect_reversed_depth = true;
 #endif
+// Set to zero for automatic detection, otherwise will use the clear operation at the specific index within a frame (first = config value, second = actual corresponding index)
+static std::pair<int32_t, uint32_t> s_force_clear_index = { 0, 0 };
 // Choose impact of draw statistics in the detection heuristic
 static draw_stats_heuristic s_draw_stats_heuristic = draw_stats_heuristic::prefer_vertices;
 // Enable or disable the aspect ratio check from 'check_aspect_ratio' in the detection heuristic
@@ -161,8 +163,8 @@ struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 	// secondary command list with no such bind does not clobber its caller.
 	bool graphics_pipeline_state_touched = false;
 	std::unordered_map<resource, depth_stencil_frame_stats, resource_hash> stats_per_used_depth_stencil;
-	bool first_draw_since_bind = true;
 	draw_stats best_copy_stats;
+	bool first_draw_since_bind = true;
 
 	explicit state_tracking(bool is_queue) : is_queue(is_queue)
 	{
@@ -172,17 +174,19 @@ struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 
 	void reset()
 	{
-		best_copy_stats = { 0, 0 };
-		stats_per_used_depth_stencil.clear();
+		current_viewport = {};
 		current_depth_stencil = { 0 };
 		current_depth_state = {};
 		graphics_pipeline_state_touched = false;
+		stats_per_used_depth_stencil.clear();
+		best_copy_stats = { 0, 0 };
+		first_draw_since_bind = true;
 	}
 	void reset_on_present()
 	{
 		assert(is_queue);
-		best_copy_stats = { 0, 0 };
 		stats_per_used_depth_stencil.clear();
+		best_copy_stats = { 0, 0 };
 	}
 
 	void merge(const state_tracking &source)
@@ -195,7 +199,7 @@ struct RESHADE_API_UUID("43319e83-387c-448e-881c-7e68fc2e52c4") state_tracking
 			graphics_pipeline_state_touched = true;
 		}
 
-		if (source.best_copy_stats.vertices >= best_copy_stats.vertices)
+		if (source.best_copy_stats > best_copy_stats)
 			best_copy_stats = source.best_copy_stats;
 
 		if (source.stats_per_used_depth_stencil.empty())
@@ -277,8 +281,6 @@ struct depth_stencil_backup
 	uint32_t frame_width = 0;
 	uint32_t frame_height = 0;
 
-	// Set to zero for automatic detection, otherwise will use the clear operation at the specific index within a frame
-	uint32_t force_clear_index = 0;
 	uint32_t current_clear_index = 0;
 };
 
@@ -396,6 +398,9 @@ struct RESHADE_API_UUID("e006e162-33ac-4b9f-b10f-0e15335c7bdb") generic_depth_de
 		else
 		{
 			reshade::log::message(reshade::log::level::error, "Failed to create backup depth-stencil texture!");
+
+			if (api <= device_api::d3d12)
+				reinterpret_cast<IUnknown *>(depth_stencil.handle)->Release();
 
 			return nullptr;
 		}
@@ -521,20 +526,20 @@ static void on_clear_depth_impl(command_list *cmd_list, state_tracking &state, r
 		if (op != clear_op::unbind_depth_stencil_view)
 		{
 			// If clear index override is set to zero, always copy any suitable buffers
-			if (depth_stencil_backup->force_clear_index == 0)
+			if (s_force_clear_index.first == 0)
 			{
 				// Use greater equals operator here to handle case where the same scene is first rendered into a shadow map and then for real (e.g. Mirror's Edge main menu)
 				do_copy = current_stats.vertices >= state.best_copy_stats.vertices || (op == clear_op::fullscreen_draw && current_stats.drawcalls >= state.best_copy_stats.drawcalls);
 			}
 			else
-			if (depth_stencil_backup->force_clear_index == std::numeric_limits<uint32_t>::max())
+			if (s_force_clear_index.first == std::numeric_limits<int32_t>::max())
 			{
 				// Special case for Garry's Mod which chooses the last clear operation that has a high workload
 				do_copy = current_stats.vertices >= 5000;
 			}
 			else
 			{
-				do_copy = (depth_stencil_backup->current_clear_index++) == (depth_stencil_backup->force_clear_index - 1);
+				do_copy = (depth_stencil_backup->current_clear_index++) == s_force_clear_index.second;
 			}
 
 			stats.clears.push_back({ current_stats, op, do_copy });
@@ -592,11 +597,16 @@ static void on_init_device(device *device)
 	device->create_private_data<generic_depth_device_data>();
 
 	reshade::get_config_value(nullptr, "DEPTH", "DisableINTZ", s_disable_intz);
+
 	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", s_preserve_depth_buffers);
 #if defined(__linux__)
 	s_auto_detect_reversed_depth = true;
 	reshade::get_config_value(nullptr, "DEPTH", "AutoDetectReversedDepth", s_auto_detect_reversed_depth);
 #endif
+	int64_t clear_index_value = 0;
+	reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", clear_index_value);
+	s_force_clear_index.first = static_cast<int32_t>(std::clamp(clear_index_value, static_cast<int64_t>(std::numeric_limits<int32_t>::min()), static_cast<int64_t>(std::numeric_limits<int32_t>::max())));
+	s_force_clear_index.second = 0;
 	reshade::get_config_value(nullptr, "DEPTH", "DrawStatsHeuristic", reinterpret_cast<unsigned int &>(s_draw_stats_heuristic));
 	reshade::get_config_value(nullptr, "DEPTH", "UseAspectRatioHeuristics", reinterpret_cast<unsigned int &>(s_aspect_ratio_heuristic));
 
@@ -996,7 +1006,7 @@ static bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instance
 	if (state.current_depth_stencil == 0)
 		return false; // This is a draw call with no depth-stencil bound
 
-	// Check if this draw call likely represets a fullscreen rectangle (two triangles), which would clear the depth-stencil
+	// Check if this draw call likely represents a fullscreen rectangle (two triangles), which would clear the depth-stencil
 	const bool fullscreen_draw = vertices == 6 && instances == 1;
 	if (fullscreen_draw &&
 		s_preserve_depth_buffers == 2 &&
@@ -1033,7 +1043,7 @@ static bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t i
 }
 static bool on_draw_indirect(command_list *cmd_list, indirect_command type, resource, uint64_t, uint32_t draw_count, uint32_t)
 {
-	if (type == indirect_command::dispatch)
+	if (type == indirect_command::dispatch || type == indirect_command::dispatch_rays)
 		return false;
 
 	auto &state = *cmd_list->get_private_data<state_tracking>();
@@ -1056,6 +1066,10 @@ static bool on_draw_indirect(command_list *cmd_list, indirect_command type, reso
 	stats.current.last_viewport = state.current_viewport;
 
 	return false;
+}
+static bool on_draw_indirect_mesh(command_list *cmd_list, uint32_t, uint32_t, uint32_t)
+{
+	return on_draw_indirect(cmd_list, indirect_command::dispatch_mesh, resource { 0 }, 0, 1, 0);
 }
 
 static void on_bind_viewport(command_list *cmd_list, uint32_t first, uint32_t count, const viewport *viewport)
@@ -1430,13 +1444,14 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 
 				data.using_backup_texture = false;
 				data.selected_depth_stencil = { 0 };
+				data.selected_shader_resource = { 0 };
 			}
 
 			// Create two-dimensional resource view to the first level and layer of the depth-stencil resource
 			resource_view_desc srv_desc(api != device_api::opengl && api != device_api::vulkan ? format_to_default_typed(selected_depth_stencil_info->desc.texture.format) : selected_depth_stencil_info->desc.texture.format);
 
 			// Need to create backup texture only if doing backup copies or original resource does not support shader access (which is necessary for binding it to effects)
-			// Also always create a backup texture in D3D12 or Vulkan to circument problems in case application makes use of resource aliasing
+			// Also always create a backup texture in D3D12 or Vulkan to circumvent problems in case application makes use of resource aliasing
 			if (s_preserve_depth_buffers || (selected_depth_stencil_info->desc.usage & resource_usage::shader_resource) == 0 || selected_depth_stencil_info->desc.texture.samples > 1 || (api == device_api::d3d12 || api == device_api::vulkan))
 			{
 				depth_stencil_backup = device_data->track_depth_stencil_for_backup(device, selected_depth_stencil, selected_depth_stencil_info->desc);
@@ -1448,11 +1463,6 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 
 				depth_stencil_backup->frame_width = frame_width;
 				depth_stencil_backup->frame_height = frame_height;
-
-				if (s_preserve_depth_buffers)
-					reshade::get_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
-				else
-					depth_stencil_backup->force_clear_index = 0;
 
 				// Avoid recreating shader resource view when the backup texture did not change
 				if (prev_shader_resource == 0 || device->get_resource_from_view(prev_shader_resource) != depth_stencil_backup->backup_texture)
@@ -1479,6 +1489,10 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 
 		if (data.using_backup_texture)
 		{
+			s_force_clear_index.second = static_cast<uint32_t>(s_force_clear_index.first < 0 ?
+				std::max(0, static_cast<int32_t>(selected_depth_stencil_info->last_frame_stats.clears.size()) + s_force_clear_index.first) :
+				s_force_clear_index.first - 1);
+
 			assert(depth_stencil_backup != nullptr && depth_stencil_backup->backup_texture != 0);
 			const resource backup_texture = depth_stencil_backup->backup_texture;
 
@@ -1784,17 +1798,22 @@ static void draw_settings_overlay(effect_runtime *runtime)
 			if (depth_stencil_backup == nullptr || depth_stencil_backup->backup_texture == 0)
 				continue;
 
-			for (uint32_t clear_index = 1; clear_index <= static_cast<uint32_t>(info.last_frame_stats.clears.size()); ++clear_index)
+			int32_t clear_index_value = 0;
+			const int32_t last_frame_clear_count = static_cast<int32_t>(info.last_frame_stats.clears.size());
+
+			for (uint32_t clear_index = 0; clear_index < static_cast<uint32_t>(last_frame_clear_count); ++clear_index)
 			{
-				const clear_stats &clear_stats = info.last_frame_stats.clears[clear_index - 1];
+				const clear_stats &clear_stats = info.last_frame_stats.clears[clear_index];
 
-				std::snprintf(label, std::size(label), "%c   CLEAR %2u", clear_stats.copied_during_frame ? '>' : ' ', clear_index);
+				clear_index_value = s_force_clear_index.first < 0 ? -last_frame_clear_count + static_cast<int32_t>(clear_index) : static_cast<int32_t>(clear_index + 1);
+				std::snprintf(label, std::size(label), "%c   CLEAR %2d", clear_stats.copied_during_frame ? '>' : ' ', std::abs(clear_index_value));
 
-				if (bool value = (depth_stencil_backup->force_clear_index == clear_index);
+				if (bool value = (s_force_clear_index.first == clear_index_value);
 					ImGui::Checkbox(label, &value))
 				{
-					depth_stencil_backup->force_clear_index = value ? clear_index : 0;
-					reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
+					s_force_clear_index.first = value ? clear_index_value : 0;
+					s_force_clear_index.second = clear_index;
+					reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", s_force_clear_index.first);
 				}
 
 				ImGui::SameLine();
@@ -1805,14 +1824,32 @@ static void draw_settings_overlay(effect_runtime *runtime)
 					clear_stats.clear_op == clear_op::fullscreen_draw ? " Fullscreen draw call" : "");
 			}
 
+			if (s_force_clear_index.first != 0 && s_force_clear_index.first != std::numeric_limits<int32_t>::max())
+			{
+				if (bool value = s_force_clear_index.first < 0;
+					ImGui::Checkbox("    Index clear operations starting with the last one", &value))
+				{
+					s_force_clear_index.first = value ? -last_frame_clear_count + s_force_clear_index.first - 1 : last_frame_clear_count + s_force_clear_index.first + 1;
+					s_force_clear_index.second = static_cast<uint32_t>(value ?
+						std::max(0, last_frame_clear_count + s_force_clear_index.first) :
+						s_force_clear_index.first - 1);
+					reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", s_force_clear_index.first);
+				}
+
+				ImGui::SetItemTooltip("Enable this in games clearing the depth buffer at a fixed point at the end of the frame (e.g. during GUI rendering), but with a fluctuating amount of clear operations before");
+			}
+
 			if (!is_d3d12_or_vulkan)
 			{
-				if (bool value = (depth_stencil_backup->force_clear_index == std::numeric_limits<uint32_t>::max());
+				if (bool value = (s_force_clear_index.first == std::numeric_limits<int32_t>::max());
 					ImGui::Checkbox("    Choose last clear operation with high number of draw calls", &value))
 				{
-					depth_stencil_backup->force_clear_index = value ? std::numeric_limits<uint32_t>::max() : 0;
-					reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", depth_stencil_backup->force_clear_index);
+					s_force_clear_index.first = value ? std::numeric_limits<int32_t>::max() : 0;
+					s_force_clear_index.second = 0;
+					reshade::set_config_value(nullptr, "DEPTH", "DepthCopyAtClearIndex", s_force_clear_index.first);
 				}
+
+				ImGui::SetItemTooltip("Enable this in games with a fluctuating amount of clear operations between frames, where choosing a fixed index above is not reliable");
 			}
 		}
 	}
@@ -1881,6 +1918,7 @@ void register_addon_depth()
 	reshade::register_event<reshade::addon_event::draw>(on_draw);
 	reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
 	reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_indirect);
+	reshade::register_event<reshade::addon_event::dispatch_mesh>(on_draw_indirect_mesh);
 	reshade::register_event<reshade::addon_event::bind_viewports>(on_bind_viewport);
 	reshade::register_event<reshade::addon_event::begin_render_pass>(on_begin_render_pass_with_depth_stencil);
 	reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_depth_stencil);
@@ -1923,6 +1961,7 @@ void unregister_addon_depth()
 	reshade::unregister_event<reshade::addon_event::draw>(on_draw);
 	reshade::unregister_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
 	reshade::unregister_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_indirect);
+	reshade::unregister_event<reshade::addon_event::dispatch_mesh>(on_draw_indirect_mesh);
 	reshade::unregister_event<reshade::addon_event::bind_viewports>(on_bind_viewport);
 	reshade::unregister_event<reshade::addon_event::begin_render_pass>(on_begin_render_pass_with_depth_stencil);
 	reshade::unregister_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(on_bind_depth_stencil);
