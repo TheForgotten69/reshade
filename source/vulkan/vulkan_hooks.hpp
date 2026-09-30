@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cassert>
+#include <cstdint>
 #include <glad/vulkan.h>
 
 enum VkLayerFunction
@@ -51,10 +52,20 @@ struct vulkan_instance
 	GladVulkanContext dispatch_table;
 };
 
+enum class vulkan_wsi_kind
+{
+	unknown,
+	win32,
+	wayland,
+	xcb,
+	xlib,
+};
+
 struct vulkan_surface
 {
-	void *window;
-	void *display;
+	vulkan_wsi_kind kind = vulkan_wsi_kind::unknown;
+	void *window = nullptr;
+	void *display = nullptr;
 };
 
 #define RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(name, device) \
@@ -77,6 +88,12 @@ VkResult VKAPI_CALL vkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Su
 #if VK_KHR_wayland_surface
 VkResult VKAPI_CALL vkCreateWaylandSurfaceKHR(VkInstance instance, const VkWaylandSurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
 #endif
+#if VK_KHR_xcb_surface
+VkResult VKAPI_CALL vkCreateXcbSurfaceKHR(VkInstance instance, const VkXcbSurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
+#endif
+#if VK_KHR_xlib_surface
+VkResult VKAPI_CALL vkCreateXlibSurfaceKHR(VkInstance instance, const VkXlibSurfaceCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface);
+#endif
 #if VK_KHR_surface
 void     VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surface, const VkAllocationCallbacks *pAllocator);
 #endif
@@ -92,6 +109,7 @@ void     VKAPI_CALL vkDestroyDevice(VkDevice device, const VkAllocationCallbacks
 #if VK_KHR_swapchain
 VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkSwapchainKHR *pSwapchain);
 void     VKAPI_CALL vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks *pAllocator);
+VkResult VKAPI_CALL vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t *pSwapchainImageCount, VkImage *pSwapchainImages);
 #endif
 
 VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue, uint32_t submitCount, const VkSubmitInfo *pSubmits, VkFence fence);

@@ -566,7 +566,7 @@ bool reshade::runtime::on_init()
 		else
 			_input.reset();
 
-		_primary_input_handler = _input.use_count() == 1 || (_input == nullptr && _input_gamepad != nullptr);
+		_primary_input_handler = _input != nullptr ? _input->try_acquire_primary_handler() : _input_gamepad != nullptr;
 	}
 
 	// Reset frame count to zero so effects are loaded in 'update_effects'
@@ -694,6 +694,11 @@ void reshade::runtime::on_reset()
 #endif
 
 	log::message(log::level::info, "Destroyed runtime environment on runtime %p ('%s').", this, _config_path.u8string().c_str());
+
+	if (_primary_input_handler && _input != nullptr)
+		_input->release_primary_handler();
+	_primary_input_handler = false;
+	_input.reset();
 }
 void reshade::runtime::on_present()
 {
@@ -946,6 +951,8 @@ void reshade::runtime::on_present()
 	_effects_rendered_this_frame = false;
 
 	// Update input status
+	if (!_primary_input_handler && _input != nullptr && _input->try_acquire_primary_handler())
+		_primary_input_handler = true;
 	if (_primary_input_handler && _input != nullptr)
 		_input->next_frame();
 	if (_primary_input_handler && _input_gamepad != nullptr)

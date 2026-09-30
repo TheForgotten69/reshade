@@ -66,6 +66,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     glad
     PUBLIC
       VK_USE_PLATFORM_WAYLAND_KHR
+      VK_USE_PLATFORM_XCB_KHR
+      VK_USE_PLATFORM_XLIB_KHR
   )
 endif()
 
@@ -80,6 +82,8 @@ set(GLAD_EXTENSIONS
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   list(APPEND GLAD_EXTENSIONS
     VK_KHR_wayland_surface
+    VK_KHR_xcb_surface
+    VK_KHR_xlib_surface
   )
 endif()
 set(GLAD_GENERATED_FILES

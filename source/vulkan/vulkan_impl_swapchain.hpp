@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <vector>
+
 namespace reshade::vulkan
 {
 	class device_impl;
@@ -33,6 +35,15 @@ namespace reshade::vulkan
 		VkSwapchainCreateInfoKHR _create_info = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
 		void *_hwnd = nullptr;
 		uint32_t _swap_index = 0;
+		bool _retired = false;
+		bool _runtime_destroyed = false;
+
+		// When an add-on requests a presentation format different from the format
+		// exposed to the application, the application renders into these ordinary
+		// images while '_orig' remains the WSI swap chain used by ReShade.
+		std::vector<api::resource> _proxy_images;
+		std::vector<api::resource> _proxy_srgb_images;
+		std::vector<bool> _proxy_srgb_images_initialized;
 	};
 
 	template <>
@@ -45,7 +56,12 @@ namespace reshade::vulkan
 
 		using swapchain_impl::_create_info;
 		using swapchain_impl::_hwnd;
+		using swapchain_impl::_proxy_images;
+		using swapchain_impl::_proxy_srgb_images;
+		using swapchain_impl::_proxy_srgb_images_initialized;
 		using swapchain_impl::_swap_index;
+		using swapchain_impl::_retired;
+		using swapchain_impl::_runtime_destroyed;
 
 #if VK_EXT_full_screen_exclusive && defined(_WIN32)
 		HMONITOR hmonitor = nullptr;
