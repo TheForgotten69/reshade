@@ -4942,10 +4942,10 @@ void reshade::runtime::save_screenshot(const char *postfix_in)
 							auto rgba_float_bt2100_pq = _mm_div_ps(rgba_float_bt2100, _mm_set_ps1(125.0f));
 							alignas(16) float temp[4];
 							_mm_store_ps(temp, rgba_float_bt2100_pq);
-							rgba_float_bt2100_pq = _mm_setr_ps(std::powf(temp[0], PQ_m1), std::powf(temp[1], PQ_m1), std::powf(temp[2], PQ_m1), 0.0f);
+							rgba_float_bt2100_pq = _mm_setr_ps(std::pow(temp[0], PQ_m1), std::pow(temp[1], PQ_m1), std::pow(temp[2], PQ_m1), 0.0f);
 							rgba_float_bt2100_pq = _mm_div_ps(_mm_add_ps(_mm_mul_ps(_mm_set_ps1(PQ_c2), rgba_float_bt2100_pq), _mm_set_ps1(PQ_c1)), _mm_add_ps(_mm_mul_ps(_mm_set_ps1(PQ_c3), rgba_float_bt2100_pq), _mm_set_ps1(1.0f)));
 							_mm_store_ps(temp, rgba_float_bt2100_pq);
-							rgba_float_bt2100_pq = _mm_setr_ps(std::powf(temp[0], PQ_m2), std::powf(temp[1], PQ_m2), std::powf(temp[2], PQ_m2), 0.0f);
+							rgba_float_bt2100_pq = _mm_setr_ps(std::pow(temp[0], PQ_m2), std::pow(temp[1], PQ_m2), std::pow(temp[2], PQ_m2), 0.0f);
 
 							// Convert to integers and pack into 16-bit range
 							_mm_storel_epi64(reinterpret_cast<__m128i *>(result), _mm_packus_epi32(_mm_cvtps_epi32(_mm_mul_ps(rgba_float_bt2100_pq, _mm_set_ps1(65536.0f))), _mm_setzero_si128()));
