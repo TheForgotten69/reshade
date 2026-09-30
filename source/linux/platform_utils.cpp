@@ -110,7 +110,11 @@ bool reshade::utils::execute_command(const std::string &command_line, const std:
 	return false;
 }
 
-// Not implemented, Linux has no dependency-free equivalent of 'PlaySound'.
-void reshade::utils::play_sound_async(const std::filesystem::path &)
+// Linux has no system API like 'PlaySound', so use the player of whichever sound server is available.
+void reshade::utils::play_sound_async(const std::filesystem::path &path)
 {
+	for (const char *const player : { "pw-play", "paplay", "aplay" })
+		if (spawn_detached({ player, path.c_str(), nullptr }, {}, true))
+			return;
+	log::message(log::level::warning, "Failed to play '%s', none of pw-play, paplay or aplay is available.", path.c_str());
 }

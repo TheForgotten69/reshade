@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <unistd.h>
 #include <xcb/shape.h>
@@ -51,6 +52,9 @@ reshade::x11_input::x11_input(input &owner, xcb_window_t window, void *wsi_displ
 reshade::x11_input::~x11_input()
 {
 	_wine.release_cursor_clip(false);
+	if (_cursor_context != nullptr)
+		xcb_cursor_context_free(_cursor_context);
+	// Disconnecting also frees the windows and cursors created on this connection
 	if (_connection != nullptr)
 		xcb_disconnect(_connection);
 }
@@ -68,6 +72,8 @@ bool reshade::x11_input::initialize()
 	if (screen_iterator.rem == 0)
 		return false;
 	_root = screen_iterator.data->root;
+	if (xcb_cursor_context_new(_connection, screen_iterator.data, &_cursor_context) < 0)
+		_cursor_context = nullptr;
 	_wm_pid_atom = intern_atom(_connection, "_NET_WM_PID");
 
 	if (owned(xcb_get_geometry_reply(_connection, xcb_get_geometry(_connection, _window), nullptr)) == nullptr)
@@ -130,9 +136,9 @@ bool reshade::x11_input::initialize()
 	const bool keyboard_ready = cache_key_translations();
 	const auto attributes = owned(xcb_get_window_attributes_reply(_connection, xcb_get_window_attributes(_connection, _window), nullptr));
 	const auto origin = owned(xcb_translate_coordinates_reply(_connection, xcb_translate_coordinates(_connection, _window, _root, 0, 0), nullptr));
-	log::message(log::level::info, "X11 input: xcb_window=%#x viewable=%d origin=(%d, %d) keyboard=%s pointer=%s cursor_tracking=%s capture_shape=%s.",
+	log::message(log::level::info, "X11 input: xcb_window=%#x viewable=%d origin=(%d, %d) keyboard=%s pointer=%s cursor_tracking=%s capture_shape=%s cursor_theme=%s.",
 		_window, attributes != nullptr && attributes->map_state == XCB_MAP_STATE_VIEWABLE, origin != nullptr ? origin->dst_x : 0, origin != nullptr ? origin->dst_y : 0,
-		_wine_wayland ? "wine-wayland" : keyboard_ready ? "yes" : "no", _wine_available ? "wine-win32u" : "xinput2", _xfixes_first_event != 0 ? "xfixes" : "no", _shape_available ? "yes" : "no");
+		_wine_wayland ? "wine-wayland" : keyboard_ready ? "yes" : "no", _wine_available ? "wine-win32u" : "xinput2", _xfixes_first_event != 0 ? "xfixes" : "no", _shape_available ? "yes" : "no", has_cursor_shapes() ? "yes" : "no");
 	return keyboard_ready || _wine_wayland;
 }
 
@@ -387,7 +393,7 @@ void reshade::x11_input::update_host_cursor_visibility()
 	}
 	else
 	{
-		// Over the capture layer the displayed cursor is the layer's own invisible one.
+		// Over the capture layer the displayed cursor is the layer's own one.
 		if (is_pointer_in_capture())
 			return;
 
@@ -503,23 +509,15 @@ xcb_window_t reshade::x11_input::find_visible_window() const
 
 bool reshade::x11_input::create_capture_window(xcb_window_t parent)
 {
-	// A cursor made of an empty 1x1 bitmap hides the host's cursor while it is over the layer.
-	const xcb_pixmap_t blank = xcb_generate_id(_connection);
-	xcb_create_pixmap(_connection, 1, blank, _window, 1, 1);
-	const xcb_cursor_t invisible_cursor = xcb_generate_id(_connection);
-	xcb_create_cursor(_connection, invisible_cursor, blank, blank, 0, 0, 0, 0, 0, 0, 0, 0);
-	xcb_free_pixmap(_connection, blank);
-
 	// Pointer events go to the deepest window selecting them and do not propagate further, so
 	// selecting them here is what takes them away from the host.
 	const uint32_t values[] = {
 		XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_LEAVE_WINDOW,
-		invisible_cursor
+		overlay_cursor()
 	};
 	_capture_window = xcb_generate_id(_connection);
 	const xcb_void_cookie_t cookie = xcb_create_window_checked(_connection, 0, _capture_window, parent, 0, 0, width(), height(), 0,
 		XCB_WINDOW_CLASS_INPUT_ONLY, XCB_COPY_FROM_PARENT, XCB_CW_EVENT_MASK | XCB_CW_CURSOR, values);
-	xcb_free_cursor(_connection, invisible_cursor);
 	if (const auto error = owned(xcb_request_check(_connection, cookie)))
 	{
 		log::message(log::level::warning, "Failed to create X11 input capture window on %#x with error %u.", parent, error->error_code);
@@ -529,6 +527,60 @@ bool reshade::x11_input::create_capture_window(xcb_window_t parent)
 	_capture_parent = parent;
 	log::message(log::level::info, "X11 input capture window %#x covers %#x.", _capture_window, parent);
 	return true;
+}
+
+void reshade::x11_input::set_overlay_cursor(int cursor)
+{
+	if (cursor == _overlay_cursor)
+		return;
+
+	_overlay_cursor = cursor;
+	if (_capture_window == XCB_WINDOW_NONE)
+		return;
+
+	const uint32_t value = overlay_cursor();
+	xcb_change_window_attributes(_connection, _capture_window, XCB_CW_CURSOR, &value);
+	xcb_flush(_connection);
+}
+
+xcb_cursor_t reshade::x11_input::overlay_cursor()
+{
+	// Standard cursor names first, then the traditional X11 names older themes use
+	constexpr const char *names[][2] = {
+		{ "default", "left_ptr" },
+		{ "text", "xterm" },
+		{ "move", "fleur" },
+		{ "ns-resize", "sb_v_double_arrow" },
+		{ "ew-resize", "sb_h_double_arrow" },
+		{ "nesw-resize", "fd_double_arrow" },
+		{ "nwse-resize", "bd_double_arrow" },
+		{ "pointer", "hand2" },
+		{ "wait", "watch" },
+		{ "progress", "left_ptr_watch" },
+		{ "not-allowed", "crossed_circle" },
+	};
+	static_assert(std::size(names) == std::tuple_size_v<decltype(_cursors)>);
+
+	if (has_cursor_shapes() && _overlay_cursor >= 0 && static_cast<size_t>(_overlay_cursor) < _cursors.size())
+	{
+		xcb_cursor_t &cursor = _cursors[_overlay_cursor];
+		for (const char *const name : names[_overlay_cursor])
+			if (cursor == XCB_NONE)
+				cursor = xcb_cursor_load_cursor(_cursor_context, name);
+		if (cursor != XCB_NONE)
+			return cursor;
+	}
+
+	// Without a cursor the overlay draws one (see 'needs_overlay_cursor'), so hide the host's
+	if (_invisible_cursor == XCB_NONE)
+	{
+		const xcb_pixmap_t blank = xcb_generate_id(_connection);
+		xcb_create_pixmap(_connection, 1, blank, _window, 1, 1);
+		_invisible_cursor = xcb_generate_id(_connection);
+		xcb_create_cursor(_connection, _invisible_cursor, blank, blank, 0, 0, 0, 0, 0, 0, 0, 0);
+		xcb_free_pixmap(_connection, blank);
+	}
+	return _invisible_cursor;
 }
 
 void reshade::x11_input::apply_capture_shape()

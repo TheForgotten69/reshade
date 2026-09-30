@@ -40,6 +40,7 @@ pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
 pkg_check_modules(XCB_XINPUT REQUIRED IMPORTED_TARGET xcb-xinput)
 pkg_check_modules(XCB_XFIXES REQUIRED IMPORTED_TARGET xcb-xfixes)
 pkg_check_modules(XCB_SHAPE REQUIRED IMPORTED_TARGET xcb-shape)
+pkg_check_modules(XCB_CURSOR REQUIRED IMPORTED_TARGET xcb-cursor)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(WAYLAND_PROTOCOLS REQUIRED wayland-protocols)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
@@ -63,6 +64,9 @@ endfunction()
 reshade_wayland_protocol(RESHADE_WAYLAND_RELATIVE_POINTER "${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml")
 reshade_wayland_protocol(RESHADE_WAYLAND_FRACTIONAL_SCALE "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
 reshade_wayland_protocol(RESHADE_WAYLAND_VIEWPORTER "${WAYLAND_PROTOCOLS_DIR}/stable/viewporter/viewporter.xml")
+reshade_wayland_protocol(RESHADE_WAYLAND_CURSOR_SHAPE "${WAYLAND_PROTOCOLS_DIR}/staging/cursor-shape/cursor-shape-v1.xml")
+# Only needed because the cursor shape protocol references its tablet tool interface
+reshade_wayland_protocol(RESHADE_WAYLAND_TABLET "${WAYLAND_PROTOCOLS_DIR}/unstable/tablet/tablet-unstable-v2.xml")
 
 set(RESHADE_LINUX_INPUT_SOURCES
   source/input.cpp
@@ -79,8 +83,10 @@ set(RESHADE_LINUX_INPUT_SOURCES
   ${RESHADE_WAYLAND_RELATIVE_POINTER}
   ${RESHADE_WAYLAND_FRACTIONAL_SCALE}
   ${RESHADE_WAYLAND_VIEWPORTER}
+  ${RESHADE_WAYLAND_CURSOR_SHAPE}
+  ${RESHADE_WAYLAND_TABLET}
 )
-set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::XCB_SHAPE)
+set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::XCB_SHAPE PkgConfig::XCB_CURSOR)
 
 # Generate a native lookup table from the same localization resources used by Windows.
 file(GLOB RESHADE_LOCALIZATION_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/lang_*.rc2")
@@ -97,11 +103,30 @@ add_custom_command(
 )
 set_source_files_properties(source/linux/runtime_platform.cpp PROPERTIES OBJECT_DEPENDS "${RESHADE_LOCALIZATION_HEADER}")
 
-# Embed the existing ReShade ImGui shaders without relying on Win32 resources.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/res/shaders/imgui_vs_450.spv" RESHADE_IMGUI_VS_SPIRV HEX)
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/res/shaders/imgui_ps_450.spv" RESHADE_IMGUI_PS_SPIRV HEX)
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," RESHADE_IMGUI_VS_SPIRV "${RESHADE_IMGUI_VS_SPIRV}")
-string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," RESHADE_IMGUI_PS_SPIRV "${RESHADE_IMGUI_PS_SPIRV}")
+# Embed the data resources listed in 'res/resource.rc' without relying on Win32 resources.
+set(RESHADE_LINUX_DATA_RESOURCES
+  IDR_IMGUI_VS_SPIRV res/shaders/imgui_vs_450.spv
+  IDR_IMGUI_PS_SPIRV res/shaders/imgui_ps_450.spv
+  IDR_LICENSE_RESHADE LICENSE.md
+  IDR_LICENSE_IMGUI deps/imgui/LICENSE.txt
+  IDR_LICENSE_GLAD deps/glad/LICENSE
+  IDR_LICENSE_UTFCPP deps/utfcpp/LICENSE
+  IDR_LICENSE_STB deps/stb/LICENSE
+  IDR_LICENSE_SPIRV deps/spirv/LICENSE
+  IDR_LICENSE_VMA deps/vma/LICENSE.txt
+  IDR_LICENSE_S_JXL deps/jxl_simple_lossless/LICENSE
+)
+set(RESHADE_LINUX_DATA_RESOURCE_ARRAYS "")
+set(RESHADE_LINUX_DATA_RESOURCE_TABLE "")
+while(RESHADE_LINUX_DATA_RESOURCES)
+  list(POP_FRONT RESHADE_LINUX_DATA_RESOURCES resource_id resource_file)
+  set(resource_file "${CMAKE_CURRENT_SOURCE_DIR}/${resource_file}")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${resource_file}")
+  file(READ "${resource_file}" resource_data HEX)
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," resource_data "${resource_data}")
+  string(APPEND RESHADE_LINUX_DATA_RESOURCE_ARRAYS "alignas(uint32_t) inline constexpr unsigned char ${resource_id}_DATA[] = { ${resource_data} };\n")
+  string(APPEND RESHADE_LINUX_DATA_RESOURCE_TABLE "\t{ ${resource_id}, ${resource_id}_DATA, sizeof(${resource_id}_DATA) },\n")
+endwhile()
 configure_file(source/linux/resources_linux.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/resources_linux.hpp @ONLY)
 
 function(reshade_configure_linux_target target)
