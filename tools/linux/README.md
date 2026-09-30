@@ -35,7 +35,31 @@ RESHADE_ENABLE=1 PROTON_ENABLE_WAYLAND=1 %command%
 
 In this mode Wine receives input on a Wayland connection of its own, so the overlay works but ReShade cannot block input from reaching the game. Use the default Proton setup (without `PROTON_ENABLE_WAYLAND`) if you need input blocking.
 
-Configurations are created under `${XDG_CONFIG_HOME:-~/.config}/reshade`; logs and add-ons live below `${XDG_DATA_HOME:-~/.local/share}/reshade`.
+## Per-game configuration
+
+The first launch of a game creates `${XDG_DATA_HOME:-~/.local/share}/reshade/configurations/{profile}/ReShade.ini` with default settings. The game's preset is stored next to it, but the overlay can point any game at a shared preset file instead. Logs are written to `${XDG_DATA_HOME:-~/.local/share}/reshade/logs/{profile}/`. As on Windows, a `ReShade.ini` next to a native executable is used in place instead. As on Windows, the file name is not case-sensitive: a `reshade.ini` in either place is renamed to `ReShade.ini` and used.
+
+Without `RESHADE_PROFILE`, a profile name is derived automatically in this order, and the log records the result as `Resolved ... identity '{profile}'`:
+
+1. Steam games: install directory name and app ID, such as `Age_of_Mythology_Retold-1934680`. Wine helper processes and the Proton launcher share the game's configuration and write their own `ReShade-{process}.log` next to the game log.
+2. Other Wine games: install directory or Windows executable name, and the prefix name, such as `Game-My_Prefix`.
+3. Native applications: the application name reported to Vulkan, or the executable name, with the Steam app ID when available. Emulators append the game file passed on the command line, such as `RPCS3-inFamous`. An emulator started without a game argument uses one configuration for the emulator, even for games booted from its game list afterwards.
+
+### Choosing a profile with `RESHADE_PROFILE`
+
+Set `RESHADE_PROFILE` to pick the configuration explicitly, for example when two native applications report the same name, when a launcher hides the game, or to keep several setups for one game:
+
+```sh
+RESHADE_ENABLE=1 RESHADE_PROFILE="Elden Ring" %command%
+```
+
+For emulators, either launch the game directly (for example `rpcs3 --no-gui /path/to/EBOOT.BIN`, or a Steam shortcut doing so) or set the profile when opening the game list:
+
+```sh
+RESHADE_ENABLE=1 RESHADE_PROFILE=inFamous rpcs3
+```
+
+The profile is used as the directory name, with punctuation other than `-` and `_` replaced by `_`, so `RESHADE_PROFILE="Elden Ring"` uses `configurations/Elden_Ring/`. Launches with the same name share one configuration and preset.
 
 ## Shaders and add-ons
 

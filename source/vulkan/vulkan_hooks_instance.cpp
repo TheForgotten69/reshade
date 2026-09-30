@@ -70,7 +70,7 @@ struct VkLayerInstanceCreateInfo
 VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkInstance *pInstance)
 {
 #if defined(__linux__)
-	if (!reshade::process::initialize())
+	if (!reshade::process::initialize(pCreateInfo != nullptr && pCreateInfo->pApplicationInfo != nullptr ? pCreateInfo->pApplicationInfo->pApplicationName : nullptr))
 		return VK_ERROR_INITIALIZATION_FAILED;
 #endif
 
