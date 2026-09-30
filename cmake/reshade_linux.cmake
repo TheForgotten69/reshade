@@ -63,6 +63,9 @@ endfunction()
 reshade_wayland_protocol(RESHADE_WAYLAND_RELATIVE_POINTER "${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml")
 reshade_wayland_protocol(RESHADE_WAYLAND_FRACTIONAL_SCALE "${WAYLAND_PROTOCOLS_DIR}/staging/fractional-scale/fractional-scale-v1.xml")
 reshade_wayland_protocol(RESHADE_WAYLAND_VIEWPORTER "${WAYLAND_PROTOCOLS_DIR}/stable/viewporter/viewporter.xml")
+reshade_wayland_protocol(RESHADE_WAYLAND_CURSOR_SHAPE "${WAYLAND_PROTOCOLS_DIR}/staging/cursor-shape/cursor-shape-v1.xml")
+# Only needed because the cursor shape protocol references its tablet tool interface
+reshade_wayland_protocol(RESHADE_WAYLAND_TABLET "${WAYLAND_PROTOCOLS_DIR}/unstable/tablet/tablet-unstable-v2.xml")
 
 set(RESHADE_LINUX_INPUT_SOURCES
   source/input.cpp
@@ -79,6 +82,8 @@ set(RESHADE_LINUX_INPUT_SOURCES
   ${RESHADE_WAYLAND_RELATIVE_POINTER}
   ${RESHADE_WAYLAND_FRACTIONAL_SCALE}
   ${RESHADE_WAYLAND_VIEWPORTER}
+  ${RESHADE_WAYLAND_CURSOR_SHAPE}
+  ${RESHADE_WAYLAND_TABLET}
 )
 set(RESHADE_LINUX_INPUT_LIBRARIES PkgConfig::WAYLAND_CLIENT PkgConfig::XKBCOMMON PkgConfig::XCB PkgConfig::XCB_XINPUT PkgConfig::XCB_XFIXES PkgConfig::XCB_SHAPE)
 

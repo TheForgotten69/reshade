@@ -4,8 +4,10 @@
 #include "window_registry.hpp"
 #include "wine_input_bridge.hpp"
 #include "relative-pointer-unstable-v1-client-protocol.h"
+#include "cursor-shape-v1-client-protocol.h"
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -18,6 +20,13 @@ namespace
 	}
 
 	auto self(void *data) { return static_cast<reshade::wayland_input *>(data); }
+
+	void destroy_cursor_shape_device(wp_cursor_shape_device_v1 *&device)
+	{
+		if (device != nullptr)
+			wp_cursor_shape_device_v1_destroy(device);
+		device = nullptr;
+	}
 
 	// Only a release request makes the compositor stop sending events to these objects.
 	void release_pointer_proxy(wl_pointer *pointer)
@@ -94,6 +103,9 @@ reshade::wayland_input::~wayland_input()
 		zwp_relative_pointer_v1_destroy(_relative_pointer);
 	if (_relative_pointer_manager != nullptr)
 		zwp_relative_pointer_manager_v1_destroy(_relative_pointer_manager);
+	destroy_cursor_shape_device(_cursor_shape_device);
+	if (_cursor_shape_manager != nullptr)
+		wp_cursor_shape_manager_v1_destroy(_cursor_shape_manager);
 	release_pointer_proxy(_pointer_device);
 	release_keyboard_proxy(_keyboard);
 	if (_seat != nullptr)
@@ -151,8 +163,8 @@ bool reshade::wayland_input::initialize()
 	update_pointer_scale();
 	publish_pointer();
 
-	log::message(log::level::info, "Wayland input: wl_display=%p vulkan_surface=%p keyboard=%s pointer=%s xkb_state=%s relative_pointer=%s.",
-		_display, _surface, _keyboard != nullptr ? "yes" : "no", _pointer_device != nullptr ? "yes" : "no", _xkb_state != nullptr ? "yes" : "no", _relative_pointer != nullptr ? "yes" : "no");
+	log::message(log::level::info, "Wayland input: wl_display=%p vulkan_surface=%p keyboard=%s pointer=%s xkb_state=%s relative_pointer=%s cursor_shape=%s.",
+		_display, _surface, _keyboard != nullptr ? "yes" : "no", _pointer_device != nullptr ? "yes" : "no", _xkb_state != nullptr ? "yes" : "no", _relative_pointer != nullptr ? "yes" : "no", _cursor_shape_device != nullptr ? "yes" : "no");
 	return true;
 }
 
@@ -188,12 +200,28 @@ void reshade::wayland_input::on_global(wl_registry *registry, uint32_t name, con
 	{
 		_relative_pointer_manager = static_cast<zwp_relative_pointer_manager_v1 *>(wl_registry_bind(registry, name, &zwp_relative_pointer_manager_v1_interface, 1));
 		set_queue(_relative_pointer_manager, _queue);
-		bind_relative_pointer();
+		bind_pointer_objects();
+	}
+	else if (std::strcmp(interface, wp_cursor_shape_manager_v1_interface.name) == 0 && _cursor_shape_manager == nullptr)
+	{
+		// Version 1 is enough for all shapes 'wayland_cursor_shape' maps to
+		_cursor_shape_manager = static_cast<wp_cursor_shape_manager_v1 *>(wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, 1));
+		_cursor_shape_manager_name = name;
+		set_queue(_cursor_shape_manager, _queue);
+		bind_pointer_objects();
 	}
 }
 
 void reshade::wayland_input::on_global_remove(uint32_t name)
 {
+	if (name != 0 && name == _cursor_shape_manager_name)
+	{
+		destroy_cursor_shape_device(_cursor_shape_device);
+		wp_cursor_shape_manager_v1_destroy(_cursor_shape_manager);
+		_cursor_shape_manager = nullptr;
+		_cursor_shape_manager_name = 0;
+		return;
+	}
 	if (name != _seat_name || _seat == nullptr)
 		return;
 
@@ -224,7 +252,7 @@ void reshade::wayland_input::on_seat_capabilities(uint32_t capabilities)
 		_pointer_device = wl_seat_get_pointer(_seat);
 		set_queue(_pointer_device, _queue);
 		wl_pointer_add_listener(_pointer_device, &pointer_listener, this);
-		bind_relative_pointer();
+		bind_pointer_objects();
 	}
 	else if (!has_pointer)
 	{
@@ -301,12 +329,13 @@ void reshade::wayland_input::on_modifiers(uint32_t depressed, uint32_t latched, 
 void reshade::wayland_input::on_pointer_enter(uint32_t serial, wl_surface *surface, double x, double y)
 {
 	release_pointer();
-	// The capture layer covers the host surface at the same origin, and hides the host's cursor.
-	if (surface != nullptr && surface == _overlay.surface())
+	// The capture layer covers the host surface at the same origin, and replaces the host's cursor.
+	_pointer_on_overlay = surface != nullptr && surface == _overlay.surface();
+	if (_pointer_on_overlay)
 	{
 		_pointer_focused = true;
-		if (_pointer_device != nullptr)
-			wl_pointer_set_cursor(_pointer_device, serial, nullptr, 0, 0);
+		_overlay_enter_serial = serial;
+		apply_overlay_cursor();
 	}
 	else
 	{
@@ -321,6 +350,7 @@ void reshade::wayland_input::on_pointer_enter(uint32_t serial, wl_surface *surfa
 
 void reshade::wayland_input::on_pointer_leave()
 {
+	_pointer_on_overlay = false;
 	release_pointer();
 	_pointer.leave();
 	_pointer_focused = false;
@@ -364,6 +394,28 @@ void reshade::wayland_input::on_relative_motion(double dx, double dy, uint64_t t
 {
 	if (_pointer_focused)
 		_pointer.relative_motion(dx, dy, time);
+}
+
+void reshade::wayland_input::set_overlay_cursor(int cursor)
+{
+	if (cursor == _overlay_cursor)
+		return;
+
+	_overlay_cursor = cursor;
+	apply_overlay_cursor();
+	wl_display_flush(_display);
+}
+
+void reshade::wayland_input::apply_overlay_cursor()
+{
+	if (!_pointer_on_overlay || _pointer_device == nullptr)
+		return;
+
+	// Without cursor shapes the overlay draws the cursor itself (see 'needs_overlay_cursor')
+	if (const uint32_t shape = wayland_cursor_shape(_overlay_cursor); shape != 0 && _cursor_shape_device != nullptr)
+		wp_cursor_shape_device_v1_set_shape(_cursor_shape_device, _overlay_enter_serial, shape);
+	else
+		wl_pointer_set_cursor(_pointer_device, _overlay_enter_serial, nullptr, 0, 0);
 }
 
 void reshade::wayland_input::on_overlay_active_changed()
@@ -452,14 +504,22 @@ void reshade::wayland_input::sync_modifiers()
 	set_modifiers(is_active(XKB_MOD_NAME_CTRL), is_active(XKB_MOD_NAME_SHIFT), is_active(XKB_MOD_NAME_ALT));
 }
 
-void reshade::wayland_input::bind_relative_pointer()
+void reshade::wayland_input::bind_pointer_objects()
 {
-	if (_relative_pointer_manager == nullptr || _pointer_device == nullptr || _relative_pointer != nullptr)
+	if (_pointer_device == nullptr)
 		return;
 
-	_relative_pointer = zwp_relative_pointer_manager_v1_get_relative_pointer(_relative_pointer_manager, _pointer_device);
-	set_queue(_relative_pointer, _queue);
-	zwp_relative_pointer_v1_add_listener(_relative_pointer, &relative_pointer_listener, this);
+	if (_relative_pointer_manager != nullptr && _relative_pointer == nullptr)
+	{
+		_relative_pointer = zwp_relative_pointer_manager_v1_get_relative_pointer(_relative_pointer_manager, _pointer_device);
+		set_queue(_relative_pointer, _queue);
+		zwp_relative_pointer_v1_add_listener(_relative_pointer, &relative_pointer_listener, this);
+	}
+	if (_cursor_shape_manager != nullptr && _cursor_shape_device == nullptr)
+	{
+		_cursor_shape_device = wp_cursor_shape_manager_v1_get_pointer(_cursor_shape_manager, _pointer_device);
+		set_queue(_cursor_shape_device, _queue);
+	}
 }
 
 void reshade::wayland_input::release_keyboard_device()
@@ -481,6 +541,26 @@ void reshade::wayland_input::release_pointer_device()
 	if (_relative_pointer != nullptr)
 		zwp_relative_pointer_v1_destroy(_relative_pointer);
 	_relative_pointer = nullptr;
+	destroy_cursor_shape_device(_cursor_shape_device);
 	release_pointer_proxy(_pointer_device);
 	_pointer_device = nullptr;
+}
+
+uint32_t reshade::wayland_cursor_shape(int cursor)
+{
+	// Indexed by 'ImGuiMouseCursor'
+	constexpr uint32_t shapes[] = {
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_MOVE,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_PROGRESS,
+		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED,
+	};
+	return cursor >= 0 && static_cast<size_t>(cursor) < std::size(shapes) ? shapes[cursor] : 0;
 }

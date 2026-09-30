@@ -202,6 +202,8 @@ namespace reshade
 		bool is_mouse_position_valid() const;
 		// Whether the overlay has to draw a cursor, because the application's one is hidden where the pointer is.
 		bool needs_overlay_cursor() const;
+		// Cursor the compositor shows over the pointer capture areas, as 'ImGuiMouseCursor' (-1 for none).
+		void set_overlay_cursor(int cursor);
 
 		// Linux cannot filter the application's events like 'block_mouse_input' does on Windows. Instead the
 		// backend covers these areas (relative to the window size) with a layer that takes pointer input.

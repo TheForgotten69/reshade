@@ -150,6 +150,12 @@ bool reshade::input::needs_overlay_cursor() const
 	return _backend != nullptr && _backend->needs_overlay_cursor();
 }
 
+void reshade::input::set_overlay_cursor(int cursor)
+{
+	if (_backend != nullptr)
+		_backend->set_overlay_cursor(cursor);
+}
+
 void reshade::input::block_mouse_cursor_warping(bool enable)
 {
 	_block_cursor_warping = enable;

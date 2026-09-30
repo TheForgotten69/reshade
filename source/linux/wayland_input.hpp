@@ -10,9 +10,14 @@
 
 struct zwp_relative_pointer_manager_v1;
 struct zwp_relative_pointer_v1;
+struct wp_cursor_shape_manager_v1;
+struct wp_cursor_shape_device_v1;
 
 namespace reshade
 {
+	// Maps an 'ImGuiMouseCursor' to a shape of version 1 of the cursor shape protocol, or 0 if there is none.
+	uint32_t wayland_cursor_shape(int cursor);
+
 	// Input for one Vulkan surface on a Wayland connection owned by the host application. ReShade
 	// binds its own seat devices on a private event queue of that connection.
 	class wayland_input final : public input_backend
@@ -26,6 +31,7 @@ namespace reshade
 		const char *name() const override { return "Wayland"; }
 		std::string clipboard_text() override { return _clipboard != nullptr ? _clipboard->text() : std::string(); }
 		void set_clipboard_text(const char *text) override { if (_clipboard != nullptr) _clipboard->set_text(text, _last_serial); }
+		void set_overlay_cursor(int cursor) override;
 
 		// Protocol event handlers, called by the listeners and by unit tests.
 		void on_global(wl_registry *registry, uint32_t name, const char *interface, uint32_t version);
@@ -49,6 +55,8 @@ namespace reshade
 		void on_overlay_active_changed() override;
 		bool is_host_cursor_hidden() const override { return _pointer.current_mode() == wayland_pointer::mode::software_relative; }
 		bool is_capture_layer_shown() const override { return _capturing; }
+		bool has_cursor_shapes() const override { return _cursor_shape_device != nullptr; }
+		void apply_overlay_cursor();
 		void update_pointer_scale();
 		void update_capture();
 		void publish_pointer();
@@ -58,7 +66,7 @@ namespace reshade
 		// focus, so a foreign keyboard focus counts while the pointer is over this surface.
 		void refresh_keyboard_focus();
 		void sync_modifiers();
-		void bind_relative_pointer();
+		void bind_pointer_objects();
 		void release_keyboard_device();
 		void release_pointer_device();
 
@@ -74,6 +82,13 @@ namespace reshade
 		wl_pointer *_pointer_device = nullptr;
 		zwp_relative_pointer_manager_v1 *_relative_pointer_manager = nullptr;
 		zwp_relative_pointer_v1 *_relative_pointer = nullptr;
+		wp_cursor_shape_manager_v1 *_cursor_shape_manager = nullptr;
+		uint32_t _cursor_shape_manager_name = 0;
+		wp_cursor_shape_device_v1 *_cursor_shape_device = nullptr;
+		// Serial of the pointer entering the capture layer, which Wayland requires to change the cursor.
+		uint32_t _overlay_enter_serial = 0;
+		bool _pointer_on_overlay = false;
+		int _overlay_cursor = 0;
 		// Latest key or button serial, which Wayland requires to set the clipboard selection.
 		uint32_t _last_serial = 0;
 

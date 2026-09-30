@@ -23,8 +23,11 @@ namespace reshade
 		// Consumes the events received since the previous frame.
 		virtual void next_frame() = 0;
 		virtual const char *name() const = 0;
-		// Over a capture layer the host's cursor is hidden, elsewhere the overlay draws a cursor only while the host shows none.
-		bool needs_overlay_cursor() const { return is_pointer_in_capture() || is_host_cursor_hidden(); }
+		// Over a capture layer the host's cursor is hidden, so the overlay draws one unless the compositor can draw it.
+		// Elsewhere the overlay draws a cursor only while the host shows none.
+		bool needs_overlay_cursor() const { return (is_pointer_in_capture() && !has_cursor_shapes()) || is_host_cursor_hidden(); }
+		// Cursor the compositor shows over a capture layer, as 'ImGuiMouseCursor' (-1 for none).
+		virtual void set_overlay_cursor(int) {}
 		virtual std::string clipboard_text() { return {}; }
 		virtual void set_clipboard_text(const char *) {}
 
@@ -51,6 +54,8 @@ namespace reshade
 
 		virtual void on_overlay_active_changed() {}
 		virtual bool is_host_cursor_hidden() const = 0;
+		// Whether the compositor can draw the cursor over a capture layer (see 'set_overlay_cursor').
+		virtual bool has_cursor_shapes() const { return false; }
 		// Whether the layer implementing 'pointer_capture' is shown, which it cannot always be.
 		virtual bool is_capture_layer_shown() const = 0;
 		bool overlay_active() const { return _overlay_active; }

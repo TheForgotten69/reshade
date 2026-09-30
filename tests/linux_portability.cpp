@@ -3,6 +3,7 @@
 #include "../source/dll_log.hpp"
 #include "../source/linux/wayland_input.hpp"
 #include "../source/linux/x11_input.hpp"
+#include "cursor-shape-v1-client-protocol.h"
 #include "../source/linux/game_identity.hpp"
 #include "../source/linux/window_registry.hpp"
 #include "../source/linux/key_translation.hpp"
@@ -67,10 +68,13 @@ struct reshade::input_test_access
 		return target.contains_window(window);
 	}
 	static void release_pointer(x11_input &target) { target.release_pointer(); }
-	static void set_mouse_position(x11_input &target, unsigned int x, unsigned int y) { target.set_mouse_position(x, y); }
+	template <typename backend>
+	static void set_mouse_position(backend &target, unsigned int x, unsigned int y) { target.set_mouse_position(x, y); }
 	static void set_host_cursor_visible(x11_input &target, bool visible) { target._host_cursor_visible = visible; }
 	static void set_capture_mapped(x11_input &target, bool mapped) { target._capture_mapped = mapped; }
 	static void release_keyboard(x11_input &target) { target.release_keyboard(); }
+	static void set_capturing(wayland_input &target, bool capturing) { target._capturing = capturing; }
+	static void set_cursor_shape_device(wayland_input &target, wp_cursor_shape_device_v1 *device) { target._cursor_shape_device = device; }
 };
 
 static wl_surface *const test_surface = reinterpret_cast<wl_surface *>(uintptr_t(0x100));
@@ -557,6 +561,29 @@ static void test_pointer_capture_cursor()
 	assert(!backend.needs_overlay_cursor());
 }
 
+// With cursor shapes the compositor draws the cursor over the capture layer at display rate, so the overlay draws none.
+static void test_wayland_capture_cursor()
+{
+	assert(wayland_cursor_shape(0) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
+	assert(wayland_cursor_shape(1) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT);
+	assert(wayland_cursor_shape(6) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE);
+	assert(wayland_cursor_shape(10) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED);
+	assert(wayland_cursor_shape(-1) == 0 && wayland_cursor_shape(11) == 0);
+
+	input owner(nullptr);
+	wayland_input backend(owner, nullptr, test_surface);
+	backend.set_extent(200, 100);
+	input_test_access::set_focus(backend, true, true);
+	input_test_access::set_mouse_position(backend, 150, 50);
+	owner.set_pointer_capture({ { 0.5f, 0.0f, 0.5f, 1.0f } });
+	input_test_access::set_capturing(backend, true);
+	assert(backend.needs_overlay_cursor());
+
+	input_test_access::set_cursor_shape_device(backend, reinterpret_cast<wp_cursor_shape_device_v1 *>(uintptr_t(0x200)));
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_cursor_shape_device(backend, nullptr);
+}
+
 // Overlay windows may extend beyond the window, or be degenerate.
 static void test_capture_pixel_rects()
 {
@@ -819,6 +846,7 @@ int main()
 	test_x11_keyboard_focus_selection();
 	test_x11_key_and_button_taps();
 	test_pointer_capture_cursor();
+	test_wayland_capture_cursor();
 	test_capture_pixel_rects();
 	test_input_lifetime_follows_native_surface();
 	test_primary_input_handler_claim_transfers();

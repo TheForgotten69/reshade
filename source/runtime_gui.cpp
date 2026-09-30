@@ -1605,6 +1605,8 @@ void reshade::runtime::draw_gui()
 				if (window->Active && !window->Hidden && (window->Flags & ImGuiWindowFlags_NoMouseInputs) == 0)
 					capture.push_back({ window->Pos.x / imgui_io.DisplaySize.x, window->Pos.y / imgui_io.DisplaySize.y, window->Size.x / imgui_io.DisplaySize.x, window->Size.y / imgui_io.DisplaySize.y });
 		_input->set_pointer_capture(std::move(capture));
+		static_assert(ImGuiMouseCursor_COUNT == 11, "Update 'wayland_cursor_shape' for the new cursors");
+		_input->set_overlay_cursor(imgui_io.MouseDrawCursor ? ImGuiMouseCursor_None : ImGui::GetMouseCursor());
 #endif
 	}
 
