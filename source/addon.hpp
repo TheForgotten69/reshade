@@ -28,6 +28,8 @@ namespace reshade
 		std::string author;
 		std::string website_url;
 		std::string issues_url;
+		/// Human-readable reason why this add-on could not be loaded.
+		std::string error;
 		union version
 		{
 			struct number

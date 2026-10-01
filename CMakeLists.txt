@@ -245,6 +245,12 @@ set(RESHADE_SOURCE_WINDOWS
   source/windows/ws2_32.cpp
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  include(cmake/reshade_linux.cmake)
+elseif(NOT WIN32)
+  message(FATAL_ERROR "ReShade currently supports only Windows and Linux")
+endif()
+
 target_sources(
   ReShade
   PUBLIC
@@ -260,35 +266,40 @@ target_sources(
       include/reshade_api_resource.hpp
       include/reshade_events.hpp
       include/reshade_overlay.hpp
-  PRIVATE
-    ${RESHADE_SOURCE}
-    ${RESHADE_SOURCE_OPENGL}
-    ${RESHADE_SOURCE_VULKAN}
-    ${RESHADE_SOURCE_DIRECTX}
-    ${RESHADE_SOURCE_VR}
-    ${RESHADE_SOURCE_WINDOWS}
 )
 if(WIN32)
   target_sources(
     ReShade
     PRIVATE
+      ${RESHADE_SOURCE}
+      ${RESHADE_SOURCE_OPENGL}
+      ${RESHADE_SOURCE_VULKAN}
+      ${RESHADE_SOURCE_DIRECTX}
+      ${RESHADE_SOURCE_VR}
+      ${RESHADE_SOURCE_WINDOWS}
       source/input_windows.cpp
       source/input_windows_xinput.cpp
       source/platform_utils_windows.cpp
   )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  reshade_configure_linux_target(ReShade)
 endif()
 
-set_source_files_properties(source/input_windows_xinput.cpp PROPERTIES COMPILE_DEFINITIONS "$<IF:$<EQUAL:${CMAKE_SIZEOF_VOID_P},8>,_AMD64_,_X86_>;_WIN32_WINNT=_WIN32_WINNT_WIN7")
+if(WIN32)
+  set_source_files_properties(source/input_windows_xinput.cpp PROPERTIES COMPILE_DEFINITIONS "$<IF:$<EQUAL:${CMAKE_SIZEOF_VOID_P},8>,_AMD64_,_X86_>;_WIN32_WINNT=_WIN32_WINNT_WIN7")
+endif()
 set_source_files_properties(source/vulkan/vulkan_impl_device.cpp PROPERTIES COMPILE_DEFINITIONS VMA_IMPLEMENTATION)
 
-set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
-set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
-if(MSVC)
-  set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_FLAGS /FIreshade.hpp)
-  set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_FLAGS /FIreshade.hpp)
-else()
-  set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
-  set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
+if(WIN32)
+  set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
+  set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_DEFINITIONS BUILTIN_ADDON)
+  if(MSVC)
+    set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_FLAGS /FIreshade.hpp)
+    set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_FLAGS /FIreshade.hpp)
+  else()
+    set_source_files_properties(examples/09-depth/generic_depth_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
+    set_source_files_properties(examples/15-effect_runtime_sync/runtime_sync_addon.cpp PROPERTIES COMPILE_FLAGS "-include reshade.hpp")
+  endif()
 endif()
 
 target_include_directories(
@@ -298,21 +309,23 @@ target_include_directories(
     source
 )
 
-target_compile_definitions(
-  ReShade
-  PRIVATE
-    RESHADE_GUI
-    RESHADE_API_LIBRARY_EXPORT
-    RESHADE_ADDON=2
-    $<$<CXX_COMPILER_ID:MSVC>:RESHADE_LOCALIZATION>
-    $<$<CONFIG:Debug>:RESHADE_VERBOSE_LOG>
-    _GDI32_
-    WINSOCK_API_LINKAGE=
-    _UNICODE
-    _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
-    $<$<CONFIG:Debug>:_DEBUG>
-    $<$<CONFIG:Release>:NDEBUG>
-)
+if(WIN32)
+  target_compile_definitions(
+    ReShade
+    PRIVATE
+      RESHADE_GUI
+      RESHADE_API_LIBRARY_EXPORT
+      RESHADE_ADDON=2
+      $<$<CXX_COMPILER_ID:MSVC>:RESHADE_LOCALIZATION>
+      $<$<CONFIG:Debug>:RESHADE_VERBOSE_LOG>
+      _GDI32_
+      WINSOCK_API_LINKAGE=
+      _UNICODE
+      _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
+      $<$<CONFIG:Debug>:_DEBUG>
+      $<$<CONFIG:Release>:NDEBUG>
+  )
+endif()
 
 if(MSVC)
   target_compile_options(
@@ -335,13 +348,18 @@ else()
     ReShade
     PRIVATE
       -DSTDMETHODCALLTYPE=
-      -Wno-changes-meaning
+      $<$<COMPILE_LANGUAGE:CXX>:-Wno-changes-meaning>
       -fPIC
-      $<$<CONFIG:Release>:-fno-rtti>
+      $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-fno-rtti>
   )
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    target_compile_options(ReShade PRIVATE -msse4.1 -mf16c)
+  endif()
 endif()
 
-target_link_libraries(ReShade PRIVATE ReShadeFX D3D12On7 fpng glad ImGui jxl MinHook OpenVR OpenXR stb utfcpp VMA Windows)
+if(WIN32)
+  target_link_libraries(ReShade PRIVATE ReShadeFX D3D12On7 fpng glad ImGui jxl MinHook OpenVR OpenXR stb utfcpp VMA Windows)
+endif()
 
 # ReShade FX
 

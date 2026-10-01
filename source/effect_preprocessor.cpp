@@ -5,16 +5,29 @@
 
 #include "effect_lexer.hpp"
 #include "effect_preprocessor.hpp"
+#include "platform_utils.hpp"
 #include <limits>
 #include <cstdio> // fclose, fopen, fread, fseek
 #include <cassert>
 #include <algorithm> // std::find_if
 
-#ifndef _WIN32
+#if defined(__linux__)
 	// On Linux systems the native path encoding is UTF-8 already, so no conversion necessary
 	#define u8path(p) path(p)
 	#define u8string() string()
 #endif
+
+namespace
+{
+	std::filesystem::path path_from_effect_literal(std::string literal)
+	{
+#if defined(__linux__)
+		// Effect files commonly use Windows-style separators in include and exists directives.
+			std::replace(literal.begin(), literal.end(), '\\', '/');
+#endif
+		return std::filesystem::u8path(literal);
+	}
+}
 
 enum op_type
 {
@@ -65,11 +78,7 @@ static const int s_precedence_lookup[] = {
 static bool read_file(const std::filesystem::path &path, std::string &file_data)
 {
 	// Read file contents into memory
-#ifndef _WIN32
-	FILE *const file = fopen(path.c_str(), "rb");
-#else
-	FILE *const file = _wfsopen(path.c_str(), L"rb", SH_DENYWR);
-#endif
+	FILE *const file = reshade::utils::open_file(path, "rb", reshade::utils::file_share_mode::read_only);
 	if (file == nullptr)
 		return false;
 
@@ -729,7 +738,7 @@ void reshadefx::preprocessor::parse_include()
 		return;
 	}
 
-	std::filesystem::path file_name = std::filesystem::u8path(_token.literal_as_string);
+	std::filesystem::path file_name = path_from_effect_literal(_token.literal_as_string);
 	std::filesystem::path file_path = std::filesystem::u8path(_output_location.source);
 	file_path.replace_filename(file_name);
 
@@ -926,7 +935,7 @@ bool reshadefx::preprocessor::evaluate_expression()
 				if (!expect(tokenid::string_literal))
 					return false;
 
-				std::filesystem::path file_name = std::filesystem::u8path(_token.literal_as_string);
+				std::filesystem::path file_name = path_from_effect_literal(_token.literal_as_string);
 				std::filesystem::path file_path = std::filesystem::u8path(_output_location.source);
 				file_path.replace_filename(file_name);
 

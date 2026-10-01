@@ -9,11 +9,11 @@
 
 #define vk _device->_dispatch_table
 
-reshade::vulkan::swapchain_impl::swapchain_impl(device_impl *device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR &create_info, HWND hwnd) :
+reshade::vulkan::swapchain_impl::swapchain_impl(device_impl *device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR &create_info, void *native_window) :
 	api_object_impl(swapchain),
 	_device(device),
 	_create_info(create_info),
-	_hwnd(hwnd)
+	_hwnd(native_window)
 {
 	_create_info.pNext = nullptr;
 

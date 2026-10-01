@@ -38,7 +38,13 @@ const imgui_function_table_18971 g_imgui_function_table_18971 = init_imgui_funct
 const imgui_function_table_18600 g_imgui_function_table_18600 = init_imgui_function_table_18600();
 #endif
 
-extern "C" __declspec(dllexport) const void *ReShadeGetImGuiFunctionTable(uint32_t version)
+#if defined(_WIN32)
+#define RESHADE_IMGUI_API __declspec(dllexport)
+#elif defined(__linux__)
+#define RESHADE_IMGUI_API __attribute__((visibility("default")))
+#endif
+
+extern "C" RESHADE_IMGUI_API const void *ReShadeGetImGuiFunctionTable(uint32_t version)
 {
 	if (version == 19250)
 		return &g_imgui_function_table_19250;
@@ -62,5 +68,7 @@ extern "C" __declspec(dllexport) const void *ReShadeGetImGuiFunctionTable(uint32
 	reshade::log::message(reshade::log::level::error, "Failed to retrieve ImGui function table, because the requested ImGui version (%u) is not supported.", version);
 	return nullptr;
 }
+
+#undef RESHADE_IMGUI_API
 
 #endif

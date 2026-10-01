@@ -1,0 +1,81 @@
+name: linux
+
+on:
+  push:
+    branches:
+      - linux-vulkan
+    tags:
+      - 'v*-beta.*'
+  pull_request:
+    branches:
+      - linux-vulkan
+
+permissions: {}
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+
+      - name: Fetch upstream release tags
+        run: |
+          git fetch --no-tags https://github.com/crosire/reshade 'refs/tags/v*:refs/tags/v*'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config python3-jinja2 \
+            libwayland-dev wayland-protocols libxkbcommon-dev libfontconfig-dev \
+            libx11-dev libxcb1-dev libxcb-xinput-dev libxcb-xfixes0-dev libxcb-shape0-dev libxcb-cursor-dev
+
+      - name: Determine archive name
+        id: version
+        run: |
+          echo "name=reshade-linux-vulkan-$(git describe --tags --match 'v[0-9]*')-x86_64" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DRESHADE_BUILD_LINUX_TESTS=ON -DRESHADE_BUILD_LINUX_ADDON_EXAMPLES=ON
+          cmake --build build
+
+      - name: Test
+        run: |
+          ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          git clone --depth 1 --branch slim https://github.com/crosire/reshade-shaders "$RUNNER_TEMP/reshade-shaders"
+          cmake --install build --prefix "$RUNNER_TEMP/stage"
+          tools/linux/package.sh "$RUNNER_TEMP/stage" "$RUNNER_TEMP/reshade-shaders" "${{ steps.version.outputs.name }}" dist
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.version.outputs.name }}
+          path: dist/*.tar.xz
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The release notes are the message of the annotated tag
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          git for-each-ref --format='%(contents)' "refs/tags/$TAG" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" dist/*.tar.xz --verify-tag --prerelease --title "ReShade for native Linux $TAG" --notes-file "$RUNNER_TEMP/notes.md"

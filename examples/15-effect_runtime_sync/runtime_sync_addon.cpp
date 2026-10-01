@@ -9,13 +9,32 @@
 #include <shared_mutex>
 #include <vector>
 #include <algorithm> // std::remove
+#if defined(_WIN32)
 #include <Windows.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 using namespace reshade::api;
 
 static std::shared_mutex s_mutex;
 static bool s_sync = false;
 static std::vector<effect_runtime *> s_runtimes;
+
+static bool is_module_loaded(const char *name)
+{
+#if defined(_WIN32)
+	return GetModuleHandleA(name) != nullptr;
+#elif defined(__linux__)
+	void *const module = dlopen(name, RTLD_NOW | RTLD_NOLOAD);
+	if (module == nullptr)
+		return false;
+	dlclose(module);
+	return true;
+#else
+	return false;
+#endif
+}
 
 static void on_init(effect_runtime *runtime)
 {
@@ -25,7 +44,12 @@ static void on_init(effect_runtime *runtime)
 
 	if (!reshade::get_config_value(nullptr, "ADDON", "SyncEffectRuntimes", s_sync))
 		// Enable synchronization by default if application is using VR
-		s_sync = GetModuleHandleW(L"openvr_api.dll") != nullptr || GetModuleHandleW(L"openxr_loader.dll") != nullptr;
+		s_sync = is_module_loaded(
+#if defined(_WIN32)
+			"openvr_api.dll") || is_module_loaded("openxr_loader.dll");
+#else
+			"openvr_api.so") || is_module_loaded("libopenxr_loader.so.1");
+#endif
 }
 static void on_destroy(effect_runtime *runtime)
 {
@@ -255,8 +279,8 @@ void unregister_addon_effect_runtime_sync()
 
 #ifndef BUILTIN_ADDON
 
-extern "C" __declspec(dllexport) const char *NAME = "Effect Runtime Sync";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Adds preset synchronization between different effect runtime instances, e.g. to have changes in a desktop window reflect in VR.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Effect Runtime Sync";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Adds preset synchronization between different effect runtime instances, e.g. to have changes in a desktop window reflect in VR.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

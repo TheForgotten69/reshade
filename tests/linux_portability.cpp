@@ -1,0 +1,905 @@
+// Exercises the production Linux input objects linked from the ReShade sources (see CMake), without
+// a compositor, an X server or a Vulkan device.
+#include "../source/dll_log.hpp"
+#include "../source/linux/wayland_input.hpp"
+#include "../source/linux/x11_input.hpp"
+#include "cursor-shape-v1-client-protocol.h"
+#include "../source/linux/game_identity.hpp"
+#include "../source/linux/window_registry.hpp"
+#include "../source/linux/key_translation.hpp"
+#include "../source/linux/clipboard.hpp"
+#include "../source/linux/paths.hpp"
+#include "../source/linux/addon_paths.hpp"
+#include "../examples/09-depth/generic_depth_detection.hpp"
+#include <glad/vulkan.h>
+#include <cassert>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <thread>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <linux/input-event-codes.h>
+
+using namespace reshade;
+
+#if !VK_KHR_wayland_surface || !VK_KHR_xcb_surface || !VK_KHR_xlib_surface
+#error "Linux builds must expose Wayland, XCB and Xlib Vulkan WSI entry points"
+#endif
+
+// Simulated X server window tree, as child -> parent.
+static std::unordered_map<xcb_window_t, xcb_window_t> x11_test_parents;
+extern "C" xcb_query_tree_cookie_t xcb_query_tree(xcb_connection_t *, xcb_window_t window)
+{
+	return { window };
+}
+extern "C" xcb_query_tree_reply_t *xcb_query_tree_reply(xcb_connection_t *, xcb_query_tree_cookie_t cookie, xcb_generic_error_t **)
+{
+	const auto it = x11_test_parents.find(cookie.sequence);
+	if (it == x11_test_parents.end())
+		return nullptr;
+	auto *const reply = static_cast<xcb_query_tree_reply_t *>(std::calloc(1, sizeof(xcb_query_tree_reply_t)));
+	assert(reply != nullptr);
+	reply->parent = it->second;
+	return reply;
+}
+
+void reshade::log::message(level, const char *, ...)
+{
+}
+
+struct reshade::input_test_access
+{
+	template <typename backend>
+	static void set_focus(backend &target, bool keyboard, bool pointer)
+	{
+		target._keyboard_focused = keyboard;
+		target._pointer_focused = pointer;
+	}
+	static void set_key_translation(x11_input &target, xcb_keycode_t keycode, xcb_keysym_t keysym, xcb_keysym_t shifted_keysym = XKB_KEY_NoSymbol)
+	{
+		target._key_translations[keycode] = { keysym, shifted_keysym != XKB_KEY_NoSymbol ? shifted_keysym : keysym };
+	}
+	static void set_compose_table(x11_input &target, xkb_compose_table *table) { target._composer.set_table(table); }
+	static bool contains_window(x11_input &target, xcb_window_t root, xcb_window_t window)
+	{
+		target._root = root;
+		return target.contains_window(window);
+	}
+	static void release_pointer(x11_input &target) { target.release_pointer(); }
+	template <typename backend>
+	static void set_mouse_position(backend &target, unsigned int x, unsigned int y) { target.set_mouse_position(x, y); }
+	static void set_host_cursor_visible(x11_input &target, bool visible) { target._host_cursor_visible = visible; }
+	static void set_capture_mapped(x11_input &target, bool mapped) { target._capture_mapped = mapped; }
+	static void release_keyboard(x11_input &target) { target.release_keyboard(); }
+	static void set_capturing(wayland_input &target, bool capturing) { target._capturing = capturing; }
+	static void set_cursor_context(x11_input &target, xcb_cursor_context_t *context) { target._cursor_context = context; }
+	static void set_wine_wayland(x11_input &target, bool wine_wayland) { target._wine_wayland = wine_wayland; }
+	static void set_cursor_shape_device(wayland_input &target, wp_cursor_shape_device_v1 *device) { target._cursor_shape_device = device; }
+};
+
+static wl_surface *const test_surface = reinterpret_cast<wl_surface *>(uintptr_t(0x100));
+
+static void load_us_keymap(wayland_input &backend)
+{
+	xkb_context *const context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	xkb_rule_names names = {};
+	names.layout = "us";
+	xkb_keymap *const keymap = xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	assert(keymap != nullptr);
+	char *const text = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+	const size_t size = std::strlen(text) + 1;
+	const int fd = memfd_create("keymap", 0);
+	assert(fd >= 0 && write(fd, text, size) == static_cast<ssize_t>(size));
+	backend.on_keymap(WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, static_cast<uint32_t>(size));
+	std::free(text);
+	xkb_keymap_unref(keymap);
+	xkb_context_unref(context);
+}
+
+static void test_clipboard_offer_mime_types()
+{
+	wayland_clipboard::offer_info text;
+	text.add_mime_type("text/plain");
+	text.add_mime_type("text/plain;charset=utf-8");
+	text.add_mime_type("UTF8_STRING");
+	assert(text.has_text && text.mime_type == "text/plain;charset=utf-8");
+
+	wayland_clipboard::offer_info image;
+	image.add_mime_type("image/png");
+	assert(!image.has_text && image.mime_type.empty());
+}
+
+static void test_clipboard_write()
+{
+	// A closed receiver must not kill the process, even with default SIGPIPE behavior.
+	const pid_t child = fork();
+	assert(child >= 0);
+	if (child == 0)
+	{
+		signal(SIGPIPE, SIG_DFL);
+		sigset_t signals;
+		sigemptyset(&signals);
+		sigaddset(&signals, SIGPIPE);
+		pthread_sigmask(SIG_UNBLOCK, &signals, nullptr);
+		int fds[2];
+		assert(pipe(fds) == 0);
+		close(fds[0]);
+		std::thread([fd = fds[1]] { utils::write_clipboard_text(fd, "closed receiver"); }).join();
+		_exit(0);
+	}
+	int status = 0;
+	assert(waitpid(child, &status, 0) == child);
+	assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+	int fds[2];
+	assert(pipe(fds) == 0);
+	const std::string text(256 * 1024, 'x');
+	std::thread writer([fd = fds[1], &text] { utils::write_clipboard_text(fd, text); });
+	std::string received;
+	char buffer[4096];
+	for (ssize_t count; (count = read(fds[0], buffer, sizeof(buffer))) > 0;)
+		received.append(buffer, count);
+	close(fds[0]);
+	writer.join();
+	assert(received == text);
+}
+
+static void test_translation_tables()
+{
+	assert(virtual_key_from_keysym(XKB_KEY_a) == 'A');
+	assert(virtual_key_from_keysym(XKB_KEY_Z) == 'Z');
+	assert(virtual_key_from_keysym(XKB_KEY_5) == '5');
+	assert(virtual_key_from_keysym(XKB_KEY_F5) == input::key_f5);
+	assert(virtual_key_from_keysym(XKB_KEY_Control_L) == input::key_left_ctrl);
+	assert(virtual_key_from_keysym(XKB_KEY_Shift_R) == input::key_right_shift);
+	assert(virtual_key_from_keysym(XKB_KEY_Return) == input::key_return);
+	assert(virtual_key_from_keysym(XKB_KEY_KP_Home) == input::key_home);
+	assert(virtual_key_from_keysym(XKB_KEY_VoidSymbol) == 0);
+
+	assert(virtual_key_from_evdev_button(BTN_LEFT) == input::key_button_left);
+	assert(virtual_key_from_evdev_button(BTN_MIDDLE) == input::key_button_middle);
+	assert(virtual_key_from_evdev_button(BTN_EXTRA) == input::key_button_xbutton2);
+	assert(virtual_key_from_evdev_button(BTN_TASK) == 0);
+	assert(virtual_key_from_x11_button(1) == input::key_button_left);
+	assert(virtual_key_from_x11_button(2) == input::key_button_middle);
+	assert(virtual_key_from_x11_button(3) == input::key_button_right);
+	assert(virtual_key_from_x11_button(4) == 0);
+
+	assert(x11_input::keysym_to_utf32('a') == 'a');
+	assert(x11_input::keysym_to_utf32(0x010020ACu) == 0x20AC);
+	assert(x11_input::keysym_to_utf32(XKB_KEY_Home) == 0);
+
+	const uint32_t blank[] = { 0x00FFFFFF, 0x00000000 };
+	const uint32_t arrow[] = { 0x00000000, 0xFF000000 };
+	assert(!x11_input::is_cursor_image_visible(blank, 2));
+	assert(x11_input::is_cursor_image_visible(arrow, 2));
+	assert(!x11_input::is_cursor_image_visible(nullptr, 0));
+}
+
+static void test_pointer_absolute_mapping()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(1920, 1080);
+	pointer.absolute_motion(960.0, 540.0);
+	pointer.end_batch();
+	assert(pointer.x() == 960 && pointer.y() == 540);
+
+	// Clamped to the swapchain extent.
+	pointer.absolute_motion(3000.0, -10.0);
+	pointer.end_batch();
+	assert(pointer.x() == 1920 && pointer.y() == 0);
+}
+
+static void test_pointer_scale_changes()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(3840, 2160);
+	pointer.enter(100.0, 200.0);
+	pointer.set_preferred_scale(1.5);
+	assert(pointer.x() == 150 && pointer.y() == 300);
+
+	pointer.set_preferred_scale(0.0);
+	pointer.set_preferred_scale(std::numeric_limits<double>::quiet_NaN());
+	assert(pointer.scale() == 1.5);
+	pointer.set_preferred_scale(1.0);
+	assert(pointer.x() == 100 && pointer.y() == 200);
+
+	// A scale change within a batch applies to the motion received before it.
+	pointer.absolute_motion(100.0, 200.0);
+	pointer.set_preferred_scale(1.35);
+	pointer.end_batch();
+	assert(pointer.x() == 135 && pointer.y() == 270);
+}
+
+// A host rendering at 1:1 reports points beyond the scaled swapchain, which refutes the preference.
+static void test_pointer_scale_refutation()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(1000, 800);
+	pointer.set_preferred_scale(1.5);
+	pointer.enter(600.0, 100.0);
+	for (unsigned int batch = 0; batch < 30; ++batch)
+		pointer.end_batch();
+	assert(!pointer.scale_refuted());
+
+	pointer.absolute_motion(660.0, 100.0); // 990 at 1.5 still fits
+	pointer.end_batch();
+	assert(!pointer.scale_refuted() && pointer.x() == 990);
+	pointer.absolute_motion(900.0, 100.0);
+	pointer.end_batch();
+	assert(pointer.scale_refuted() && pointer.scale() == 1.0 && pointer.x() == 900);
+
+	pointer.set_preferred_scale(2.0);
+	assert(pointer.scale() == 1.0);
+
+	// Moving to a monitor with another scale changes the preference before the swapchain.
+	wayland_pointer moving;
+	moving.set_extent(1350, 800);
+	moving.set_preferred_scale(1.35);
+	moving.enter(0.0, 0.0);
+	for (unsigned int batch = 0; batch < 30; ++batch)
+		moving.end_batch();
+	moving.set_preferred_scale(1.5);
+	moving.absolute_motion(990.0, 100.0);
+	moving.end_batch();
+	assert(!moving.scale_refuted());
+
+	// Right after a resize the new swapchain may not exist yet, which is not evidence.
+	wayland_pointer resizing;
+	resizing.set_extent(1000, 800);
+	resizing.set_preferred_scale(1.5);
+	resizing.enter(0.0, 0.0);
+	for (unsigned int batch = 0; batch < 30; ++batch)
+		resizing.end_batch();
+	resizing.set_extent(1500, 800);
+	resizing.absolute_motion(1200.0, 100.0);
+	resizing.end_batch();
+	assert(!resizing.scale_refuted());
+}
+
+static void test_pointer_follows_host_cursor()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(200, 100);
+	pointer.enter(20.0, 30.0);
+	pointer.set_overlay_active(true);
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+
+	// An unlocked pointer reports both kinds of motion, the absolute one is authoritative.
+	for (int batch = 0; batch < 5; ++batch)
+	{
+		pointer.relative_motion(5.0, 5.0, batch * 30000);
+		pointer.absolute_motion(40.0 + batch, 50.0);
+		pointer.end_batch();
+	}
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 44 && pointer.y() == 50);
+
+	// A single batch without absolute motion is not yet a lock.
+	pointer.relative_motion(5.0, 5.0, 150000);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 44 && pointer.y() == 50);
+
+	// Neither is pushing the pointer against a screen edge, however long.
+	pointer.absolute_motion(10.0, 0.0);
+	pointer.end_batch();
+	for (int batch = 0; batch < 10; ++batch)
+	{
+		pointer.relative_motion(0.0, -5.0, 200000 + batch * 30000);
+		pointer.end_batch();
+	}
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+
+	// Nor are many batches in a short time, at a high frame rate.
+	pointer.absolute_motion(100.0, 50.0);
+	pointer.end_batch();
+	for (uint64_t time = 600000; time < 625000; time += 4000)
+	{
+		pointer.relative_motion(1.0, 0.0, time);
+		pointer.end_batch();
+		assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	}
+	pointer.relative_motion(1.0, 0.0, 625000);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
+}
+
+static void test_pointer_lock_drives_overlay_cursor()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(200, 100);
+	pointer.enter(20.0, 30.0);
+	pointer.end_batch();
+	pointer.set_overlay_active(true);
+
+	// The first batch without absolute motion only counts as evidence, the second one locks.
+	pointer.relative_motion(5.0, 7.0, 0);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	pointer.relative_motion(5.0, 7.0, 30000);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
+	assert(pointer.x() == 25 && pointer.y() == 37);
+
+	// Repeats of the lock position carry no movement.
+	pointer.absolute_motion(20.0, 30.0);
+	pointer.relative_motion(0.25, 0.0, 60000);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
+	for (int batch = 0; batch < 3; ++batch)
+	{
+		pointer.relative_motion(0.25, 0.0, 90000 + batch * 30000);
+		pointer.end_batch();
+	}
+	assert(pointer.x() == 26 && pointer.y() == 37);
+
+	pointer.relative_motion(500.0, -500.0, 200000);
+	pointer.end_batch();
+	assert(pointer.x() == 200 && pointer.y() == 0);
+
+	// Unlocking resumes absolute motion, back at the host's cursor.
+	pointer.absolute_motion(60.0, 70.0);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 60 && pointer.y() == 70);
+}
+
+static void test_pointer_resets_with_overlay_and_focus()
+{
+	wayland_pointer pointer;
+	pointer.set_extent(200, 100);
+	pointer.enter(20.0, 30.0);
+	pointer.end_batch();
+	for (int batch = 0; batch < 2; ++batch)
+	{
+		pointer.relative_motion(1.0, 1.0, batch * 30000);
+		pointer.end_batch();
+	}
+	assert(pointer.current_mode() == wayland_pointer::mode::passive);
+
+	// Opening the overlay while the host is locked starts with the overlay cursor.
+	pointer.set_overlay_active(true);
+	assert(pointer.current_mode() == wayland_pointer::mode::software_relative);
+	pointer.set_overlay_active(false);
+	assert(pointer.current_mode() == wayland_pointer::mode::passive);
+
+	// Leaving the surface ends a lock session, entering starts from the enter position.
+	pointer.set_overlay_active(true);
+	pointer.leave();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	pointer.enter(10.0, 20.0);
+	pointer.relative_motion(2.0, 3.0, 100000);
+	pointer.end_batch();
+	assert(pointer.current_mode() == wayland_pointer::mode::host_absolute);
+	assert(pointer.x() == 10 && pointer.y() == 20);
+}
+
+static void test_wayland_scroll()
+{
+	input owner(nullptr);
+	wayland_input backend(owner, nullptr, test_surface);
+	backend.on_pointer_enter(0, test_surface, 0.0, 0.0);
+
+	// Discrete and continuous values of one frame describe the same wheel event.
+	backend.on_pointer_axis_discrete(WL_POINTER_AXIS_VERTICAL_SCROLL, 1);
+	backend.on_pointer_axis(WL_POINTER_AXIS_VERTICAL_SCROLL, 10.0);
+	assert(owner.mouse_wheel_delta() == 0);
+	backend.on_pointer_frame();
+	assert(owner.mouse_wheel_delta() == -1);
+	owner.next_frame();
+
+	backend.on_pointer_axis_discrete(WL_POINTER_AXIS_VERTICAL_SCROLL, -2);
+	backend.on_pointer_axis(WL_POINTER_AXIS_VERTICAL_SCROLL, -20.0);
+	backend.on_pointer_frame();
+	assert(owner.mouse_wheel_delta() == 2);
+	owner.next_frame();
+
+	backend.on_pointer_axis(WL_POINTER_AXIS_VERTICAL_SCROLL, 5.0);
+	backend.on_pointer_axis(WL_POINTER_AXIS_HORIZONTAL_SCROLL, 5.0);
+	backend.on_pointer_frame();
+	assert(owner.mouse_wheel_delta() == -1);
+	owner.next_frame();
+	backend.on_pointer_frame();
+	assert(owner.mouse_wheel_delta() == 0);
+
+	backend.on_pointer_leave();
+	backend.on_pointer_axis(WL_POINTER_AXIS_VERTICAL_SCROLL, 5.0);
+	backend.on_pointer_frame();
+	assert(owner.mouse_wheel_delta() == 0);
+}
+
+static void test_wayland_parent_keyboard_focus()
+{
+	input owner(nullptr);
+	wayland_input backend(owner, nullptr, test_surface);
+	load_us_keymap(backend);
+	xkb_context *const context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	xkb_rule_names names = {};
+	names.layout = "us";
+	xkb_keymap *const keymap = xkb_keymap_new_from_names(context, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
+	const uint32_t home = xkb_keymap_key_by_name(keymap, "HOME") - 8;
+	const xkb_mod_index_t control_index = xkb_keymap_mod_get_index(keymap, XKB_MOD_NAME_CTRL);
+	assert(control_index < 32);
+	xkb_keymap_unref(keymap);
+	xkb_context_unref(context);
+
+	// Qt focuses its parent surface, which only counts while the pointer is over ours.
+	auto *const parent = reinterpret_cast<wl_surface *>(uintptr_t(0x200));
+	backend.on_keyboard_enter(parent);
+	assert(!backend.keyboard_focused());
+	backend.on_pointer_enter(0, test_surface, 0.0, 0.0);
+	assert(backend.keyboard_focused());
+
+	backend.on_key(1, home, WL_KEYBOARD_KEY_STATE_PRESSED);
+	backend.on_key(2, home, WL_KEYBOARD_KEY_STATE_RELEASED);
+	assert(owner.is_key_pressed(input::key_home) && !owner.is_key_down(input::key_home));
+	owner.next_frame();
+
+	// The modifier state at press time is kept, even if released within the same frame.
+	backend.on_modifiers(1u << control_index, 0, 0, 0);
+	assert(owner.is_key_down(input::key_ctrl));
+	backend.on_key(4, home, WL_KEYBOARD_KEY_STATE_PRESSED);
+	backend.on_key(5, home, WL_KEYBOARD_KEY_STATE_RELEASED);
+	backend.on_modifiers(0, 0, 0, 0);
+	assert(owner.is_key_pressed(input::key_home, true, false, false, true));
+
+	backend.on_keyboard_leave();
+	assert(!backend.keyboard_focused());
+	backend.on_keyboard_enter(parent);
+	assert(backend.keyboard_focused());
+	backend.on_pointer_leave();
+	assert(!backend.keyboard_focused());
+
+	backend.on_keyboard_enter(test_surface);
+	assert(backend.keyboard_focused());
+}
+
+static void test_x11_keyboard_focus_selection()
+{
+	constexpr xcb_window_t surface = 0x100;
+	constexpr xcb_window_t child = 0x101;
+	constexpr xcb_window_t unrelated = 0x200;
+	assert(x11_input::select_keyboard_window(surface, surface, true, false) == surface);
+	assert(x11_input::select_keyboard_window(surface, child, true, false) == surface);
+	assert(x11_input::select_keyboard_window(surface, unrelated, false, true) == unrelated);
+	assert(x11_input::select_keyboard_window(surface, unrelated, false, false) == XCB_WINDOW_NONE);
+	assert(x11_input::select_keyboard_window(surface, XCB_WINDOW_NONE, false, true) == XCB_WINDOW_NONE);
+	assert(x11_input::select_keyboard_window(surface, XCB_INPUT_FOCUS_POINTER_ROOT, false, true) == XCB_WINDOW_NONE);
+
+	input owner(nullptr);
+	x11_input backend(owner, 30, nullptr, input::wsi_kind::xcb);
+	x11_test_parents = { { 30, 20 }, { 20, 10 }, { 40, 30 }, { 50, 20 } };
+	assert(input_test_access::contains_window(backend, 10, 20)); // Focused toolkit parent
+	assert(input_test_access::contains_window(backend, 10, 40)); // Focused child
+	assert(!input_test_access::contains_window(backend, 10, 50)); // Sibling is not this renderer
+	assert(!input_test_access::contains_window(backend, 10, 10)); // Desktop is never owned
+	x11_test_parents.clear();
+}
+
+static void test_x11_key_and_button_taps()
+{
+	input owner(nullptr);
+	x11_input backend(owner, 30, nullptr, input::wsi_kind::xcb);
+	input_test_access::set_key_translation(backend, 10, XKB_KEY_Home);
+	input_test_access::set_key_translation(backend, 11, XKB_KEY_Control_L);
+	input_test_access::set_key_translation(backend, 12, XKB_KEY_a, XKB_KEY_A);
+	input_test_access::set_key_translation(backend, 13, XKB_KEY_dead_circumflex, XKB_KEY_dead_diaeresis);
+	input_test_access::set_key_translation(backend, 14, XKB_KEY_Shift_L);
+
+	backend.on_raw_key(10, true);
+	assert(!owner.is_key_down(input::key_home));
+	input_test_access::set_focus(backend, true, false);
+
+	// A tap within one frame is reported as both pressed and released, in order.
+	backend.on_raw_key(10, true);
+	backend.on_raw_key(10, false);
+	assert(!owner.is_key_down(input::key_home));
+	assert(owner.is_key_pressed(input::key_home) && owner.is_key_released(input::key_home));
+	assert(owner.key_transitions().size() == 2);
+	assert(owner.key_transitions()[0].down && !owner.key_transitions()[1].down);
+	owner.next_frame();
+	assert(owner.key_transitions().empty() && !owner.is_key_pressed(input::key_home));
+
+	backend.on_raw_key(11, true);
+	backend.on_raw_key(10, true);
+	backend.on_raw_key(10, false);
+	backend.on_raw_key(11, false);
+	assert(owner.is_key_pressed(input::key_ctrl) && owner.is_key_released(input::key_ctrl));
+	assert(owner.is_key_pressed(input::key_home, true, false, false, true));
+	assert(!owner.is_key_pressed(input::key_home, false, false, false, true));
+	owner.next_frame();
+
+	backend.on_raw_key(12, true);
+	assert(owner.text_input() == L"a");
+	backend.on_raw_key(12, false);
+	owner.next_frame();
+
+	// Dead keys compose with the next key, also on their shifted level (AZERTY types '¨' with Shift and '^').
+	xkb_context *const context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	const char compose_rules[] = "<dead_circumflex> <a> : \"\u00e2\"\n<dead_diaeresis> <A> : \"\u00c4\"\n";
+	input_test_access::set_compose_table(backend, xkb_compose_table_new_from_buffer(context, compose_rules, sizeof(compose_rules) - 1, "C", XKB_COMPOSE_FORMAT_TEXT_V1, XKB_COMPOSE_COMPILE_NO_FLAGS));
+	xkb_context_unref(context);
+	const auto tap = [&backend](xcb_keycode_t keycode) { backend.on_raw_key(keycode, true); backend.on_raw_key(keycode, false); };
+	tap(13);
+	assert(owner.text_input().empty());
+	tap(12);
+	assert(owner.text_input() == L"\u00e2");
+	owner.next_frame();
+	backend.on_raw_key(14, true);
+	tap(13);
+	tap(12);
+	backend.on_raw_key(14, false);
+	assert(owner.text_input() == L"\u00c4");
+	owner.next_frame();
+	// A key that does not continue the sequence cancels it without typing anything.
+	tap(13);
+	tap(10);
+	tap(12);
+	assert(owner.text_input() == L"a");
+	owner.next_frame();
+
+	backend.on_raw_button(1, true);
+	assert(!owner.is_mouse_button_down(0));
+	input_test_access::set_focus(backend, true, true);
+	backend.on_raw_button(1, true);
+	backend.on_raw_button(1, false);
+	backend.on_raw_button(4, true);
+	assert(owner.is_mouse_button_pressed(0) && owner.is_mouse_button_released(0) && !owner.is_mouse_button_down(0));
+	assert(owner.mouse_wheel_delta() == 1);
+	owner.next_frame();
+
+	// Focus loss releases held keys of one kind and drops their pending transitions.
+	backend.on_raw_button(3, true);
+	backend.on_raw_key(10, true);
+	input_test_access::release_pointer(backend);
+	assert(!owner.is_mouse_button_down(1) && owner.is_mouse_button_released(1));
+	assert(owner.is_key_down(input::key_home));
+	assert(owner.key_transitions().size() == 1 && owner.key_transitions()[0].key == input::key_home);
+	input_test_access::release_keyboard(backend);
+	assert(!owner.is_key_down(input::key_home) && owner.key_transitions().empty());
+}
+
+// Over a capture region the host's cursor is hidden by the layer, so the overlay draws its own.
+static void test_pointer_capture_cursor()
+{
+	input owner(nullptr);
+	x11_input backend(owner, 30, nullptr, input::wsi_kind::xcb);
+	backend.set_extent(200, 100);
+	input_test_access::set_focus(backend, true, true);
+	input_test_access::set_mouse_position(backend, 150, 50);
+	assert(!backend.needs_overlay_cursor());
+
+	// Capture regions without a shown layer (no visible window to cover) leave the host's cursor alone.
+	owner.set_pointer_capture({ { 0.5f, 0.0f, 0.5f, 1.0f } });
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_capture_mapped(backend, true);
+	assert(backend.needs_overlay_cursor());
+	input_test_access::set_mouse_position(backend, 50, 50);
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_host_cursor_visible(backend, false);
+	assert(backend.needs_overlay_cursor());
+	input_test_access::set_host_cursor_visible(backend, true);
+
+	owner.set_pointer_capture({ { 0.0f, 0.0f, 1.0f, 1.0f } });
+	assert(backend.needs_overlay_cursor());
+
+	// With themed cursors the X server draws the layer's cursor, except under Wine's Wayland driver where the layer is not visible.
+	input_test_access::set_cursor_context(backend, reinterpret_cast<xcb_cursor_context_t *>(uintptr_t(0x200)));
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_wine_wayland(backend, true);
+	assert(backend.needs_overlay_cursor());
+	input_test_access::set_wine_wayland(backend, false);
+	input_test_access::set_cursor_context(backend, nullptr);
+
+	input_test_access::set_focus(backend, true, false);
+	assert(!backend.needs_overlay_cursor());
+}
+
+// With cursor shapes the compositor draws the cursor over the capture layer at display rate, so the overlay draws none.
+static void test_wayland_capture_cursor()
+{
+	assert(wayland_cursor_shape(0) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT);
+	assert(wayland_cursor_shape(1) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT);
+	assert(wayland_cursor_shape(6) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE);
+	assert(wayland_cursor_shape(10) == WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED);
+	assert(wayland_cursor_shape(-1) == 0 && wayland_cursor_shape(11) == 0);
+
+	input owner(nullptr);
+	wayland_input backend(owner, nullptr, test_surface);
+	backend.set_extent(200, 100);
+	input_test_access::set_focus(backend, true, true);
+	input_test_access::set_mouse_position(backend, 150, 50);
+	owner.set_pointer_capture({ { 0.5f, 0.0f, 0.5f, 1.0f } });
+	input_test_access::set_capturing(backend, true);
+	assert(backend.needs_overlay_cursor());
+
+	input_test_access::set_cursor_shape_device(backend, reinterpret_cast<wp_cursor_shape_device_v1 *>(uintptr_t(0x200)));
+	assert(!backend.needs_overlay_cursor());
+	input_test_access::set_cursor_shape_device(backend, nullptr);
+}
+
+// Overlay windows may extend beyond the window, or be degenerate.
+static void test_capture_pixel_rects()
+{
+	using pixel_rect = input_backend::pixel_rect;
+	constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+	const std::vector<pixel_rect> rects = input_backend::to_pixel_rects({
+		{ 0.0f, 0.0f, 1.0f, 1.0f },
+		{ -0.5f, 0.75f, 1.0f, 1.0f },
+		{ 0.1f, 0.1f, 0.0f, 0.5f },
+		{ 1.5f, 0.0f, 0.5f, 1.0f },
+		{ nan, 0.0f, 0.5f, 0.5f },
+	}, 200, 100);
+	assert((rects == std::vector<pixel_rect> { { 0, 0, 200, 100 }, { 0, 75, 100, 25 } }));
+
+	// Edges are rounded, so adjacent regions stay adjacent.
+	const std::vector<pixel_rect> adjacent = input_backend::to_pixel_rects({ { 0.0f, 0.0f, 0.3333f, 1.0f }, { 0.3333f, 0.0f, 0.3333f, 1.0f } }, 100, 1);
+	assert(adjacent[0].x + adjacent[0].width == adjacent[1].x);
+}
+
+static void test_input_lifetime_follows_native_surface()
+{
+	const input::window_handle window = reinterpret_cast<void *>(uintptr_t(0x1234));
+	auto instance = std::make_shared<input>(window);
+	const std::weak_ptr<input> observer = instance;
+	input::register_surface(window, input::wsi_kind::xcb, nullptr, 0x100, 640, 480);
+	input::register_surface(window, input::wsi_kind::xcb, nullptr, 0x200, 640, 480);
+	{
+		const std::lock_guard<std::mutex> lock(s_windows_mutex);
+		s_windows.at(window).input_instance = instance;
+	}
+	instance.reset();
+	assert(!observer.expired());
+
+	input::unregister_surface(window, 0x100);
+	assert(!observer.expired());
+	input::unregister_surface(window, 0x200);
+	assert(observer.expired());
+}
+
+static void test_primary_input_handler_claim_transfers()
+{
+	input owner(nullptr);
+	assert(owner.try_acquire_primary_handler());
+	assert(!owner.try_acquire_primary_handler());
+	owner.release_primary_handler();
+	assert(owner.try_acquire_primary_handler());
+	owner.release_primary_handler();
+}
+
+static void test_paths()
+{
+	using namespace reshade::utils;
+	setenv("RESHADE_TEST_XDG", "/tmp/reshade-xdg", 1);
+	assert(xdg_path("RESHADE_TEST_XDG", ".local/share") == "/tmp/reshade-xdg");
+	setenv("RESHADE_TEST_XDG", "relative", 1);
+	assert(xdg_path("RESHADE_TEST_XDG", ".local/share") == xdg_path("RESHADE_TEST_UNSET", ".local/share"));
+	unsetenv("RESHADE_TEST_XDG");
+
+	char directory[] = "/tmp/reshade-path-test.XXXXXX";
+	assert(mkdtemp(directory) != nullptr);
+	const std::filesystem::path root = directory;
+	const auto user = root / "user", installed = root / "prefix/share/reshade";
+	std::filesystem::create_directories(user);
+	std::filesystem::create_directories(installed);
+	std::ofstream(user / "same.addon64").put('x');
+	std::ofstream(installed / "same.addon64").put('x');
+	std::ofstream(installed / "installed.addon64").put('x');
+	std::ofstream(installed / "ignored.txt").put('x');
+	const auto files = find_addon_files(user, installed);
+	assert(files.size() == 2);
+	assert(std::find(files.begin(), files.end(), user / "same.addon64") != files.end());
+	assert(std::find(files.begin(), files.end(), installed / "installed.addon64") != files.end());
+	assert(find_addon_files(user, {}).size() == 1);
+	assert(find_addon_files(root / "missing", installed).size() == 2);
+
+	std::error_code ec;
+	const auto published = root / "published.ini", first = root / "first.tmp", second = root / "second.tmp";
+	std::ofstream(first) << "first";
+	std::ofstream(second) << "second";
+	assert(publish_file(first, published, ec) && !ec);
+	assert(publish_file(second, published, ec) && !ec);
+	assert(!std::filesystem::exists(first) && !std::filesystem::exists(second));
+	std::string contents;
+	std::ifstream(published) >> contents;
+	assert(contents == "first");
+	assert(!publish_file(root / "missing.tmp", root / "unpublished.ini", ec) && ec);
+
+	const auto cased = root / "cased";
+	std::filesystem::create_directories(cased);
+	assert(!normalize_file_name_case(cased / "ReShade.ini"));
+	std::ofstream(cased / "reshade.ini") << "lower";
+	assert(normalize_file_name_case(cased / "ReShade.ini"));
+	assert(std::filesystem::exists(cased / "ReShade.ini") && !std::filesystem::exists(cased / "reshade.ini"));
+	std::ofstream(cased / "RESHADE.INI") << "upper";
+	assert(normalize_file_name_case(cased / "ReShade.ini"));
+	std::ifstream(cased / "ReShade.ini") >> contents;
+	assert(contents == "lower" && std::filesystem::exists(cased / "RESHADE.INI"));
+	assert(!normalize_file_name_case(root / "missing" / "ReShade.ini"));
+	std::filesystem::remove_all(root);
+}
+
+static void test_depth_detection()
+{
+	using namespace depth_detection;
+	assert(clear_evidence(1.0f) == normal);
+	assert(clear_evidence(0.0f) == reversed);
+	assert(clear_evidence(0.5f) == unknown);
+	for (uint8_t convention : { uint8_t(normal), uint8_t(reversed) })
+	{
+		observation state;
+		for (uint64_t frame = 0; frame < 119; ++frame)
+		{
+			assert(state.observe(1, frame, convention, convention) == none);
+			assert(state.observe(1, frame, convention, convention) == none);
+		}
+		assert(state.frames == 119);
+		assert(state.observe(1, 119, convention, convention) == convention);
+		assert(state.finished);
+		assert(state.observe(1, 120, convention, convention) == none);
+	}
+	// Draws with state that gives no ordering evidence (always/equal tests, unresolved dynamic state)
+	// are common next to the real geometry and must not veto it, which is what Suzerain's UI and sky do
+	for (uint8_t convention : { uint8_t(normal), uint8_t(reversed) })
+		for (uint8_t noise : { uint8_t(none), uint8_t(unknown) })
+		{
+			observation state;
+			for (uint64_t frame = 0; frame < 119; ++frame)
+				assert(state.observe(1, frame, convention | noise, convention | noise) == none);
+			assert(state.observe(1, 119, convention | noise, convention | noise) == convention);
+		}
+	for (uint8_t clears : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown), uint8_t(normal | unknown), uint8_t(reversed | unknown), uint8_t(normal | reversed | unknown) })
+		for (uint8_t comparisons : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown), uint8_t(normal | unknown), uint8_t(reversed | unknown), uint8_t(normal | reversed | unknown) })
+		{
+			const uint8_t clear_direction = clears & (normal | reversed), compare_direction = comparisons & (normal | reversed);
+			if ((clear_direction == normal || clear_direction == reversed) && clear_direction == compare_direction)
+				continue;
+			// Contradictory or missing evidence never votes, however long it is observed
+			observation state;
+			for (uint64_t frame = 0; frame < 600; ++frame)
+				assert(state.observe(1, frame, clears, comparisons) == none);
+			assert(state.finished && state.frames == 600);
+		}
+	observation changing;
+	for (uint64_t frame = 0; frame < 600; ++frame)
+		assert(changing.observe(1 + frame / 100, frame, normal, normal) == none);
+	assert(changing.finished);
+	observation interrupted;
+	for (uint64_t frame = 0; frame < 119; ++frame)
+		assert(interrupted.observe(1, frame, normal, normal) == none);
+	assert(interrupted.observe(1, 119, unknown, normal) == none);
+	assert(interrupted.observe(1, 120, normal, normal) == none);
+	assert(interrupted.consistent_frames == 1);
+	observation alternating;
+	for (uint64_t frame = 0; frame < 600; ++frame)
+	{
+		const uint8_t vote = frame % 2 ? normal : reversed;
+		assert(alternating.observe(1, frame, vote, vote) == none);
+	}
+	assert(alternating.finished);
+	for (uint64_t frame = 600; frame < 800; ++frame)
+		assert(alternating.observe(1, frame, normal, normal) == none);
+	assert(alternating.frames == 600);
+	observation missing;
+	assert(missing.observe(0, 0, normal, normal) == none);
+	assert(missing.frames == 0);
+	assert(clear_evidence(std::numeric_limits<float>::quiet_NaN()) == unknown);
+}
+
+static void test_game_identity()
+{
+	using reshade::process::game_identity_inputs;
+	using reshade::process::resolve_game_identity;
+
+	game_identity_inputs proton;
+	proton.executable_path = "/opt/proton/files/lib/wine/x86_64-unix/wine64-preloader";
+	proton.command_line = { "Z:\\games\\AoMRT_s.exe" };
+	proton.steam_app_id = "1934680";
+	proton.steam_install_path = "/games/steamapps/common/Age of Mythology Retold/";
+	const auto proton_identity = resolve_game_identity(proton);
+	assert(proton_identity.directory_name == "Age_of_Mythology_Retold-1934680");
+	assert(proton_identity.configuration_path("/home/test/.local/share") == "/home/test/.local/share/reshade/configurations/Age_of_Mythology_Retold-1934680/ReShade.ini");
+	assert(proton_identity.log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Age_of_Mythology_Retold-1934680/ReShade-AoMRT_s.log");
+	assert(proton_identity.wine_host);
+	proton.command_line = { "explorer.exe" };
+	const auto proton_helper_identity = resolve_game_identity(proton);
+	assert(proton_helper_identity.directory_name == proton_identity.directory_name);
+	assert(proton_helper_identity.log_path("/home/test/.local/share") != proton_identity.log_path("/home/test/.local/share"));
+	game_identity_inputs proton_launcher = proton;
+	proton_launcher.executable_path = "/usr/bin/python3.13";
+	proton_launcher.command_line = { "python3", "/opt/proton/proton", "waitforexitandrun" };
+	const auto proton_launcher_identity = resolve_game_identity(proton_launcher);
+	assert(proton_launcher_identity.directory_name == proton_identity.directory_name);
+	assert(proton_launcher_identity.log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Age_of_Mythology_Retold-1934680/ReShade-python3.log");
+
+	// Native Steam games outside the Steam Linux Runtime do not get STEAM_COMPAT_INSTALL_PATH
+	game_identity_inputs steam_native;
+	steam_native.executable_path = "/home/test/.local/share/Steam/steamapps/common/Hades II/Hades2";
+	steam_native.steam_app_id = "1145350";
+	const auto steam_native_identity = resolve_game_identity(steam_native);
+	assert(steam_native_identity.directory_name == "Hades_II-1145350");
+	assert(steam_native_identity.log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Hades_II-1145350/ReShade-Hades2.log");
+	// The Wine loader of a Proton build also lives below "steamapps/common", but names Proton rather than the game
+	game_identity_inputs proton_without_install_path;
+	proton_without_install_path.executable_path = "/home/test/.local/share/Steam/steamapps/common/Proton 9.0/files/bin/wine64-preloader";
+	proton_without_install_path.command_line = { "Z:\\games\\Game.exe" };
+	proton_without_install_path.steam_app_id = "123";
+	assert(resolve_game_identity(proton_without_install_path).directory_name == "Game-123");
+
+	game_identity_inputs vkcube;
+	vkcube.executable_path = "/usr/bin/vkcube";
+	assert(resolve_game_identity(vkcube).directory_name == "vkcube");
+
+	game_identity_inputs sweden;
+	sweden.executable_path = "/usr/bin/sweden-simulator";
+	sweden.command_line = { "sweden-simulator", "/data/map.bin" };
+	assert(resolve_game_identity(sweden).directory_name == "sweden-simulator");
+
+	game_identity_inputs rpcs3;
+	rpcs3.executable_path = "/opt/rpcs3/usr/bin/rpcs3";
+	rpcs3.vulkan_application_name = "RPCS3";
+	assert(resolve_game_identity(rpcs3).directory_name == "RPCS3");
+	rpcs3.command_line = { "rpcs3", "/games/inFamous/PS3_GAME/USRDIR/EBOOT.BIN" };
+	assert(resolve_game_identity(rpcs3).directory_name == "RPCS3-inFamous");
+
+	game_identity_inputs dolphin;
+	dolphin.executable_path = "/usr/bin/dolphin-emu";
+	dolphin.vulkan_application_name = "Dolphin Emulator";
+	dolphin.command_line = { "dolphin-emu", "--batch", "/games/Metroid Prime.rvz" };
+	assert(resolve_game_identity(dolphin).directory_name == "Dolphin_Emulator-Metroid_Prime");
+	dolphin.command_line = { "dolphin-emu", "/games/Reboot.iso" };
+	assert(resolve_game_identity(dolphin).directory_name == "Dolphin_Emulator-Reboot");
+
+	game_identity_inputs ppsspp;
+	ppsspp.executable_path = "/usr/bin/PPSSPPSDL";
+	ppsspp.command_line = { "PPSSPPSDL", "/games/Patapon.cso" };
+	assert(resolve_game_identity(ppsspp).directory_name == "PPSSPPSDL-Patapon");
+
+	game_identity_inputs eden;
+	eden.executable_path = "/home/test/Eden-Linux-ee73920d28-rog-ally-clang-pgo.appimage";
+	eden.vulkan_application_name = "yuzu Emulator";
+	assert(resolve_game_identity(eden).directory_name == "Eden");
+	assert(resolve_game_identity(eden).log_path("/home/test/.local/share") == "/home/test/.local/share/reshade/logs/Eden/ReShade.log");
+
+	game_identity_inputs wine;
+	wine.executable_path = "/usr/lib/wine/wine64-preloader";
+	wine.command_line = { "C:\\Games\\Game.exe" };
+	wine.wine_prefix = "/home/test/Games/My Prefix/pfx";
+	assert(resolve_game_identity(wine).directory_name == "Game-My_Prefix");
+
+	game_identity_inputs profile;
+	profile.executable_path = "/usr/bin/vkcube";
+	profile.profile_name = "My custom/game";
+	assert(resolve_game_identity(profile).directory_name == "My_custom_game");
+	profile.profile_name = "Pokémon Colosseum";
+	assert(resolve_game_identity(profile).directory_name == "Pokémon_Colosseum");
+}
+
+int main()
+{
+	test_game_identity();
+	test_clipboard_offer_mime_types();
+	test_clipboard_write();
+	test_translation_tables();
+	test_pointer_absolute_mapping();
+	test_pointer_scale_changes();
+	test_pointer_scale_refutation();
+	test_pointer_follows_host_cursor();
+	test_pointer_lock_drives_overlay_cursor();
+	test_pointer_resets_with_overlay_and_focus();
+	test_wayland_scroll();
+	test_wayland_parent_keyboard_focus();
+	test_x11_keyboard_focus_selection();
+	test_x11_key_and_button_taps();
+	test_pointer_capture_cursor();
+	test_wayland_capture_cursor();
+	test_capture_pixel_rects();
+	test_input_lifetime_follows_native_surface();
+	test_primary_input_handler_claim_transfers();
+	test_depth_detection();
+	test_paths();
+	std::cout << "Linux portability tests passed.\n";
+}

@@ -342,6 +342,57 @@ void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstSci
 #endif
 }
 
+void VKAPI_CALL vkCmdSetDepthTestEnable(VkCommandBuffer commandBuffer, VkBool32 depthTestEnable)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdSetDepthTestEnable, device_impl);
+	trampoline(commandBuffer, depthTestEnable);
+
+#if RESHADE_ADDON >= 2
+	if (!reshade::has_addon_event<reshade::addon_event::bind_pipeline_states>())
+		return;
+
+	auto *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	const reshade::api::dynamic_state state = reshade::api::dynamic_state::depth_enable;
+	const uint32_t value = depthTestEnable;
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(cmd_impl, 1, &state, &value);
+#endif
+}
+
+void VKAPI_CALL vkCmdSetDepthWriteEnable(VkCommandBuffer commandBuffer, VkBool32 depthWriteEnable)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdSetDepthWriteEnable, device_impl);
+	trampoline(commandBuffer, depthWriteEnable);
+
+#if RESHADE_ADDON >= 2
+	if (!reshade::has_addon_event<reshade::addon_event::bind_pipeline_states>())
+		return;
+
+	auto *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	const reshade::api::dynamic_state state = reshade::api::dynamic_state::depth_write_mask;
+	const uint32_t value = depthWriteEnable;
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(cmd_impl, 1, &state, &value);
+#endif
+}
+
+void VKAPI_CALL vkCmdSetDepthCompareOp(VkCommandBuffer commandBuffer, VkCompareOp depthCompareOp)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdSetDepthCompareOp, device_impl);
+	trampoline(commandBuffer, depthCompareOp);
+
+#if RESHADE_ADDON >= 2
+	if (!reshade::has_addon_event<reshade::addon_event::bind_pipeline_states>())
+		return;
+
+	auto *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	const reshade::api::dynamic_state state = reshade::api::dynamic_state::depth_func;
+	const uint32_t value = static_cast<uint32_t>(reshade::vulkan::convert_compare_op(depthCompareOp));
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(cmd_impl, 1, &state, &value);
+#endif
+}
+
 void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer, float depthBiasConstantFactor, float depthBiasClamp, float depthBiasSlopeFactor)
 {
 	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));

@@ -12,14 +12,28 @@
 // Current version of the ReShade API
 #define RESHADE_API_VERSION 20
 
+#if defined(_WIN32)
+#define RESHADE_ADDON_EXPORT __declspec(dllexport)
+#elif defined(__linux__)
+#define RESHADE_ADDON_EXPORT __attribute__((visibility("default")))
+#endif
+
 // Optionally import ReShade API functions when 'RESHADE_API_LIBRARY' is defined instead of using header-only mode
 #if defined(RESHADE_API_LIBRARY) || defined(RESHADE_API_LIBRARY_EXPORT)
 
 #if defined(RESHADE_API_LIBRARY_EXPORT)
 	#define RESHADE_API_LIBRARY 1
-	#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllexport)
+	#if defined(_WIN32)
+		#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllexport)
+	#elif defined(__linux__)
+		#define RESHADE_API_LIBRARY_DECL extern "C" __attribute__((visibility("default")))
+	#endif
 #else
-	#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllimport)
+	#if defined(_WIN32)
+		#define RESHADE_API_LIBRARY_DECL extern "C" __declspec(dllimport)
+	#elif defined(__linux__)
+		#define RESHADE_API_LIBRARY_DECL extern "C"
+	#endif
 #endif
 
 RESHADE_API_LIBRARY_DECL void ReShadeLogMessage(void *module, int level, const char *message);
@@ -42,6 +56,8 @@ RESHADE_API_LIBRARY_DECL void ReShadeRegisterOverlay(const char *title, void(*ca
 RESHADE_API_LIBRARY_DECL void ReShadeRegisterOverlayForAddon(void *module, const char *title, void(*callback)(reshade::api::effect_runtime *runtime));
 RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlay(const char *title, void(*callback)(reshade::api::effect_runtime *runtime));
 RESHADE_API_LIBRARY_DECL void ReShadeUnregisterOverlayForAddon(void *module, const char *title, void(*callback)(reshade::api::effect_runtime *runtime));
+
+RESHADE_API_LIBRARY_DECL const void *ReShadeGetImGuiFunctionTable(uint32_t version);
 
 RESHADE_API_LIBRARY_DECL bool ReShadeCreateEffectRuntime(reshade::api::device_api api, void *opaque_device, void *opaque_command_queue, void *opaque_swapchain, const char *config_path, reshade::api::effect_runtime **out_runtime);
 RESHADE_API_LIBRARY_DECL void ReShadeDestroyEffectRuntime(reshade::api::effect_runtime *runtime);
@@ -250,7 +266,19 @@ namespace reshade
 	inline bool register_addon(void *addon_module, [[maybe_unused]] void *reshade_module = nullptr)
 	{
 #if defined(RESHADE_API_LIBRARY)
-		return ReShadeRegisterAddon(addon_module, RESHADE_API_VERSION);
+		if (!ReShadeRegisterAddon(addon_module, RESHADE_API_VERSION))
+			return false;
+
+#if defined(__linux__) && defined(IMGUI_VERSION_NUM)
+		// The function table keeps add-ons independent of ReShade's ImGui ABI.
+		if (!(imgui_function_table_instance() = static_cast<const imgui_function_table *>(ReShadeGetImGuiFunctionTable(IMGUI_VERSION_NUM))))
+		{
+			ReShadeUnregisterAddon(addon_module);
+			return false;
+		}
+#endif
+
+		return true;
 #else
 		addon_module = internal::get_current_module_handle(static_cast<HMODULE>(addon_module));
 		reshade_module = internal::get_reshade_module_handle(static_cast<HMODULE>(reshade_module));
@@ -284,6 +312,9 @@ namespace reshade
 	inline void unregister_addon(void *addon_module, [[maybe_unused]] void *reshade_module = nullptr)
 	{
 #if defined(RESHADE_API_LIBRARY)
+	#if defined(__linux__) && defined(IMGUI_VERSION_NUM)
+		imgui_function_table_instance() = nullptr;
+	#endif
 		ReShadeUnregisterAddon(addon_module);
 #else
 		addon_module = internal::get_current_module_handle(static_cast<HMODULE>(addon_module));

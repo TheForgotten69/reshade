@@ -16,6 +16,9 @@ constexpr uint32_t SPIRV_MAGIC = 0x07230203;
 
 static std::filesystem::path make_shader_file_path(uint32_t shader_hash, const wchar_t *extension)
 {
+#if defined(__linux__)
+	return reshade_addon_utils::make_dump_path(RESHADE_ADDON_SHADER_SAVE_DIR, shader_hash, extension);
+#elif defined(_WIN32)
 	// Prepend executable directory to image files
 	wchar_t file_prefix[MAX_PATH] = L"";
 	GetModuleFileNameW(nullptr, file_prefix, ARRAYSIZE(file_prefix));
@@ -35,6 +38,7 @@ static std::filesystem::path make_shader_file_path(uint32_t shader_hash, const w
 	path += extension;
 
 	return path;
+#endif
 }
 
 static void save_shader_code(device_api device_type, const shader_desc &desc)
@@ -51,9 +55,22 @@ static void save_shader_code(device_api device_type, const shader_desc &desc)
 		extension = desc.code_size > 5 && std::strncmp(static_cast<const char *>(desc.code), "!!ARB", 5) == 0 ? L".txt" : L".glsl"; // OpenGL otherwise uses plain text ARB assembly language or GLSL
 
 	const std::filesystem::path file_path = make_shader_file_path(shader_hash, extension);
+	if (file_path.empty())
+		return;
 
-	std::ofstream file(file_path, std::ios::binary);
-	file.write(static_cast<const char *>(desc.code), desc.code_size);
+	#if defined(__linux__)
+	try
+	{
+	#endif
+		std::ofstream file(file_path, std::ios::binary);
+		file.write(static_cast<const char *>(desc.code), desc.code_size);
+	#if defined(__linux__)
+	}
+	catch (...)
+	{
+		// An add-on must never terminate the host when its optional dump path is unavailable.
+	}
+	#endif
 }
 
 static bool on_create_pipeline(device *device, pipeline_layout, uint32_t subobject_count, const pipeline_subobject *subobjects)
@@ -87,8 +104,8 @@ static bool on_create_pipeline(device *device, pipeline_layout, uint32_t subobje
 	return false;
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Shader Dump";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that dumps all shader binaries used by the application to disk (\"" RESHADE_ADDON_SHADER_SAVE_DIR "\" directory).";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Shader Dump";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that dumps all shader binaries used by the application to disk (\"" RESHADE_ADDON_SHADER_SAVE_DIR "\" directory).";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

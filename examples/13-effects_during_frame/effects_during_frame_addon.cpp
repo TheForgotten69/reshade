@@ -6,24 +6,31 @@
 #include <imgui.h>
 #include <reshade.hpp>
 #include "state_tracking.hpp"
+#include <limits>
 
 using namespace reshade::api;
 
 static bool s_filter_width_and_height = true;
 
-struct __declspec(uuid("7251932A-ADAF-4DFC-B5CB-9A4E8CD5D6EB")) device_data
+struct RESHADE_API_UUID("7251932A-ADAF-4DFC-B5CB-9A4E8CD5D6EB") device_data
 {
 	effect_runtime *main_runtime = nullptr;
 	uint32_t offset_from_last_pass = 0;
 	uint32_t last_render_pass_count = std::numeric_limits<uint32_t>::max();
 	uint32_t current_render_pass_count = 0;
 };
-struct __declspec(uuid("036CD16B-E823-4D6C-A137-5C335D6FD3E6")) command_list_data
+struct RESHADE_API_UUID("036CD16B-E823-4D6C-A137-5C335D6FD3E6") command_list_data
 {
 	bool has_multiple_rtvs = false;
 	resource_view current_main_rtv = { 0 };
 	uint32_t current_render_pass_index = 0;
 };
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(device_data,
+	0x25, 0x93, 0x19, 0x72, 0xaf, 0xad, 0x4d, 0xfc,
+	0xb5, 0xcb, 0x9a, 0x4e, 0x8c, 0xd5, 0xd6, 0xeb);
+RESHADE_DEFINE_PRIVATE_DATA_TYPE(command_list_data,
+	0x6b, 0xd1, 0x6c, 0x03, 0x23, 0xe8, 0x6c, 0x4d,
+	0xa1, 0x37, 0x5c, 0x33, 0x5d, 0x6f, 0xd3, 0xe6);
 
 static void on_init_device(device *device)
 {

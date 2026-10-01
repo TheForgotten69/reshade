@@ -14,6 +14,7 @@
 #endif
 #include "addon_manager.hpp"
 #include "lockfree_linear_map.hpp"
+#include "process_environment.hpp"
 #include <cstring> // std::strcmp, std::strncmp
 #include <algorithm> // std::find_if, std::min
 
@@ -281,6 +282,13 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 			add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, false);
 #endif
 
+#if VK_EXT_external_memory_host
+		// Lets add-ons import host memory shared with another process as a buffer (resource_flags::shared_host)
+		// The extension depends on external memory, which is core in Vulkan 1.1
+		if (instance.api_version >= VK_API_VERSION_1_1)
+			add_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, false);
+#endif
+
 #if VK_KHR_external_memory_win32
 		add_extension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, false);
 #endif
@@ -301,8 +309,10 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		else
 		{
 			// No Man's Sky initializes OpenVR before loading Vulkan (and therefore before loading ReShade), so need to manually install OpenVR hooks now when used
+#if defined(_WIN32)
 			extern void check_and_init_openvr_hooks();
 			check_and_init_openvr_hooks();
+#endif
 
 #if VK_KHR_swapchain_mutable_format
 			add_extension(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME, true);
@@ -532,7 +542,7 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 				0 == std::strcmp(name_without_prefix, "SubmitDebugUtilsMessageEXT") ||
 				0 == std::strcmp(name_without_prefix, "CreateDebugUtilsMessengerEXT") ||
 				0 == std::strcmp(name_without_prefix, "DestroyDebugUtilsMessengerEXT") ||
-				(std::strstr(name_without_prefix, "Properties") != nullptr && std::strstr(name_without_prefix, "AccelerationStructures") == nullptr && std::strstr(name_without_prefix, "Handle") == nullptr) ||
+				(std::strstr(name_without_prefix, "Properties") != nullptr && std::strstr(name_without_prefix, "AccelerationStructures") == nullptr && std::strstr(name_without_prefix, "Handle") == nullptr && std::strstr(name_without_prefix, "HostPointer") == nullptr) ||
 				(std::strstr(name_without_prefix, "Surface") != nullptr && std::strstr(name_without_prefix, "DeviceGroupSurface") == nullptr) ||
 				(std::strstr(name_without_prefix, "PhysicalDevice") != nullptr))
 				return reinterpret_cast<GLADapiproc>(device.dispatch_table.GetInstanceProcAddr(device.instance_handle, name));
