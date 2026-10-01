@@ -1475,6 +1475,11 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 					if (!device->create_resource_view(depth_stencil_backup->backup_texture, resource_usage::shader_resource, srv_desc, &data.selected_shader_resource))
 						break;
 				}
+				else
+				{
+					// Untracking the previous depth-stencil above cleared the view, but it still points to the revived backup texture
+					data.selected_shader_resource = prev_shader_resource;
+				}
 
 				data.using_backup_texture = true;
 			}
