@@ -47,9 +47,9 @@ namespace
 {
 	void *get_module_handle(const void *address)
 	{
-		Dl_info info = {};
-		struct link_map *map = nullptr;
-		return address != nullptr && dladdr1(address, &info, reinterpret_cast<void **>(&map), RTLD_DL_LINKMAP) != 0 ? map : nullptr;
+		// Called for every add-on callback of every event, so this must not take the loader lock like dladdr1 does
+		dl_find_object result;
+		return address != nullptr && _dl_find_object(const_cast<void *>(address), &result) == 0 ? result.dlfo_link_map : nullptr;
 	}
 
 	void *const g_module_handle = get_module_handle(reinterpret_cast<const void *>(&get_module_handle));
