@@ -741,11 +741,23 @@ static void test_depth_detection()
 		assert(state.finished);
 		assert(state.observe(1, 120, convention, convention) == none);
 	}
-	for (uint8_t clears : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown) })
-		for (uint8_t comparisons : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown) })
+	// Draws with state that gives no ordering evidence (always/equal tests, unresolved dynamic state)
+	// are common next to the real geometry and must not veto it, which is what Suzerain's UI and sky do
+	for (uint8_t convention : { uint8_t(normal), uint8_t(reversed) })
+		for (uint8_t noise : { uint8_t(none), uint8_t(unknown) })
 		{
-			if ((clears == normal || clears == reversed) && clears == comparisons)
+			observation state;
+			for (uint64_t frame = 0; frame < 119; ++frame)
+				assert(state.observe(1, frame, convention | noise, convention | noise) == none);
+			assert(state.observe(1, 119, convention | noise, convention | noise) == convention);
+		}
+	for (uint8_t clears : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown), uint8_t(normal | unknown), uint8_t(reversed | unknown), uint8_t(normal | reversed | unknown) })
+		for (uint8_t comparisons : { uint8_t(none), uint8_t(normal), uint8_t(reversed), uint8_t(normal | reversed), uint8_t(unknown), uint8_t(normal | unknown), uint8_t(reversed | unknown), uint8_t(normal | reversed | unknown) })
+		{
+			const uint8_t clear_direction = clears & (normal | reversed), compare_direction = comparisons & (normal | reversed);
+			if ((clear_direction == normal || clear_direction == reversed) && clear_direction == compare_direction)
 				continue;
+			// Contradictory or missing evidence never votes, however long it is observed
 			observation state;
 			for (uint64_t frame = 0; frame < 600; ++frame)
 				assert(state.observe(1, frame, clears, comparisons) == none);
