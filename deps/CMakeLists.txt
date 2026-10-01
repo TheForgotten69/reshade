@@ -81,6 +81,7 @@ set(GLAD_EXTENSIONS
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   list(APPEND GLAD_EXTENSIONS
+    VK_EXT_external_memory_host
     VK_KHR_wayland_surface
     VK_KHR_xcb_surface
     VK_KHR_xlib_surface

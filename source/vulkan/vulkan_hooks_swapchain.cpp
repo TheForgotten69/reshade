@@ -76,7 +76,8 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	if (device_impl->_primary_graphics_queue != nullptr)
 	{
 		// Add required usage flags to create info
-		create_info.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		// Transfer destination lets add-ons write results back into the back buffer with a copy (e.g. frames processed out of process)
+		create_info.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 #if VK_KHR_swapchain_mutable_format
 		// Add required format variants, so e.g. both linear and sRGB views can be created for the swap chain images
