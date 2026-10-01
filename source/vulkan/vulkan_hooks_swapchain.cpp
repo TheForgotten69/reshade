@@ -530,6 +530,15 @@ VkResult VKAPI_CALL vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swap
 	return trampoline(device, swapchain, pSwapchainImageCount, pSwapchainImages);
 }
 
+#if defined(__linux__)
+// Lets add-ons check that flushing the immediate command list during the present event waits for the
+// back buffer to be complete (see 'command_queue_impl::_present_wait_info'). Returns the behavior's version.
+extern "C" __attribute__((visibility("default"))) uint32_t ReShadePresentEventFlushWaits()
+{
+	return 1;
+}
+#endif
+
 VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo)
 {
 	assert(pPresentInfo != nullptr);
@@ -544,6 +553,17 @@ VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPr
 		std::lock(queue_impl->_mutex, device_impl->_primary_graphics_queue->_mutex);
 	else
 		queue_impl->_mutex.lock();
+
+	// The present's waits, taken over by the first flush of the immediate command list (see '_present_wait_info')
+	temp_mem<VkPipelineStageFlags> wait_stages(present_info.waitSemaphoreCount);
+	std::fill_n(wait_stages.p, present_info.waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+
+	VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+	submit_info.waitSemaphoreCount = present_info.waitSemaphoreCount;
+	submit_info.pWaitSemaphores = present_info.pWaitSemaphores;
+	submit_info.pWaitDstStageMask = wait_stages.p;
+
+	queue_impl->_present_wait_info = &submit_info;
 
 	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; ++i)
 	{
@@ -662,16 +682,10 @@ VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPr
 		reshade::present_effect_runtime(swapchain_impl);
 	}
 
+	queue_impl->_present_wait_info = nullptr;
+
 	// Synchronize immediate command list flush
 	{
-		temp_mem<VkPipelineStageFlags> wait_stages(present_info.waitSemaphoreCount);
-		std::fill_n(wait_stages.p, present_info.waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-
-		VkSubmitInfo submit_info { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-		submit_info.waitSemaphoreCount = present_info.waitSemaphoreCount;
-		submit_info.pWaitSemaphores = present_info.pWaitSemaphores;
-		submit_info.pWaitDstStageMask = wait_stages.p;
-
 		queue_impl->flush_immediate_command_list(&submit_info);
 
 		// If the application is presenting with a different queue than rendering, synchronize these two queues

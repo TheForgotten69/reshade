@@ -40,6 +40,11 @@ namespace reshade::vulkan
 
 		mutable std::recursive_mutex _mutex;
 
+		// Set by 'vkQueuePresentKHR' while the present event runs: the semaphores the present waits on.
+		// Any flush of the immediate command list during the event waits on them first, so add-ons can
+		// submit work that reads the back buffer and wait for it before present.
+		VkSubmitInfo *_present_wait_info = nullptr;
+
 	protected:
 		device_impl *const _device;
 

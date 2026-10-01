@@ -82,8 +82,13 @@ void reshade::vulkan::command_queue_impl::flush_immediate_command_list() const
 }
 void reshade::vulkan::command_queue_impl::flush_immediate_command_list(VkSubmitInfo *wait_semaphore_info) const
 {
-	if (_immediate_cmd_list != nullptr)
-		_immediate_cmd_list->flush(wait_semaphore_info);
+	if (_immediate_cmd_list == nullptr)
+		return;
+	// During the present event the first flush takes over the present's waits: the back buffer is only
+	// complete once they are signaled. The present then waits on that flush's semaphore instead.
+	if (_present_wait_info != nullptr && wait_semaphore_info != _present_wait_info && _present_wait_info->waitSemaphoreCount != 0)
+		_immediate_cmd_list->flush(_present_wait_info);
+	_immediate_cmd_list->flush(wait_semaphore_info);
 }
 
 void reshade::vulkan::command_queue_impl::begin_debug_event(const char *label, const float color[4])

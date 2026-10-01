@@ -17,12 +17,76 @@
 #include "process_environment.hpp"
 #include <cstring> // std::strcmp, std::strncmp
 #include <algorithm> // std::find_if, std::min
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 // Set during Vulkan device creation and presentation, to avoid hooking internal D3D devices created e.g. by NVIDIA Ansel, Optimus or layered DXGI swap chain
 extern thread_local bool g_in_dxgi_runtime;
 
 extern lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
 lockfree_linear_map<void *, reshade::vulkan::device_impl *, 8> g_vulkan_devices;
+
+#if defined(__linux__)
+#include "reshade_vulkan_interop.h"
+
+// Device extensions add-ons asked for (see ReShadeVulkanRequestDeviceExtension), and what each device
+// got, for add-ons that drive the device with native Vulkan calls
+namespace
+{
+	struct device_interop
+	{
+		VkInstance instance;
+		VkPhysicalDevice physical_device;
+		PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+		PFN_vkGetDeviceProcAddr get_device_proc_addr;
+		uint32_t api_version;
+		std::vector<std::string> extension_names;
+		std::vector<const char *> extensions;
+		bool buffer_device_address;
+	};
+
+	std::mutex s_interop_mutex;
+	std::vector<std::string> s_requested_device_extensions;
+	std::unordered_map<VkDevice, device_interop> s_device_interop;
+
+	std::vector<std::string> requested_device_extensions()
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		return s_requested_device_extensions;
+	}
+}
+
+extern "C" __attribute__((visibility("default"))) void ReShadeVulkanRequestDeviceExtension(const char *name)
+{
+	if (name == nullptr)
+		return;
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	// Add-ons are loaded again for every instance, and ask again: keep each name once
+	if (std::find(s_requested_device_extensions.begin(), s_requested_device_extensions.end(), name) == s_requested_device_extensions.end())
+		s_requested_device_extensions.emplace_back(name);
+}
+
+extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanGetDeviceInterop(void *device, ReShadeVulkanDeviceInterop *out)
+{
+	if (out == nullptr || out->size < sizeof(ReShadeVulkanDeviceInterop))
+		return 0;
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	const auto it = s_device_interop.find(static_cast<VkDevice>(device));
+	if (it == s_device_interop.end())
+		return 0;
+	const device_interop &interop = it->second;
+	out->instance = interop.instance;
+	out->physical_device = interop.physical_device;
+	out->get_instance_proc_addr = reinterpret_cast<void *(*)(void *, const char *)>(interop.get_instance_proc_addr);
+	out->get_device_proc_addr = reinterpret_cast<void *(*)(void *, const char *)>(interop.get_device_proc_addr);
+	out->api_version = interop.api_version;
+	out->enabled_extension_count = static_cast<uint32_t>(interop.extensions.size());
+	out->enabled_extensions = interop.extensions.data();
+	out->buffer_device_address = interop.buffer_device_address ? 1 : 0;
+	return 1;
+}
+#endif
 
 #if RESHADE_ADDON
 void create_default_view(reshade::vulkan::device_impl *device_impl, VkImage image)
@@ -141,6 +205,11 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 
 	std::vector<const char *> enabled_extensions;
 	enabled_extensions.reserve(pCreateInfo->enabledExtensionCount);
+	bool force_buffer_device_address = false;
+#if defined(__linux__)
+	// Outlives the call below: enabled_extensions points into it
+	const std::vector<std::string> requested_extensions = requested_device_extensions();
+#endif
 	for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i)
 		enabled_extensions.push_back(pCreateInfo->ppEnabledExtensionNames[i]);
 
@@ -318,6 +387,36 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 			add_extension(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME, true);
 			add_extension(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, true);
 #endif
+
+#if defined(__linux__)
+			// Extensions add-ons requested, when supported and not already enabled
+			for (const std::string &name : requested_extensions)
+			{
+				if (name == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
+				{
+					// The feature: core in Vulkan 1.2, the extension before
+					VkPhysicalDeviceBufferDeviceAddressFeatures supported_bda { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+					VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported_bda };
+					const auto get_features2 = instance.dispatch_table.GetPhysicalDeviceFeatures2 != nullptr ? instance.dispatch_table.GetPhysicalDeviceFeatures2 : instance.dispatch_table.GetPhysicalDeviceFeatures2KHR;
+					if (get_features2 != nullptr)
+						get_features2(physicalDevice, &supported);
+					if (!supported_bda.bufferDeviceAddress)
+					{
+						reshade::log::message(reshade::log::level::warning, "Add-on requested buffer device address, which this device does not support.");
+						continue;
+					}
+					if (instance.api_version < VK_API_VERSION_1_2 && !add_extension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, false))
+						continue;
+					force_buffer_device_address = true;
+					continue;
+				}
+				if (std::find_if(enabled_extensions.cbegin(), enabled_extensions.cend(),
+						[&name](const char *enabled) { return name == enabled; }) != enabled_extensions.cend())
+					continue;
+				if (add_extension(name.c_str(), false))
+					reshade::log::message(reshade::log::level::info, "Enabled device extension \"%s\" requested by an add-on.", name.c_str());
+			}
+#endif
 		}
 	}
 
@@ -345,6 +444,8 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		// Force enable timeline semaphore support (used for effect runtime present/graphics queue synchronization in case of present from compute, e.g. in Indiana Jones and the Great Circle and DOOM Eternal)
 		ext.timeline_semaphore = const_cast<VkPhysicalDeviceVulkan12Features *>(existing_vulkan_12_features)->timelineSemaphore = VK_TRUE;
 		ext.descriptor_indexing = existing_vulkan_12_features->descriptorIndexing;
+		if (force_buffer_device_address)
+			const_cast<VkPhysicalDeviceVulkan12Features *>(existing_vulkan_12_features)->bufferDeviceAddress = VK_TRUE;
 		ext.buffer_device_address = existing_vulkan_12_features->bufferDeviceAddress;
 	}
 	else
@@ -374,10 +475,13 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		if (const auto existing_buffer_device_address_features = find_in_structure_chain<VkPhysicalDeviceBufferDeviceAddressFeatures>(
 				pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES))
 		{
+			if (force_buffer_device_address)
+				const_cast<VkPhysicalDeviceBufferDeviceAddressFeatures *>(existing_buffer_device_address_features)->bufferDeviceAddress = VK_TRUE;
 			ext.buffer_device_address = existing_buffer_device_address_features->bufferDeviceAddress;
 		}
-		else if (ext.buffer_device_address)
+		else if (ext.buffer_device_address || force_buffer_device_address)
 		{
+			ext.buffer_device_address = 1;
 			append_to_structure_chain(&create_info, &ext.buffer_device_address_features);
 			ext.buffer_device_address_features.bufferDeviceAddress = VK_TRUE;
 		}
@@ -676,6 +780,17 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 	}
 	#pragma endregion
 
+#if defined(__linux__)
+	{
+		device_interop interop { instance.handle, physicalDevice, get_instance_proc_addr, get_device_proc_addr, instance.api_version, {}, {}, ext.buffer_device_address != 0 };
+		interop.extension_names.assign(enabled_extensions.begin(), enabled_extensions.end());
+		for (const std::string &name : interop.extension_names)
+			interop.extensions.push_back(name.c_str());
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		s_device_interop[device.handle] = std::move(interop);
+	}
+#endif
+
 	// Initialize per-device data
 	const auto device_impl = new reshade::vulkan::device_impl(
 		device.handle,
@@ -778,6 +893,13 @@ void     VKAPI_CALL vkDestroyDevice(VkDevice device, const VkAllocationCallbacks
 
 	// Finally destroy the device
 	delete device_impl;
+
+#if defined(__linux__)
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		s_device_interop.erase(device);
+	}
+#endif
 
 	trampoline(device, pAllocator);
 }
