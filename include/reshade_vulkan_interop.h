@@ -17,8 +17,21 @@ extern "C" {
 
 /// Asks ReShade to enable a device extension on devices created from now on, when the driver supports it.
 /// Call this from AddonInit: add-ons are loaded when the instance is created, before its devices.
-/// Requesting "VK_KHR_buffer_device_address" also enables the bufferDeviceAddress feature (core since Vulkan 1.2).
+/// Requesting "VK_KHR_buffer_device_address" also enables the bufferDeviceAddress feature (core since Vulkan 1.2),
+/// and "VK_NV_optical_flow" the opticalFlow feature (the extension is only enabled when the feature is supported).
 void ReShadeVulkanRequestDeviceExtension(const char *name);
+
+/// Asks ReShade to give devices created from now on one more queue with at least 'queue_flags' (VkQueueFlags),
+/// for the add-on's own work. The family with the fewest other capabilities is preferred, so that the work can run
+/// beside the game's. The game never sees this queue. Call this from AddonInit.
+/// Returns the queue's index in ReShadeVulkanDeviceInterop::queues; asking again for the same flags returns the same index.
+uint32_t ReShadeVulkanRequestQueue(uint32_t queue_flags);
+
+struct ReShadeVulkanQueue
+{
+	void *queue; ///< VkQueue, or null when no family had room
+	uint32_t family_index;
+};
 
 struct ReShadeVulkanDeviceInterop
 {
@@ -32,6 +45,11 @@ struct ReShadeVulkanDeviceInterop
 	uint32_t enabled_extension_count;
 	const char *const *enabled_extensions; ///< Valid until the device is destroyed
 	uint32_t buffer_device_address; ///< Whether the bufferDeviceAddress feature is enabled
+	// Filled only when 'size' covers them:
+	uint32_t queue_count;
+	const struct ReShadeVulkanQueue *queues; ///< Added for ReShadeVulkanRequestQueue, in request order; valid until the device is destroyed
+	uint32_t queue_family_count; ///< The queue families the device was created with (for concurrent sharing)
+	const uint32_t *queue_family_indices; ///< Valid until the device is destroyed
 };
 
 /// Describes a device ReShade hooked (the VkDevice of api::device::get_native()). Returns 0 for any other device.

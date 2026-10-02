@@ -30,10 +30,21 @@ lockfree_linear_map<void *, reshade::vulkan::device_impl *, 8> g_vulkan_devices;
 #if defined(__linux__)
 #include "reshade_vulkan_interop.h"
 
-// Device extensions add-ons asked for (see ReShadeVulkanRequestDeviceExtension), and what each device
+// Device extensions and queues add-ons asked for (see reshade_vulkan_interop.h), and what each device
 // got, for add-ons that drive the device with native Vulkan calls
 namespace
 {
+	// From the Vulkan registry: newer than the bundled headers (generated without VK_NV_optical_flow)
+	constexpr VkQueueFlags queue_video_decode_bit = 0x20, queue_video_encode_bit = 0x40, queue_optical_flow_bit = 0x100;
+	constexpr const char optical_flow_extension_name[] = "VK_NV_optical_flow";
+	constexpr VkStructureType structure_type_optical_flow_features = static_cast<VkStructureType>(1000464000);
+	struct optical_flow_features // VkPhysicalDeviceOpticalFlowFeaturesNV
+	{
+		VkStructureType sType;
+		void *pNext;
+		VkBool32 opticalFlow;
+	};
+
 	struct device_interop
 	{
 		VkInstance instance;
@@ -44,16 +55,47 @@ namespace
 		std::vector<std::string> extension_names;
 		std::vector<const char *> extensions;
 		bool buffer_device_address;
+		std::vector<ReShadeVulkanQueue> queues; // in request order
+		std::vector<uint32_t> queue_families;
 	};
 
 	std::mutex s_interop_mutex;
 	std::vector<std::string> s_requested_device_extensions;
+	std::vector<uint32_t> s_requested_queues; // VkQueueFlags, in request order
 	std::unordered_map<VkDevice, device_interop> s_device_interop;
 
 	std::vector<std::string> requested_device_extensions()
 	{
 		const std::lock_guard<std::mutex> lock(s_interop_mutex);
 		return s_requested_device_extensions;
+	}
+	std::vector<uint32_t> requested_queues()
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		return s_requested_queues;
+	}
+
+	// The family for a queue with `required` capabilities: the one with room that has the fewest other
+	// capabilities (graphics counting most), so that the work runs beside the game's. `used` counts the
+	// queues already asked for per family, and is updated.
+	bool choose_queue_family(const std::vector<VkQueueFamilyProperties> &families, VkQueueFlags required, std::vector<uint32_t> &used, const std::vector<bool> &special, uint32_t &out_family, uint32_t &out_index)
+	{
+		uint32_t best = std::numeric_limits<uint32_t>::max(), best_score = std::numeric_limits<uint32_t>::max();
+		for (uint32_t family = 0; family < families.size(); ++family)
+		{
+			const VkQueueFlags flags = families[family].queueFlags;
+			if ((flags & required) != required || special[family] || used[family] >= families[family].queueCount)
+				continue;
+			const VkQueueFlags extra = flags & ~required & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | queue_video_decode_bit | queue_video_encode_bit | queue_optical_flow_bit);
+			const uint32_t score = static_cast<uint32_t>(__builtin_popcount(extra)) + ((extra & VK_QUEUE_GRAPHICS_BIT) != 0 ? 8u : 0u);
+			if (score < best_score)
+				best = family, best_score = score;
+		}
+		if (best == std::numeric_limits<uint32_t>::max())
+			return false;
+		out_family = best;
+		out_index = used[best]++;
+		return true;
 	}
 }
 
@@ -67,9 +109,20 @@ extern "C" __attribute__((visibility("default"))) void ReShadeVulkanRequestDevic
 		s_requested_device_extensions.emplace_back(name);
 }
 
+extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanRequestQueue(uint32_t queue_flags)
+{
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	// Asked again on every load of the add-on: the same request keeps its index
+	const auto it = std::find(s_requested_queues.begin(), s_requested_queues.end(), queue_flags);
+	if (it != s_requested_queues.end())
+		return static_cast<uint32_t>(it - s_requested_queues.begin());
+	s_requested_queues.push_back(queue_flags);
+	return static_cast<uint32_t>(s_requested_queues.size() - 1);
+}
+
 extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanGetDeviceInterop(void *device, ReShadeVulkanDeviceInterop *out)
 {
-	if (out == nullptr || out->size < sizeof(ReShadeVulkanDeviceInterop))
+	if (out == nullptr || out->size < offsetof(ReShadeVulkanDeviceInterop, queue_count))
 		return 0;
 	const std::lock_guard<std::mutex> lock(s_interop_mutex);
 	const auto it = s_device_interop.find(static_cast<VkDevice>(device));
@@ -84,6 +137,13 @@ extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanGetDevic
 	out->enabled_extension_count = static_cast<uint32_t>(interop.extensions.size());
 	out->enabled_extensions = interop.extensions.data();
 	out->buffer_device_address = interop.buffer_device_address ? 1 : 0;
+	if (out->size >= sizeof(ReShadeVulkanDeviceInterop))
+	{
+		out->queue_count = static_cast<uint32_t>(interop.queues.size());
+		out->queues = interop.queues.data();
+		out->queue_family_count = static_cast<uint32_t>(interop.queue_families.size());
+		out->queue_family_indices = interop.queue_families.data();
+	}
 	return 1;
 }
 #endif
@@ -206,6 +266,7 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 	std::vector<const char *> enabled_extensions;
 	enabled_extensions.reserve(pCreateInfo->enabledExtensionCount);
 	bool force_buffer_device_address = false;
+	bool force_optical_flow = false;
 #if defined(__linux__)
 	// Outlives the call below: enabled_extensions points into it
 	const std::vector<std::string> requested_extensions = requested_device_extensions();
@@ -413,6 +474,21 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 				if (std::find_if(enabled_extensions.cbegin(), enabled_extensions.cend(),
 						[&name](const char *enabled) { return name == enabled; }) != enabled_extensions.cend())
 					continue;
+				if (name == optical_flow_extension_name)
+				{
+					// The extension is useless without its feature
+					optical_flow_features supported_flow { structure_type_optical_flow_features };
+					VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported_flow };
+					const auto get_features2 = instance.dispatch_table.GetPhysicalDeviceFeatures2 != nullptr ? instance.dispatch_table.GetPhysicalDeviceFeatures2 : instance.dispatch_table.GetPhysicalDeviceFeatures2KHR;
+					if (get_features2 != nullptr)
+						get_features2(physicalDevice, &supported);
+					if (!supported_flow.opticalFlow)
+						continue;
+					force_optical_flow = add_extension(name.c_str(), false);
+					if (force_optical_flow)
+						reshade::log::message(reshade::log::level::info, "Enabled device extension \"%s\" requested by an add-on.", name.c_str());
+					continue;
+				}
 				if (add_extension(name.c_str(), false))
 					reshade::log::message(reshade::log::level::info, "Enabled device extension \"%s\" requested by an add-on.", name.c_str());
 			}
@@ -423,6 +499,63 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 	VkDeviceCreateInfo create_info = *pCreateInfo;
 	create_info.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
 	create_info.ppEnabledExtensionNames = enabled_extensions.data();
+
+#if defined(__linux__)
+	// Queues for add-ons' own work, when they asked and ReShade runs on this device. The game's queues
+	// keep their indices: added queues come after them in their family.
+	std::vector<VkDeviceQueueCreateInfo> queue_create_infos(pCreateInfo->pQueueCreateInfos, pCreateInfo->pQueueCreateInfos + pCreateInfo->queueCreateInfoCount);
+	std::vector<std::vector<float>> queue_priorities;
+	std::vector<ReShadeVulkanQueue> added_queues; // family and index for now, the VkQueue after creation
+	std::vector<uint32_t> added_queue_indices;
+	if (graphics_queue_family_index != std::numeric_limits<uint32_t>::max())
+	{
+		std::vector<uint32_t> used(queue_families.size(), 0);
+		std::vector<bool> special(queue_families.size(), false);
+		for (const VkDeviceQueueCreateInfo &info : queue_create_infos)
+			used[info.queueFamilyIndex] += info.queueCount, special[info.queueFamilyIndex] = special[info.queueFamilyIndex] || info.flags != 0;
+		std::vector<uint32_t> added_per_family(queue_families.size(), 0);
+		for (const uint32_t flags : requested_queues())
+		{
+			uint32_t family = 0, index = 0;
+			if (!choose_queue_family(queue_families, flags, used, special, family, index))
+			{
+				reshade::log::message(reshade::log::level::warning, "No queue family has room for a queue (flags 0x%x) requested by an add-on.", flags);
+				added_queues.push_back({ nullptr, std::numeric_limits<uint32_t>::max() });
+				added_queue_indices.push_back(0);
+				continue;
+			}
+			added_queues.push_back({ nullptr, family });
+			added_queue_indices.push_back(index);
+			added_per_family[family] += 1;
+			reshade::log::message(reshade::log::level::info, "Adding a queue (flags 0x%x, family %u, index %u) requested by an add-on.", flags, family, index);
+		}
+		for (uint32_t family = 0; family < added_per_family.size(); ++family)
+		{
+			if (added_per_family[family] == 0)
+				continue;
+			const auto existing = std::find_if(queue_create_infos.begin(), queue_create_infos.end(),
+				[family](const VkDeviceQueueCreateInfo &info) { return info.queueFamilyIndex == family; });
+			if (existing != queue_create_infos.end())
+			{
+				queue_priorities.emplace_back(existing->pQueuePriorities, existing->pQueuePriorities + existing->queueCount);
+				queue_priorities.back().resize(existing->queueCount + added_per_family[family], 1.0f);
+				existing->queueCount += added_per_family[family];
+				existing->pQueuePriorities = queue_priorities.back().data();
+			}
+			else
+			{
+				queue_priorities.emplace_back(added_per_family[family], 1.0f);
+				VkDeviceQueueCreateInfo info { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+				info.queueFamilyIndex = family;
+				info.queueCount = added_per_family[family];
+				info.pQueuePriorities = queue_priorities.back().data();
+				queue_create_infos.push_back(info);
+			}
+		}
+		create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_create_infos.size());
+		create_info.pQueueCreateInfos = queue_create_infos.data();
+	}
+#endif
 
 	VkDevicePrivateDataCreateInfo private_data_info { VK_STRUCTURE_TYPE_DEVICE_PRIVATE_DATA_CREATE_INFO };
 	private_data_info.privateDataSlotRequestCount = 1;
@@ -466,10 +599,12 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		{
 			ext.timeline_semaphore = const_cast<VkPhysicalDeviceTimelineSemaphoreFeatures *>(existing_timeline_semaphore_features)->timelineSemaphore = VK_TRUE;
 		}
-		else if (ext.timeline_semaphore)
+		else if (ext.timeline_semaphore || instance.api_version >= VK_API_VERSION_1_2)
 		{
+			// Core in Vulkan 1.2 but still off unless enabled: force it here too, as for the Vulkan 1.2 features structure above
 			append_to_structure_chain(&create_info, &ext.timeline_semaphore_features);
 			ext.timeline_semaphore_features.timelineSemaphore = VK_TRUE;
+			ext.timeline_semaphore = 1;
 		}
 
 		if (const auto existing_buffer_device_address_features = find_in_structure_chain<VkPhysicalDeviceBufferDeviceAddressFeatures>(
@@ -562,6 +697,22 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 			ext.host_image_copy_features.hostImageCopy = VK_TRUE;
 		}
 	}
+
+#if defined(__linux__)
+	optical_flow_features flow_features { structure_type_optical_flow_features };
+	if (force_optical_flow)
+	{
+		if (const auto existing_flow_features = find_in_structure_chain<optical_flow_features>(pCreateInfo->pNext, structure_type_optical_flow_features))
+		{
+			const_cast<optical_flow_features *>(existing_flow_features)->opticalFlow = VK_TRUE;
+		}
+		else
+		{
+			append_to_structure_chain(&create_info, &flow_features);
+			flow_features.opticalFlow = VK_TRUE;
+		}
+	}
+#endif
 
 	// Enable Vulkan memory model device scope if it is not, since it is required by atomics in generated SPIR-V code for effects
 	if (const auto existing_memory_model_features = find_in_structure_chain<VkPhysicalDeviceVulkanMemoryModelFeatures>(
@@ -782,7 +933,21 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 
 #if defined(__linux__)
 	{
-		device_interop interop { instance.handle, physicalDevice, get_instance_proc_addr, get_device_proc_addr, instance.api_version, {}, {}, ext.buffer_device_address != 0 };
+		for (size_t i = 0; i < added_queues.size(); ++i)
+		{
+			if (added_queues[i].family_index == std::numeric_limits<uint32_t>::max())
+				continue;
+			VkQueue queue = VK_NULL_HANDLE;
+			device.dispatch_table.GetDeviceQueue(device.handle, added_queues[i].family_index, added_queue_indices[i], &queue);
+			// As for the game's queues below: the loader did not set the dispatch pointer on these
+			if (queue != VK_NULL_HANDLE)
+				*reinterpret_cast<void **>(queue) = *reinterpret_cast<void **>(device.handle);
+			added_queues[i].queue = queue;
+		}
+		device_interop interop { instance.handle, physicalDevice, get_instance_proc_addr, get_device_proc_addr, instance.api_version, {}, {}, ext.buffer_device_address != 0, added_queues, {} };
+		for (uint32_t i = 0; i < create_info.queueCreateInfoCount; ++i)
+			if (std::find(interop.queue_families.begin(), interop.queue_families.end(), create_info.pQueueCreateInfos[i].queueFamilyIndex) == interop.queue_families.end())
+				interop.queue_families.push_back(create_info.pQueueCreateInfos[i].queueFamilyIndex);
 		interop.extension_names.assign(enabled_extensions.begin(), enabled_extensions.end());
 		for (const std::string &name : interop.extension_names)
 			interop.extensions.push_back(name.c_str());
