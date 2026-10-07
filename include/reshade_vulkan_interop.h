@@ -61,6 +61,16 @@ struct ReShadeVulkanDeviceInterop
 /// Describes a device ReShade hooked (the VkDevice of api::device::get_native()). Returns 0 for any other device.
 uint32_t ReShadeVulkanGetDeviceInterop(void *device, struct ReShadeVulkanDeviceInterop *out);
 
+/// Ends the dynamic rendering the application's command buffer (VkCommandBuffer) is in, so that the add-on can
+/// record commands that are not allowed inside one (copies, compute work) at this point of the application's
+/// frame. Returns what it was begun with (a 'const VkRenderingInfo *', valid until rendering begins again), or
+/// null when there is nothing that can be ended and begun again: no rendering, a render pass object, rendering
+/// that is suspended or resumed, or extension structures.
+/// Follow with ReShadeVulkanResumeRendering - or, inside an 'end_render_pass' event, return true from it instead.
+const void *ReShadeVulkanInterruptRendering(void *command_buffer);
+/// Begins the interrupted rendering again, with the attachments' contents loaded.
+void ReShadeVulkanResumeRendering(void *command_buffer);
+
 #ifdef __cplusplus
 }
 #endif

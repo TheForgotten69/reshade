@@ -1842,6 +1842,45 @@ void VKAPI_CALL vkCmdBeginRendering(VkCommandBuffer commandBuffer, const VkRende
 
 	cmd_impl->_is_in_render_pass = 3;
 
+	// Keep what is needed to end this rendering and begin it again (see ReShadeVulkanInterruptRendering).
+	// Not when it is suspended or resumed, nor with extension structures other than the one DXVK chains
+	// to its attachments (their flags, VK_KHR_maintenance10), which would have to be copied too.
+	{
+		bool plain = pRenderingInfo->pNext == nullptr && pRenderingInfo->colorAttachmentCount <= 8 &&
+			(pRenderingInfo->flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT)) == 0;
+		const auto keep = [&](uint32_t index, const VkRenderingAttachmentInfo &attachment) {
+			VkRenderingAttachmentInfo &kept = cmd_impl->current_rendering_attachments[index];
+			kept = attachment;
+			kept.pNext = nullptr;
+			if (const auto flags = static_cast<const reshade::vulkan::rendering_attachment_flags_info *>(attachment.pNext); flags != nullptr)
+			{
+				if (flags->sType != reshade::vulkan::rendering_attachment_flags_info::structure_type || flags->pNext != nullptr)
+					return false;
+				cmd_impl->current_rendering_attachment_flags[index] = *flags;
+				kept.pNext = &cmd_impl->current_rendering_attachment_flags[index];
+			}
+			return true;
+		};
+		VkRenderingInfo &kept = cmd_impl->current_rendering;
+		kept = *pRenderingInfo;
+		kept.pColorAttachments = cmd_impl->current_rendering_attachments;
+		for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount && plain; ++i)
+			plain = keep(i, pRenderingInfo->pColorAttachments[i]);
+		if (plain && pRenderingInfo->pDepthAttachment != nullptr)
+		{
+			plain = keep(8, *pRenderingInfo->pDepthAttachment);
+			kept.pDepthAttachment = &cmd_impl->current_rendering_attachments[8];
+		}
+		if (plain && pRenderingInfo->pStencilAttachment != nullptr)
+		{
+			plain = keep(9, *pRenderingInfo->pStencilAttachment);
+			kept.pStencilAttachment = &cmd_impl->current_rendering_attachments[9];
+		}
+		if (!plain)
+			kept.sType = static_cast<VkStructureType>(0);
+		cmd_impl->rendering_interrupted = false;
+	}
+
 	temp_mem<reshade::api::render_pass_render_target_desc, 8> rts(pRenderingInfo->colorAttachmentCount);
 	for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; ++i)
 		rts[i] = reshade::vulkan::convert_render_pass_render_target_desc(pRenderingInfo->pColorAttachments + i);
@@ -1861,6 +1900,54 @@ void VKAPI_CALL vkCmdBeginRendering(VkCommandBuffer commandBuffer, const VkRende
 	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdBeginRendering, device_impl);
 	trampoline(commandBuffer, pRenderingInfo);
 }
+// An add-on ends the application's dynamic rendering to record commands that cannot be inside one
+extern "C" __attribute__((visibility("default"))) const void *ReShadeVulkanInterruptRendering(void *command_buffer)
+{
+#if RESHADE_ADDON
+	const auto commandBuffer = static_cast<VkCommandBuffer>(command_buffer);
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+	if (device_impl == nullptr)
+		return nullptr;
+	const auto cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	if (cmd_impl == nullptr || cmd_impl->_is_in_render_pass != 3 || cmd_impl->current_rendering.sType != VK_STRUCTURE_TYPE_RENDERING_INFO)
+		return nullptr;
+
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdEndRendering, device_impl);
+	if (trampoline == nullptr)
+		return nullptr;
+	trampoline(commandBuffer);
+
+	cmd_impl->_is_in_render_pass = 0;
+	cmd_impl->rendering_interrupted = true;
+	return &cmd_impl->current_rendering;
+#else
+	return nullptr;
+#endif
+}
+extern "C" __attribute__((visibility("default"))) void ReShadeVulkanResumeRendering(void *command_buffer)
+{
+#if RESHADE_ADDON
+	const auto commandBuffer = static_cast<VkCommandBuffer>(command_buffer);
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+	if (device_impl == nullptr)
+		return;
+	const auto cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	if (cmd_impl == nullptr || !cmd_impl->rendering_interrupted)
+		return;
+
+	// The attachments keep what was drawn so far (and are not resolved a second time from a cleared state)
+	for (VkRenderingAttachmentInfo &attachment : cmd_impl->current_rendering_attachments)
+		if (attachment.loadOp != VK_ATTACHMENT_LOAD_OP_NONE)
+			attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdBeginRendering, device_impl);
+	trampoline(commandBuffer, &cmd_impl->current_rendering);
+
+	cmd_impl->_is_in_render_pass = 3;
+	cmd_impl->rendering_interrupted = false;
+#endif
+}
+
 void VKAPI_CALL vkCmdEndRendering(VkCommandBuffer commandBuffer)
 {
 	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));

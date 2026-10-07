@@ -84,6 +84,15 @@ namespace reshade::vulkan
 		uint8_t _is_in_render_pass = 0;
 	};
 
+	// VkRenderingAttachmentFlagsInfoKHR (VK_KHR_maintenance10), which the bundled headers may predate
+	struct rendering_attachment_flags_info
+	{
+		static constexpr VkStructureType structure_type = static_cast<VkStructureType>(1000630002);
+		VkStructureType sType;
+		const void *pNext;
+		VkFlags flags;
+	};
+
 	template <>
 	struct object_data<VK_OBJECT_TYPE_COMMAND_BUFFER> : public command_list_impl
 	{
@@ -100,6 +109,13 @@ namespace reshade::vulkan
 		VkFramebuffer current_framebuffer = VK_NULL_HANDLE;
 		VkImageView current_color_attachments[8] = {};
 		VkImageView current_depth_stencil_attachment = VK_NULL_HANDLE;
+
+		// What the application's dynamic rendering was begun with, for ReShadeVulkanInterruptRendering.
+		// 'pColorAttachments' etc. point at the copies below; 'sType' is zero when it cannot be begun again.
+		VkRenderingInfo current_rendering = {};
+		VkRenderingAttachmentInfo current_rendering_attachments[8 + 2] = {};
+		rendering_attachment_flags_info current_rendering_attachment_flags[8 + 2] = {};
+		bool rendering_interrupted = false;
 #endif
 	};
 }
