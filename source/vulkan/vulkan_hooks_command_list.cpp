@@ -387,6 +387,47 @@ void VKAPI_CALL vkCmdSetDepthTestEnable(VkCommandBuffer commandBuffer, VkBool32 
 #endif
 }
 
+void VKAPI_CALL vkCmdSetStencilTestEnable(VkCommandBuffer commandBuffer, VkBool32 stencilTestEnable)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdSetStencilTestEnable, device_impl);
+	trampoline(commandBuffer, stencilTestEnable);
+
+#if RESHADE_ADDON >= 2
+	if (!reshade::has_addon_event<reshade::addon_event::bind_pipeline_states>())
+		return;
+
+	auto *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	const reshade::api::dynamic_state state = reshade::api::dynamic_state::stencil_enable;
+	const uint32_t value = stencilTestEnable;
+	reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(cmd_impl, 1, &state, &value);
+#endif
+}
+void VKAPI_CALL vkCmdSetStencilOp(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp, VkCompareOp compareOp)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdSetStencilOp, device_impl);
+	trampoline(commandBuffer, faceMask, failOp, passOp, depthFailOp, compareOp);
+
+#if RESHADE_ADDON >= 2
+	if (!reshade::has_addon_event<reshade::addon_event::bind_pipeline_states>())
+		return;
+
+	auto *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	const reshade::api::dynamic_state states[8] = {
+		reshade::api::dynamic_state::front_stencil_fail_op, reshade::api::dynamic_state::front_stencil_pass_op, reshade::api::dynamic_state::front_stencil_depth_fail_op, reshade::api::dynamic_state::front_stencil_func,
+		reshade::api::dynamic_state::back_stencil_fail_op, reshade::api::dynamic_state::back_stencil_pass_op, reshade::api::dynamic_state::back_stencil_depth_fail_op, reshade::api::dynamic_state::back_stencil_func };
+	const uint32_t face[4] = {
+		static_cast<uint32_t>(reshade::vulkan::convert_stencil_op(failOp)), static_cast<uint32_t>(reshade::vulkan::convert_stencil_op(passOp)),
+		static_cast<uint32_t>(reshade::vulkan::convert_stencil_op(depthFailOp)), static_cast<uint32_t>(reshade::vulkan::convert_compare_op(compareOp)) };
+	const uint32_t values[8] = { face[0], face[1], face[2], face[3], face[0], face[1], face[2], face[3] };
+	if ((faceMask & VK_STENCIL_FACE_FRONT_BIT) != 0)
+		reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(cmd_impl, 4, states, values);
+	if ((faceMask & VK_STENCIL_FACE_BACK_BIT) != 0)
+		reshade::invoke_addon_event<reshade::addon_event::bind_pipeline_states>(cmd_impl, 4, states + 4, values);
+#endif
+}
+
 void VKAPI_CALL vkCmdSetDepthWriteEnable(VkCommandBuffer commandBuffer, VkBool32 depthWriteEnable)
 {
 	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
