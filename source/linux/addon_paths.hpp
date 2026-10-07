@@ -8,11 +8,16 @@ namespace reshade::utils
 {
 	inline std::vector<std::filesystem::path> find_addon_files(const std::filesystem::path &user_directory, const std::filesystem::path &installed_directory)
 	{
-		std::vector<std::filesystem::path> files;
+		// Each directory, and before it its "addon" folder: where an add-on lives together with the files
+		// it needs (libraries it loads, its data), apart from ReShade's own configuration and logs
+		std::vector<std::filesystem::path> directories;
 		for (const auto &directory : { user_directory, installed_directory })
+			if (!directory.empty())
+				directories.insert(directories.end(), { directory / "addon", directory });
+
+		std::vector<std::filesystem::path> files;
+		for (const auto &directory : directories)
 		{
-			if (directory.empty())
-				continue;
 			std::error_code ec;
 			for (std::filesystem::directory_iterator it(directory, std::filesystem::directory_options::skip_permission_denied, ec), end;
 				!ec && it != end; it.increment(ec))
