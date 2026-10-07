@@ -18,6 +18,7 @@
 #include <cstring> // std::strcmp, std::strncmp
 #include <algorithm> // std::find_if, std::min
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
@@ -984,6 +985,11 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		// VK_KHR_maintenance6 (not in the glad loader): how DXVK binds and pushes descriptors on a pre-1.4 instance
 		device.dispatch_table.CmdBindDescriptorSets2 = reinterpret_cast<PFN_vkCmdBindDescriptorSets2>(get_device_proc_addr(*pDevice, "vkCmdBindDescriptorSets2KHR"));
 		device.dispatch_table.CmdPushDescriptorSet2 = reinterpret_cast<PFN_vkCmdPushDescriptorSet2>(get_device_proc_addr(*pDevice, "vkCmdPushDescriptorSet2KHR"));
+		// VK_KHR_map_memory2 (likewise): how DXVK maps its memory
+		if (device.dispatch_table.MapMemory2 == nullptr)
+			device.dispatch_table.MapMemory2 = reinterpret_cast<PFN_vkMapMemory2>(get_device_proc_addr(*pDevice, "vkMapMemory2KHR"));
+		if (device.dispatch_table.UnmapMemory2 == nullptr)
+			device.dispatch_table.UnmapMemory2 = reinterpret_cast<PFN_vkUnmapMemory2>(get_device_proc_addr(*pDevice, "vkUnmapMemory2KHR"));
 	}
 	#pragma endregion
 
@@ -1186,6 +1192,86 @@ VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const Vk
 
 	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(QueueSubmit2, device_impl);
 	return trampoline(queue, submitCount, pSubmits, fence);
+}
+
+// Where the application has its memory mapped (the address of the memory's first byte), for add-ons that
+// read what it writes to its buffers (ReShadeVulkanGetMappedBuffer)
+static std::shared_mutex s_mapped_memory_mutex;
+static std::unordered_map<VkDeviceMemory, void *> s_mapped_memory;
+
+VkResult VKAPI_CALL vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void **ppData)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(MapMemory, device_impl);
+
+	const VkResult result = trampoline(device, memory, offset, size, flags, ppData);
+	if (result == VK_SUCCESS && ppData != nullptr)
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory[memory] = static_cast<uint8_t *>(*ppData) - offset;
+	}
+	return result;
+}
+void     VKAPI_CALL vkUnmapMemory(VkDevice device, VkDeviceMemory memory)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory.erase(memory);
+	}
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(UnmapMemory, device_impl);
+	trampoline(device, memory);
+}
+VkResult VKAPI_CALL vkMapMemory2(VkDevice device, const VkMemoryMapInfo *pMemoryMapInfo, void **ppData)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(MapMemory2, device_impl);
+
+	const VkResult result = trampoline(device, pMemoryMapInfo, ppData);
+	if (result == VK_SUCCESS && ppData != nullptr && pMemoryMapInfo != nullptr)
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory[pMemoryMapInfo->memory] = static_cast<uint8_t *>(*ppData) - pMemoryMapInfo->offset;
+	}
+	return result;
+}
+VkResult VKAPI_CALL vkUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo *pMemoryUnmapInfo)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	if (pMemoryUnmapInfo != nullptr)
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory.erase(pMemoryUnmapInfo->memory);
+	}
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(UnmapMemory2, device_impl);
+	return trampoline(device, pMemoryUnmapInfo);
+}
+void     VKAPI_CALL vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks *pAllocator)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory.erase(memory);
+	}
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(FreeMemory, device_impl);
+	trampoline(device, memory, pAllocator);
+}
+
+extern "C" __attribute__((visibility("default"))) void *ReShadeVulkanGetMappedBuffer(void *device, uint64_t buffer)
+{
+#if RESHADE_ADDON
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(static_cast<VkDevice>(device)));
+	if (device_impl == nullptr || buffer == 0)
+		return nullptr;
+	const auto buffer_data = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_BUFFER>((VkBuffer)buffer);
+	if (buffer_data == nullptr || buffer_data->memory == VK_NULL_HANDLE)
+		return nullptr;
+	const std::shared_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+	const auto it = s_mapped_memory.find(buffer_data->memory);
+	return it != s_mapped_memory.end() ? static_cast<uint8_t *>(it->second) + buffer_data->memory_offset : nullptr;
+#else
+	return nullptr;
+#endif
 }
 
 VkResult VKAPI_CALL vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset)

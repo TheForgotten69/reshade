@@ -61,6 +61,11 @@ struct ReShadeVulkanDeviceInterop
 /// Describes a device ReShade hooked (the VkDevice of api::device::get_native()). Returns 0 for any other device.
 uint32_t ReShadeVulkanGetDeviceInterop(void *device, struct ReShadeVulkanDeviceInterop *out);
 
+/// Where the application has a buffer (VkBuffer) mapped: the address of the buffer's first byte, or null while
+/// its memory is not mapped. For add-ons that read what the application writes to its buffers (for example
+/// the constants of a draw). Valid until the application unmaps or frees the memory.
+void *ReShadeVulkanGetMappedBuffer(void *device, uint64_t buffer);
+
 /// Ends the dynamic rendering the application's command buffer (VkCommandBuffer) is in, so that the add-on can
 /// record commands that are not allowed inside one (copies, compute work) at this point of the application's
 /// frame. Returns what it was begun with (a 'const VkRenderingInfo *', valid until rendering begins again), or
