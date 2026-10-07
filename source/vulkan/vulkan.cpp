@@ -92,6 +92,16 @@ PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *p
 #if RESHADE_ADDON
 	RESHADE_VULKAN_HOOK_PROC(CmdSetViewport);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetScissor);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetViewportWithCount, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetViewportWithCount, EXT);
+#endif
+#if RESHADE_ADDON >= 2
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdPushDescriptorSet2, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdPushDescriptorSet2, KHR);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdBindDescriptorSets2, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdBindDescriptorSets2, KHR);
+#endif
+#if RESHADE_ADDON
 #endif
 #if RESHADE_ADDON >= 2
 	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthTestEnable, );
@@ -344,6 +354,7 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 	RESHADE_VULKAN_HOOK_PROC(DestroyInstance);
 	RESHADE_VULKAN_HOOK_PROC(CreateDevice);
 	RESHADE_VULKAN_HOOK_PROC(DestroyDevice);
+	RESHADE_VULKAN_HOOK_PROC(EnumerateDeviceExtensionProperties);
 #endif
 
 #if VK_VERSION_1_3

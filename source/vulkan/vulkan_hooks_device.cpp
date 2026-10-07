@@ -61,6 +61,7 @@ namespace
 
 	std::mutex s_interop_mutex;
 	std::vector<std::string> s_requested_device_extensions;
+	std::vector<std::string> s_hidden_device_extensions;
 	std::vector<uint32_t> s_requested_queues; // VkQueueFlags, in request order
 	std::unordered_map<VkDevice, device_interop> s_device_interop;
 
@@ -107,6 +108,58 @@ extern "C" __attribute__((visibility("default"))) void ReShadeVulkanRequestDevic
 	// Add-ons are loaded again for every instance, and ask again: keep each name once
 	if (std::find(s_requested_device_extensions.begin(), s_requested_device_extensions.end(), name) == s_requested_device_extensions.end())
 		s_requested_device_extensions.emplace_back(name);
+}
+
+extern "C" __attribute__((visibility("default"))) void ReShadeVulkanHideDeviceExtension(const char *name)
+{
+	if (name == nullptr)
+		return;
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	if (std::find(s_hidden_device_extensions.begin(), s_hidden_device_extensions.end(), name) == s_hidden_device_extensions.end())
+		s_hidden_device_extensions.emplace_back(name);
+}
+
+// What the application sees of the device's extensions: all but the ones add-ons asked to hide
+VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
+{
+	// This layer has no device extensions of its own
+	if (pLayerName != nullptr && 0 == std::strcmp(pLayerName, "VK_LAYER_reshade"))
+	{
+		*pPropertyCount = 0;
+		return VK_SUCCESS;
+	}
+
+	RESHADE_VULKAN_GET_INSTANCE_DISPATCH_PTR(EnumerateDeviceExtensionProperties, physicalDevice);
+
+	std::vector<std::string> hidden;
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		hidden = s_hidden_device_extensions;
+	}
+	if (hidden.empty() || pLayerName != nullptr)
+		return trampoline(physicalDevice, pLayerName, pPropertyCount, pProperties);
+
+	uint32_t count = 0;
+	VkResult result = trampoline(physicalDevice, nullptr, &count, nullptr);
+	if (result != VK_SUCCESS)
+		return result;
+	std::vector<VkExtensionProperties> all(count);
+	result = trampoline(physicalDevice, nullptr, &count, all.data());
+	if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+		return result;
+	all.resize(count);
+	all.erase(std::remove_if(all.begin(), all.end(), [&](const VkExtensionProperties &extension) {
+		return std::find(hidden.begin(), hidden.end(), extension.extensionName) != hidden.end(); }), all.end());
+
+	if (pProperties == nullptr)
+	{
+		*pPropertyCount = static_cast<uint32_t>(all.size());
+		return VK_SUCCESS;
+	}
+	const uint32_t copied = std::min(*pPropertyCount, static_cast<uint32_t>(all.size()));
+	std::copy_n(all.begin(), copied, pProperties);
+	*pPropertyCount = copied;
+	return copied < all.size() ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
 extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanRequestQueue(uint32_t queue_flags)
@@ -928,6 +981,9 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		device.dispatch_table.CopyMemoryToImage = device.dispatch_table.CopyMemoryToImageEXT;
 		device.dispatch_table.TransitionImageLayout = device.dispatch_table.TransitionImageLayoutEXT;
 #endif
+		// VK_KHR_maintenance6 (not in the glad loader): how DXVK binds and pushes descriptors on a pre-1.4 instance
+		device.dispatch_table.CmdBindDescriptorSets2 = reinterpret_cast<PFN_vkCmdBindDescriptorSets2>(get_device_proc_addr(*pDevice, "vkCmdBindDescriptorSets2KHR"));
+		device.dispatch_table.CmdPushDescriptorSet2 = reinterpret_cast<PFN_vkCmdPushDescriptorSet2>(get_device_proc_addr(*pDevice, "vkCmdPushDescriptorSet2KHR"));
 	}
 	#pragma endregion
 

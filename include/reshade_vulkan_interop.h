@@ -21,6 +21,12 @@ extern "C" {
 /// and "VK_NV_optical_flow" the opticalFlow feature (the extension is only enabled when the feature is supported).
 void ReShadeVulkanRequestDeviceExtension(const char *name);
 
+/// Hides a device extension from the application on every Vulkan device created afterwards, so that it
+/// uses the paths without it. For add-ons that follow what the application draws through calls that a
+/// newer extension replaces (e.g. "VK_EXT_descriptor_heap" replaces descriptor sets). Call from the
+/// add-on's initialization.
+void ReShadeVulkanHideDeviceExtension(const char *name);
+
 /// Asks ReShade to give devices created from now on one more queue with at least 'queue_flags' (VkQueueFlags),
 /// for the add-on's own work. The family with the fewest other capabilities is preferred, so that the work can run
 /// beside the game's. The game never sees this queue. Call this from AddonInit.

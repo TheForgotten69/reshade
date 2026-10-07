@@ -73,6 +73,10 @@ namespace reshade::vulkan
 		void end_debug_event() final;
 		void insert_debug_marker(const char *label, const float color[4]) final;
 
+		// The application sets viewports together with their count (extended dynamic state), so calls made
+		// on its behalf have to as well
+		bool _viewports_with_count = false;
+
 	protected:
 		device_impl *const _device;
 

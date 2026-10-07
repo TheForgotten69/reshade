@@ -302,6 +302,7 @@ void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstVi
 		return;
 
 	reshade::vulkan::command_list_impl *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	cmd_impl->_viewports_with_count = false;
 
 	temp_mem<reshade::api::viewport> viewport_data(viewportCount);
 	for (uint32_t i = 0; i < viewportCount; ++i)
@@ -314,6 +315,33 @@ void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer, uint32_t firstVi
 	}
 
 	reshade::invoke_addon_event<reshade::addon_event::bind_viewports>(cmd_impl, firstViewport, viewportCount, viewport_data.p);
+#endif
+}
+void VKAPI_CALL vkCmdSetViewportWithCount(VkCommandBuffer commandBuffer, uint32_t viewportCount, const VkViewport *pViewports)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdSetViewportWithCount, device_impl);
+	trampoline(commandBuffer, viewportCount, pViewports);
+
+#if RESHADE_ADDON
+	if (!reshade::has_addon_event<reshade::addon_event::bind_viewports>())
+		return;
+
+	reshade::vulkan::command_list_impl *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+	cmd_impl->_viewports_with_count = true;
+
+	temp_mem<reshade::api::viewport> viewport_data(viewportCount);
+	for (uint32_t i = 0; i < viewportCount; ++i)
+	{
+		std::memcpy(&viewport_data[i], &pViewports[i], sizeof(VkViewport));
+
+		// Flip viewport vertically (see 'command_list_impl::bind_viewports')
+		viewport_data[i].y += viewport_data[i].height;
+		viewport_data[i].height = -viewport_data[i].height;
+	}
+
+	reshade::invoke_addon_event<reshade::addon_event::bind_viewports>(cmd_impl, 0, viewportCount, viewport_data.p);
 #endif
 }
 void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor, uint32_t scissorCount, const VkRect2D *pScissors)
@@ -1893,25 +1921,16 @@ void VKAPI_CALL vkCmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t 
 #endif
 }
 
-void VKAPI_CALL vkCmdPushDescriptorSet(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint, VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount, const VkWriteDescriptorSet *pDescriptorWrites)
-{
-	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
-
-	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdPushDescriptorSet, device_impl);
-	trampoline(commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites);
-
 #if RESHADE_ADDON >= 2
-	if (!reshade::has_addon_event<reshade::addon_event::push_descriptors>())
-		return;
-
+// Reports pushed descriptors to add-ons, one event per write (shared by both versions of the call)
+static void report_push_descriptors(reshade::vulkan::device_impl *device_impl, VkCommandBuffer commandBuffer, reshade::api::shader_stage shader_stages, VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount, const VkWriteDescriptorSet *pDescriptorWrites)
+{
 	reshade::vulkan::command_list_impl *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
 
 	uint32_t max_descriptors = 0;
 	for (uint32_t i = 0; i < descriptorWriteCount; ++i)
 		max_descriptors = std::max(max_descriptors, pDescriptorWrites[i].descriptorCount);
 	temp_mem<uint64_t> descriptors(max_descriptors * 2);
-
-	const auto shader_stages = reshade::vulkan::convert_shader_stages(pipelineBindPoint);
 
 	for (uint32_t i = 0, j = 0; i < descriptorWriteCount; ++i, j = 0)
 	{
@@ -1978,6 +1997,54 @@ void VKAPI_CALL vkCmdPushDescriptorSet(VkCommandBuffer commandBuffer, VkPipeline
 			set,
 			update);
 	}
+}
+#endif
+
+void VKAPI_CALL vkCmdPushDescriptorSet(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint, VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount, const VkWriteDescriptorSet *pDescriptorWrites)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdPushDescriptorSet, device_impl);
+	trampoline(commandBuffer, pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites);
+
+#if RESHADE_ADDON >= 2
+	if (reshade::has_addon_event<reshade::addon_event::push_descriptors>())
+		report_push_descriptors(device_impl, commandBuffer, reshade::vulkan::convert_shader_stages(pipelineBindPoint), layout, set, descriptorWriteCount, pDescriptorWrites);
+#endif
+}
+void VKAPI_CALL vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer, const VkPushDescriptorSetInfo *pPushDescriptorSetInfo)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdPushDescriptorSet2, device_impl);
+	trampoline(commandBuffer, pPushDescriptorSetInfo);
+
+#if RESHADE_ADDON >= 2
+	if (reshade::has_addon_event<reshade::addon_event::push_descriptors>())
+		report_push_descriptors(device_impl, commandBuffer, static_cast<reshade::api::shader_stage>(pPushDescriptorSetInfo->stageFlags), pPushDescriptorSetInfo->layout,
+			pPushDescriptorSetInfo->set, pPushDescriptorSetInfo->descriptorWriteCount, pPushDescriptorSetInfo->pDescriptorWrites);
+#endif
+}
+void VKAPI_CALL vkCmdBindDescriptorSets2(VkCommandBuffer commandBuffer, const VkBindDescriptorSetsInfo *pBindDescriptorSetsInfo)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
+
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdBindDescriptorSets2, device_impl);
+	trampoline(commandBuffer, pBindDescriptorSetsInfo);
+
+#if RESHADE_ADDON >= 2
+	if (!reshade::has_addon_event<reshade::addon_event::bind_descriptor_tables>())
+		return;
+
+	reshade::vulkan::command_list_impl *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);
+
+	reshade::invoke_addon_event<reshade::addon_event::bind_descriptor_tables>(
+		cmd_impl,
+		static_cast<reshade::api::shader_stage>(pBindDescriptorSetsInfo->stageFlags),
+		reshade::api::pipeline_layout { (uint64_t)pBindDescriptorSetsInfo->layout },
+		pBindDescriptorSetsInfo->firstSet, pBindDescriptorSetsInfo->descriptorSetCount,
+		reinterpret_cast<const reshade::api::descriptor_table *>(pBindDescriptorSetsInfo->pDescriptorSets),
+		pBindDescriptorSetsInfo->dynamicOffsetCount, pBindDescriptorSetsInfo->pDynamicOffsets);
 #endif
 }
 void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate(VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate, VkPipelineLayout layout, uint32_t set, const void *pData)
