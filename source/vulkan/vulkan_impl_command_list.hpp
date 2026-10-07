@@ -84,6 +84,32 @@ namespace reshade::vulkan
 		uint8_t _is_in_render_pass = 0;
 	};
 
+	// What the application last set on a command buffer, of the state an add-on may change when it records
+	// its own draws there: so that it can be put back (ReShadeVulkanRestoreState)
+	struct application_state
+	{
+		VkPipeline graphics_pipeline = VK_NULL_HANDLE;
+		struct descriptor_set { VkPipelineLayout layout; VkDescriptorSet set; } sets[8] = {};
+		struct vertex_buffer { VkBuffer buffer; VkDeviceSize offset, size, stride; } vertex_buffers[16] = {};
+		uint32_t vertex_buffer_mask = 0;
+		bool vertex_buffer_strides = false;
+		// One bit per dynamic state the application has set
+		enum : uint32_t { viewport = 1, scissor = 2, depth_bias = 4, depth_bias_enable = 8, cull_mode = 16, front_face = 32, depth_bounds = 64,
+			depth_bounds_test = 128, depth_test = 256, depth_write = 512, depth_compare = 1024, stencil_test = 2048, stencil_op = 4096,
+			stencil_compare_mask = 8192, stencil_write_mask = 16384, stencil_reference = 32768 };
+		uint32_t set_mask = 0;
+		VkViewport viewports[8] = {};
+		VkRect2D scissors[8] = {};
+		uint32_t viewport_count = 0, scissor_count = 0;
+		bool viewports_with_count = false, scissors_with_count = false;
+		float depth_bias_values[3] = {}, depth_bounds_values[2] = {};
+		VkBool32 depth_bias_enabled = VK_FALSE, depth_bounds_tested = VK_FALSE, depth_tested = VK_FALSE, depth_written = VK_FALSE, stencil_tested = VK_FALSE;
+		VkCullModeFlags cull = VK_CULL_MODE_NONE;
+		VkFrontFace front = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+		VkCompareOp depth_compare_op = VK_COMPARE_OP_ALWAYS;
+		struct stencil_face { VkStencilOp fail, pass, depth_fail; VkCompareOp compare; uint32_t compare_mask, write_mask, reference; } stencil[2] = {};
+	};
+
 	// VkRenderingAttachmentFlagsInfoKHR (VK_KHR_maintenance10), which the bundled headers may predate
 	struct rendering_attachment_flags_info
 	{
@@ -116,6 +142,7 @@ namespace reshade::vulkan
 		VkRenderingAttachmentInfo current_rendering_attachments[8 + 2] = {};
 		rendering_attachment_flags_info current_rendering_attachment_flags[8 + 2] = {};
 		bool rendering_interrupted = false;
+		application_state app_state;
 #endif
 	};
 }

@@ -1763,6 +1763,31 @@ void     VKAPI_CALL vkDestroyShaderModule(VkDevice device, VkShaderModule shader
 	trampoline(device, shaderModule, pAllocator);
 }
 
+// An add-on that needs pipelines of its own built like the application's (the same vertex input, layout and
+// dynamic state, another shader) is shown each graphics pipeline with its 'VkGraphicsPipelineCreateInfo'
+static void (*s_graphics_pipeline_observer)(void *device, const void *create_info, uint64_t pipeline, void *user_data) = nullptr;
+static void *s_graphics_pipeline_observer_data = nullptr;
+extern "C" __attribute__((visibility("default"))) void ReShadeVulkanObserveGraphicsPipelines(void (*observer)(void *device, const void *create_info, uint64_t pipeline, void *user_data), void *user_data)
+{
+	s_graphics_pipeline_observer_data = user_data;
+	s_graphics_pipeline_observer = observer;
+}
+extern "C" __attribute__((visibility("default"))) const uint32_t *ReShadeVulkanGetShaderModuleCode(void *device, uint64_t shader_module, uint32_t *word_count)
+{
+#if RESHADE_ADDON
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(static_cast<VkDevice>(device)));
+	if (device_impl == nullptr || shader_module == 0 || word_count == nullptr)
+		return nullptr;
+	const auto module_data = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SHADER_MODULE>((VkShaderModule)shader_module);
+	if (module_data == nullptr || module_data->spirv.empty())
+		return nullptr;
+	*word_count = static_cast<uint32_t>(module_data->spirv.size() / 4);
+	return reinterpret_cast<const uint32_t *>(module_data->spirv.data());
+#else
+	return nullptr;
+#endif
+}
+
 VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const VkGraphicsPipelineCreateInfo *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines)
 {
 	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
@@ -2012,6 +2037,9 @@ VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache p
 		{
 			reshade::invoke_addon_event<reshade::addon_event::init_pipeline>(
 				device_impl, reshade::api::pipeline_layout { (uint64_t)create_info.layout }, static_cast<uint32_t>(subobjects.size()), subobjects.data(), reshade::api::pipeline { (uint64_t)pPipelines[i] });
+			// (with what it was created from, while that is at hand: see ReShadeVulkanObserveGraphicsPipelines)
+			if (s_graphics_pipeline_observer != nullptr)
+				s_graphics_pipeline_observer(device, &create_info, (uint64_t)pPipelines[i], s_graphics_pipeline_observer_data);
 		}
 		else
 		{

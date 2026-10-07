@@ -76,6 +76,19 @@ const void *ReShadeVulkanInterruptRendering(void *command_buffer);
 /// Begins the interrupted rendering again, with the attachments' contents loaded.
 void ReShadeVulkanResumeRendering(void *command_buffer);
 
+/// Puts back what the application last set on its command buffer (VkCommandBuffer), after an add-on recorded
+/// draws of its own there: the graphics pipeline, its descriptor sets, its vertex buffers, and the dynamic state
+/// (viewports, scissors, depth bias, culling, depth and stencil tests, depth bounds).
+void ReShadeVulkanRestoreState(void *command_buffer);
+
+/// Shows the add-on every graphics pipeline the application creates from now on, with the
+/// 'const VkGraphicsPipelineCreateInfo *' it was created from (valid during the call only): for add-ons that
+/// build pipelines of their own like the application's. One observer; null to stop.
+void ReShadeVulkanObserveGraphicsPipelines(void (*observer)(void *device, const void *create_info, uint64_t pipeline, void *user_data), void *user_data);
+
+/// The SPIR-V of a shader module (VkShaderModule) the application created, or null. Valid while the module lives.
+const uint32_t *ReShadeVulkanGetShaderModuleCode(void *device, uint64_t shader_module, uint32_t *word_count);
+
 #ifdef __cplusplus
 }
 #endif
