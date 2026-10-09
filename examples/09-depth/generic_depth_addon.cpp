@@ -5,6 +5,9 @@
 
 #include <imgui.h>
 #include <reshade.hpp>
+#if defined(BUILTIN_ADDON)
+#include "runtime.hpp"
+#endif
 #include "generic_depth_detection.hpp"
 #include <mutex>
 #include <shared_mutex>
@@ -237,8 +240,6 @@ struct RESHADE_API_UUID("7c6363c7-f94e-437a-9160-141782c44a98") generic_depth_da
 	bool reversed_depth_detection_timeout_logged = false;
 	bool reversed_depth_detection_applied = false;
 	bool reversed_depth_detection_manual_disable_logged = false;
-	uint32_t reversed_depth_detection_debug_tick = 0;
-	uint32_t reversed_depth_detection_debug_skip_tick = 0;
 #endif
 };
 RESHADE_DEFINE_PRIVATE_DATA_TYPE(generic_depth_data,
@@ -1248,27 +1249,9 @@ static bool has_manual_reversed_depth_definition(effect_runtime *runtime)
 	return runtime->get_preprocessor_definition(reversed_depth_definition, value);
 }
 
-static void log_reversed_depth_diagnostic(const char *reason, const generic_depth_data &data, device_api api,
-	resource selected_depth_stencil, resource_view selected_shader_resource, const depth_stencil_resource *info, uint64_t frame)
-{
-	char message[320];
-	std::snprintf(message, sizeof(message),
-		"[DEBUG-depth-auto] %s: enabled=%d api=%d depth_stencil=%p shader_resource=%p frame=%llu disabled=%d applied=%d finished=%d frames=%u consistent=%u candidate=%u clears=0x%x compares=0x%x.",
-		reason, s_auto_detect_reversed_depth, static_cast<int>(api),
-		reinterpret_cast<const void *>(selected_depth_stencil.handle), reinterpret_cast<const void *>(selected_shader_resource.handle),
-		static_cast<unsigned long long>(frame),
-		data.reversed_depth_detection_disabled, data.reversed_depth_detection_applied, data.reversed_depth_detection.finished,
-		data.reversed_depth_detection.frames, data.reversed_depth_detection.consistent_frames, data.reversed_depth_detection.candidate,
-		info != nullptr ? info->last_frame_stats.clear_depth_evidence : 0u,
-		info != nullptr ? info->last_frame_stats.depth_compare_evidence : 0u);
-	reshade::log::message(reshade::log::level::info, message);
-}
-
 static void observe_reversed_depth(effect_runtime *runtime, generic_depth_data &data, device *device,
 	resource selected_depth_stencil, const depth_stencil_resource *selected_depth_stencil_info, uint64_t frame)
 {
-	if ((data.reversed_depth_detection_debug_tick++ % 60) == 0)
-		log_reversed_depth_diagnostic("tick", data, device->get_api(), selected_depth_stencil, data.selected_shader_resource, selected_depth_stencil_info, frame);
 
 	if (!s_auto_detect_reversed_depth || device->get_api() != device_api::vulkan || selected_depth_stencil == 0 || selected_depth_stencil_info == nullptr ||
 		data.reversed_depth_detection_disabled || data.reversed_depth_detection_applied ||
@@ -1380,6 +1363,11 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 	}
 
 	const resource_view prev_shader_resource = data.selected_shader_resource;
+#if defined(BUILTIN_ADDON)
+	const bool depth_in_use = static_cast<reshade::runtime *>(runtime)->is_texture_semantic_in_use("DEPTH");
+#else
+	const bool depth_in_use = true;
+#endif
 
 	if (selected_depth_stencil != 0) do
 	{
@@ -1456,6 +1444,7 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 
 			// Copy to backup texture unless already copied during the current frame
 			if (!selected_depth_stencil_info->last_frame_stats.copied_during_frame &&
+				depth_in_use &&
 				(selected_depth_stencil_info->desc.usage & (resource_usage::copy_source | resource_usage::resolve_source)) != 0 &&
 				(s_preserve_depth_buffers != 2 || !(api == device_api::d3d12 || api == device_api::vulkan)))
 			{
@@ -1522,11 +1511,6 @@ static void on_begin_render_effects(effect_runtime *runtime, command_list *cmd_l
 	if (data.selected_depth_stencil != 0 && data.selected_shader_resource != 0 && data.selected_depth_stencil == selected_depth_stencil)
 	{
 		observe_reversed_depth(runtime, data, device, data.selected_depth_stencil, selected_depth_stencil_info, frame_index);
-	}
-	else if (s_auto_detect_reversed_depth && !data.reversed_depth_detection_applied && !data.reversed_depth_detection_disabled &&
-		(data.reversed_depth_detection_debug_skip_tick++ % 60) == 0)
-	{
-		log_reversed_depth_diagnostic("skipped", data, device->get_api(), selected_depth_stencil, data.selected_shader_resource, selected_depth_stencil_info, frame_index);
 	}
 #endif
 
