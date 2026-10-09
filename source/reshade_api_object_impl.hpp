@@ -51,8 +51,6 @@ namespace reshade::api
 
 		static guid_t make_guid(const uint8_t guid[16])
 		{
-			// Public API GUIDs are byte arrays and do not promise 'guid_t' alignment.
-			// Copying avoids an unaligned load on Linux while preserving the existing key layout.
 			guid_t result;
 			std::memcpy(&result, guid, sizeof(result));
 			return result;

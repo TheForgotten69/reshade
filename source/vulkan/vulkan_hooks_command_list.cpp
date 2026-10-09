@@ -16,7 +16,6 @@
 extern lockfree_linear_map<void *, reshade::vulkan::device_impl *, 8> g_vulkan_devices;
 
 #if RESHADE_ADDON
-// The record of what the application set on a command buffer (see 'application_state')
 static inline reshade::vulkan::application_state &app_state(reshade::vulkan::device_impl *device_impl, VkCommandBuffer commandBuffer)
 {
 	return device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer)->app_state;
@@ -351,7 +350,6 @@ void VKAPI_CALL vkCmdSetViewportWithCount(VkCommandBuffer commandBuffer, uint32_
 	{
 		std::memcpy(&viewport_data[i], &pViewports[i], sizeof(VkViewport));
 
-		// Flip viewport vertically (see 'command_list_impl::bind_viewports')
 		viewport_data[i].y += viewport_data[i].height;
 		viewport_data[i].height = -viewport_data[i].height;
 	}
@@ -447,7 +445,6 @@ void VKAPI_CALL vkCmdSetStencilOp(VkCommandBuffer commandBuffer, VkStencilFaceFl
 #endif
 }
 
-// Dynamic state that is only followed for 'ReShadeVulkanRestoreState'
 void VKAPI_CALL vkCmdSetScissorWithCount(VkCommandBuffer commandBuffer, uint32_t scissorCount, const VkRect2D *pScissors)
 {
 	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(commandBuffer));
@@ -491,8 +488,6 @@ void VKAPI_CALL vkCmdSetDepthBoundsTestEnable(VkCommandBuffer commandBuffer, VkB
 	RESHADE_VULKAN_APP_STATE(s.depth_bounds_tested = depthBoundsTestEnable; s.set_mask |= S::depth_bounds_test;)
 }
 
-// Puts back what the application last set on its command buffer: the graphics pipeline, its descriptor sets,
-// its vertex buffers and its dynamic state, after an add-on recorded draws of its own there
 extern "C" __attribute__((visibility("default"))) void ReShadeVulkanRestoreState(void *command_buffer)
 {
 #if RESHADE_ADDON
@@ -2019,9 +2014,6 @@ void VKAPI_CALL vkCmdBeginRendering(VkCommandBuffer commandBuffer, const VkRende
 
 	cmd_impl->_is_in_render_pass = 3;
 
-	// Keep what is needed to end this rendering and begin it again (see ReShadeVulkanInterruptRendering).
-	// Not when it is suspended or resumed, nor with extension structures other than the one DXVK chains
-	// to its attachments (their flags, VK_KHR_maintenance10), which would have to be copied too.
 	{
 		bool plain = pRenderingInfo->pNext == nullptr && pRenderingInfo->colorAttachmentCount <= 8 &&
 			(pRenderingInfo->flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT)) == 0;
@@ -2077,7 +2069,6 @@ void VKAPI_CALL vkCmdBeginRendering(VkCommandBuffer commandBuffer, const VkRende
 	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdBeginRendering, device_impl);
 	trampoline(commandBuffer, pRenderingInfo);
 }
-// An add-on ends the application's dynamic rendering to record commands that cannot be inside one
 extern "C" __attribute__((visibility("default"))) const void *ReShadeVulkanInterruptRendering(void *command_buffer)
 {
 #if RESHADE_ADDON
@@ -2112,7 +2103,6 @@ extern "C" __attribute__((visibility("default"))) void ReShadeVulkanResumeRender
 	if (cmd_impl == nullptr || !cmd_impl->rendering_interrupted)
 		return;
 
-	// The attachments keep what was drawn so far (and are not resolved a second time from a cleared state)
 	for (VkRenderingAttachmentInfo &attachment : cmd_impl->current_rendering_attachments)
 		if (attachment.loadOp != VK_ATTACHMENT_LOAD_OP_NONE)
 			attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -2187,7 +2177,6 @@ void VKAPI_CALL vkCmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t 
 }
 
 #if RESHADE_ADDON >= 2
-// Reports pushed descriptors to add-ons, one event per write (shared by both versions of the call)
 static void report_push_descriptors(reshade::vulkan::device_impl *device_impl, VkCommandBuffer commandBuffer, reshade::api::shader_stage shader_stages, VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount, const VkWriteDescriptorSet *pDescriptorWrites)
 {
 	reshade::vulkan::command_list_impl *const cmd_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_COMMAND_BUFFER>(commandBuffer);

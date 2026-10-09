@@ -22,7 +22,6 @@ namespace
 	std::filesystem::path path_from_effect_literal(std::string literal)
 	{
 #if defined(__linux__)
-		// Effect files commonly use Windows-style separators in include and exists directives.
 			std::replace(literal.begin(), literal.end(), '\\', '/');
 #endif
 		return std::filesystem::u8path(literal);

@@ -4,8 +4,6 @@
 
 namespace depth_detection
 {
-	// Bit masks permit lossless merging across command lists. Unknown is an
-	// explicit bit, so unsupported state is never mistaken for normal Z.
 	enum evidence : uint8_t { none = 0, normal = 1, reversed = 2, unknown = 4 };
 	constexpr uint8_t clear_evidence(float depth)
 	{
@@ -23,8 +21,6 @@ namespace depth_detection
 		uint8_t candidate = none;
 		bool finished = false;
 
-		// Call once for each actual frame with a selected, rendered depth buffer.
-		// A buffer change resets confidence, but does not extend the total budget.
 		uint8_t observe(uint64_t selected, uint64_t frame, uint8_t clears, uint8_t comparisons)
 		{
 			if (finished || selected == 0 || frame == last_frame)
@@ -37,8 +33,6 @@ namespace depth_detection
 				candidate = none;
 				consistent_frames = 0;
 			}
-			// Unknown evidence (always/equal tests, unresolved dynamic state) says nothing about the
-			// convention, so it only abstains. Contradicting evidence still blocks the vote.
 			const uint8_t clear_direction = clears & (normal | reversed);
 			const uint8_t vote = (clear_direction == normal || clear_direction == reversed) && clear_direction == (comparisons & (normal | reversed)) ? clear_direction : none;
 			if (vote == none || vote != candidate)

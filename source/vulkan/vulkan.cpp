@@ -427,8 +427,6 @@ enum VkNegotiateLayerStructType
 
 constexpr uint32_t loader_layer_interface_version = 2;
 
-// ABI mirror of the Vulkan loader's 'vk_layer.h'. Keep this local to avoid making the
-// loader implementation headers a build dependency for the public Vulkan headers.
 struct VkNegotiateLayerInterface
 {
 	VkNegotiateLayerStructType sType;
@@ -446,8 +444,6 @@ extern "C" __attribute__((visibility("default"))) VkResult VKAPI_CALL vkNegotiat
 		pVersionStruct->loaderLayerInterfaceVersion < loader_layer_interface_version)
 		return VK_ERROR_INITIALIZATION_FAILED;
 
-	// Version 2 added 'vkNegotiateLoaderLayerInterfaceVersion'. Do not perform process
-	// initialization until the loader ABI handshake has completed successfully.
 	pVersionStruct->loaderLayerInterfaceVersion = loader_layer_interface_version;
 	pVersionStruct->pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
 	pVersionStruct->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;

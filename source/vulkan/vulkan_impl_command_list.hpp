@@ -73,8 +73,6 @@ namespace reshade::vulkan
 		void end_debug_event() final;
 		void insert_debug_marker(const char *label, const float color[4]) final;
 
-		// The application sets viewports together with their count (extended dynamic state), so calls made
-		// on its behalf have to as well
 		bool _viewports_with_count = false;
 
 	protected:
@@ -84,8 +82,6 @@ namespace reshade::vulkan
 		uint8_t _is_in_render_pass = 0;
 	};
 
-	// What the application last set on a command buffer, of the state an add-on may change when it records
-	// its own draws there: so that it can be put back (ReShadeVulkanRestoreState)
 	struct application_state
 	{
 		VkPipeline graphics_pipeline = VK_NULL_HANDLE;
@@ -93,7 +89,6 @@ namespace reshade::vulkan
 		struct vertex_buffer { VkBuffer buffer; VkDeviceSize offset, size, stride; } vertex_buffers[16] = {};
 		uint32_t vertex_buffer_mask = 0;
 		bool vertex_buffer_strides = false;
-		// One bit per dynamic state the application has set
 		enum : uint32_t { viewport = 1, scissor = 2, depth_bias = 4, depth_bias_enable = 8, cull_mode = 16, front_face = 32, depth_bounds = 64,
 			depth_bounds_test = 128, depth_test = 256, depth_write = 512, depth_compare = 1024, stencil_test = 2048, stencil_op = 4096,
 			stencil_compare_mask = 8192, stencil_write_mask = 16384, stencil_reference = 32768 };
@@ -110,7 +105,6 @@ namespace reshade::vulkan
 		struct stencil_face { VkStencilOp fail, pass, depth_fail; VkCompareOp compare; uint32_t compare_mask, write_mask, reference; } stencil[2] = {};
 	};
 
-	// VkRenderingAttachmentFlagsInfoKHR (VK_KHR_maintenance10), which the bundled headers may predate
 	struct rendering_attachment_flags_info
 	{
 		static constexpr VkStructureType structure_type = static_cast<VkStructureType>(1000630002);
@@ -136,8 +130,6 @@ namespace reshade::vulkan
 		VkImageView current_color_attachments[8] = {};
 		VkImageView current_depth_stencil_attachment = VK_NULL_HANDLE;
 
-		// What the application's dynamic rendering was begun with, for ReShadeVulkanInterruptRendering.
-		// 'pColorAttachments' etc. point at the copies below; 'sType' is zero when it cannot be begun again.
 		VkRenderingInfo current_rendering = {};
 		VkRenderingAttachmentInfo current_rendering_attachments[8 + 2] = {};
 		rendering_attachment_flags_info current_rendering_attachment_flags[8 + 2] = {};

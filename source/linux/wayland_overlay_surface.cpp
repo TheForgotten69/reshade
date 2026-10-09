@@ -26,14 +26,12 @@ bool reshade::wayland_overlay_surface::attach(wl_surface *parent)
 	if (_surface != nullptr || parent == nullptr || _compositor == nullptr || _subcompositor == nullptr)
 		return false;
 
-	// Never commit the host surface. The child stays unmapped until it gets a buffer.
 	_surface = wl_compositor_create_surface(_compositor);
 	if (_surface == nullptr)
 		return false;
 	_subsurface = wl_subcompositor_get_subsurface(_subcompositor, _surface, parent);
 	if (_subsurface == nullptr)
 		return false;
-	// Apply own commits immediately, rather than with the next frame the host presents.
 	wl_subsurface_set_desync(_subsurface);
 
 	if (_fractional_manager != nullptr)
@@ -104,7 +102,6 @@ bool reshade::wayland_overlay_surface::set_capture(const std::vector<input_backe
 	if (_buffer == nullptr && !create_transparent_buffer())
 		return false;
 
-	// A single transparent pixel, stretched over the whole host surface.
 	wp_viewport_set_destination(_viewport, static_cast<int32_t>(logical_width), static_cast<int32_t>(logical_height));
 
 	wl_region *const input_region = wl_compositor_create_region(_compositor);
@@ -140,7 +137,6 @@ bool reshade::wayland_overlay_surface::create_transparent_buffer()
 	const int fd = memfd_create("reshade-overlay", MFD_CLOEXEC);
 	if (fd < 0)
 		return false;
-	// Zero-filled, so the pixel is fully transparent.
 	if (ftruncate(fd, 4) != 0)
 	{
 		close(fd);

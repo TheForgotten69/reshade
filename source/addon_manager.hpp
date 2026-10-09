@@ -36,9 +36,6 @@ namespace reshade
 	/// </summary>
 	extern thread_local const addon_info *addon_current;
 
-	/// <summary>
-	/// Gets the default directory in which external add-ons are discovered.
-	/// </summary>
 	std::filesystem::path get_default_addon_search_path();
 
 	/// <summary>

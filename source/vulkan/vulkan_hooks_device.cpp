@@ -31,15 +31,12 @@ lockfree_linear_map<void *, reshade::vulkan::device_impl *, 8> g_vulkan_devices;
 #if defined(__linux__)
 #include "reshade_vulkan_interop.h"
 
-// Device extensions and queues add-ons asked for (see reshade_vulkan_interop.h), and what each device
-// got, for add-ons that drive the device with native Vulkan calls
 namespace
 {
-	// From the Vulkan registry: newer than the bundled headers (generated without VK_NV_optical_flow)
 	constexpr VkQueueFlags queue_video_decode_bit = 0x20, queue_video_encode_bit = 0x40, queue_optical_flow_bit = 0x100;
 	constexpr const char optical_flow_extension_name[] = "VK_NV_optical_flow";
 	constexpr VkStructureType structure_type_optical_flow_features = static_cast<VkStructureType>(1000464000);
-	struct optical_flow_features // VkPhysicalDeviceOpticalFlowFeaturesNV
+	struct optical_flow_features
 	{
 		VkStructureType sType;
 		void *pNext;
@@ -56,14 +53,14 @@ namespace
 		std::vector<std::string> extension_names;
 		std::vector<const char *> extensions;
 		bool buffer_device_address;
-		std::vector<ReShadeVulkanQueue> queues; // in request order
+		std::vector<ReShadeVulkanQueue> queues;
 		std::vector<uint32_t> queue_families;
 	};
 
 	std::mutex s_interop_mutex;
 	std::vector<std::string> s_requested_device_extensions;
 	std::vector<std::string> s_hidden_device_extensions;
-	std::vector<uint32_t> s_requested_queues; // VkQueueFlags, in request order
+	std::vector<uint32_t> s_requested_queues;
 	std::unordered_map<VkDevice, device_interop> s_device_interop;
 
 	std::vector<std::string> requested_device_extensions()
@@ -77,9 +74,6 @@ namespace
 		return s_requested_queues;
 	}
 
-	// The family for a queue with `required` capabilities: the one with room that has the fewest other
-	// capabilities (graphics counting most), so that the work runs beside the game's. `used` counts the
-	// queues already asked for per family, and is updated.
 	bool choose_queue_family(const std::vector<VkQueueFamilyProperties> &families, VkQueueFlags required, std::vector<uint32_t> &used, const std::vector<bool> &special, uint32_t &out_family, uint32_t &out_index)
 	{
 		uint32_t best = std::numeric_limits<uint32_t>::max(), best_score = std::numeric_limits<uint32_t>::max();
@@ -106,7 +100,6 @@ extern "C" __attribute__((visibility("default"))) void ReShadeVulkanRequestDevic
 	if (name == nullptr)
 		return;
 	const std::lock_guard<std::mutex> lock(s_interop_mutex);
-	// Add-ons are loaded again for every instance, and ask again: keep each name once
 	if (std::find(s_requested_device_extensions.begin(), s_requested_device_extensions.end(), name) == s_requested_device_extensions.end())
 		s_requested_device_extensions.emplace_back(name);
 }
@@ -120,10 +113,8 @@ extern "C" __attribute__((visibility("default"))) void ReShadeVulkanHideDeviceEx
 		s_hidden_device_extensions.emplace_back(name);
 }
 
-// What the application sees of the device's extensions: all but the ones add-ons asked to hide
 VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
 {
-	// This layer has no device extensions of its own
 	if (pLayerName != nullptr && 0 == std::strcmp(pLayerName, "VK_LAYER_reshade"))
 	{
 		*pPropertyCount = 0;
@@ -166,7 +157,6 @@ VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physic
 extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanRequestQueue(uint32_t queue_flags)
 {
 	const std::lock_guard<std::mutex> lock(s_interop_mutex);
-	// Asked again on every load of the add-on: the same request keeps its index
 	const auto it = std::find(s_requested_queues.begin(), s_requested_queues.end(), queue_flags);
 	if (it != s_requested_queues.end())
 		return static_cast<uint32_t>(it - s_requested_queues.begin());
@@ -322,7 +312,6 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 	bool force_buffer_device_address = false;
 	bool force_optical_flow = false;
 #if defined(__linux__)
-	// Outlives the call below: enabled_extensions points into it
 	const std::vector<std::string> requested_extensions = requested_device_extensions();
 #endif
 	for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i)
@@ -467,8 +456,6 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 #endif
 
 #if VK_EXT_external_memory_host
-		// Lets add-ons import host memory shared with another process as a buffer (resource_flags::shared_host)
-		// The extension depends on external memory, which is core in Vulkan 1.1
 		if (instance.api_version >= VK_API_VERSION_1_1)
 			add_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, false);
 #endif
@@ -504,12 +491,10 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 #endif
 
 #if defined(__linux__)
-			// Extensions add-ons requested, when supported and not already enabled
 			for (const std::string &name : requested_extensions)
 			{
 				if (name == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
 				{
-					// The feature: core in Vulkan 1.2, the extension before
 					VkPhysicalDeviceBufferDeviceAddressFeatures supported_bda { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
 					VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported_bda };
 					const auto get_features2 = instance.dispatch_table.GetPhysicalDeviceFeatures2 != nullptr ? instance.dispatch_table.GetPhysicalDeviceFeatures2 : instance.dispatch_table.GetPhysicalDeviceFeatures2KHR;
@@ -530,7 +515,6 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 					continue;
 				if (name == optical_flow_extension_name)
 				{
-					// The extension is useless without its feature
 					optical_flow_features supported_flow { structure_type_optical_flow_features };
 					VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported_flow };
 					const auto get_features2 = instance.dispatch_table.GetPhysicalDeviceFeatures2 != nullptr ? instance.dispatch_table.GetPhysicalDeviceFeatures2 : instance.dispatch_table.GetPhysicalDeviceFeatures2KHR;
@@ -555,11 +539,9 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 	create_info.ppEnabledExtensionNames = enabled_extensions.data();
 
 #if defined(__linux__)
-	// Queues for add-ons' own work, when they asked and ReShade runs on this device. The game's queues
-	// keep their indices: added queues come after them in their family.
 	std::vector<VkDeviceQueueCreateInfo> queue_create_infos(pCreateInfo->pQueueCreateInfos, pCreateInfo->pQueueCreateInfos + pCreateInfo->queueCreateInfoCount);
 	std::vector<std::vector<float>> queue_priorities;
-	std::vector<ReShadeVulkanQueue> added_queues; // family and index for now, the VkQueue after creation
+	std::vector<ReShadeVulkanQueue> added_queues;
 	std::vector<uint32_t> added_queue_indices;
 	if (graphics_queue_family_index != std::numeric_limits<uint32_t>::max())
 	{
@@ -655,7 +637,6 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		}
 		else if (ext.timeline_semaphore || instance.api_version >= VK_API_VERSION_1_2)
 		{
-			// Core in Vulkan 1.2 but still off unless enabled: force it here too, as for the Vulkan 1.2 features structure above
 			append_to_structure_chain(&create_info, &ext.timeline_semaphore_features);
 			ext.timeline_semaphore_features.timelineSemaphore = VK_TRUE;
 			ext.timeline_semaphore = 1;
@@ -982,10 +963,8 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		device.dispatch_table.CopyMemoryToImage = device.dispatch_table.CopyMemoryToImageEXT;
 		device.dispatch_table.TransitionImageLayout = device.dispatch_table.TransitionImageLayoutEXT;
 #endif
-		// VK_KHR_maintenance6 (not in the glad loader): how DXVK binds and pushes descriptors on a pre-1.4 instance
 		device.dispatch_table.CmdBindDescriptorSets2 = reinterpret_cast<PFN_vkCmdBindDescriptorSets2>(get_device_proc_addr(*pDevice, "vkCmdBindDescriptorSets2KHR"));
 		device.dispatch_table.CmdPushDescriptorSet2 = reinterpret_cast<PFN_vkCmdPushDescriptorSet2>(get_device_proc_addr(*pDevice, "vkCmdPushDescriptorSet2KHR"));
-		// VK_KHR_map_memory2 (likewise): how DXVK maps its memory
 		if (device.dispatch_table.MapMemory2 == nullptr)
 			device.dispatch_table.MapMemory2 = reinterpret_cast<PFN_vkMapMemory2>(get_device_proc_addr(*pDevice, "vkMapMemory2KHR"));
 		if (device.dispatch_table.UnmapMemory2 == nullptr)
@@ -1001,7 +980,6 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 				continue;
 			VkQueue queue = VK_NULL_HANDLE;
 			device.dispatch_table.GetDeviceQueue(device.handle, added_queues[i].family_index, added_queue_indices[i], &queue);
-			// As for the game's queues below: the loader did not set the dispatch pointer on these
 			if (queue != VK_NULL_HANDLE)
 				*reinterpret_cast<void **>(queue) = *reinterpret_cast<void **>(device.handle);
 			added_queues[i].queue = queue;
@@ -1194,8 +1172,6 @@ VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const Vk
 	return trampoline(queue, submitCount, pSubmits, fence);
 }
 
-// Where the application has its memory mapped (the address of the memory's first byte), for add-ons that
-// read what it writes to its buffers (ReShadeVulkanGetMappedBuffer)
 static std::shared_mutex s_mapped_memory_mutex;
 static std::unordered_map<VkDeviceMemory, void *> s_mapped_memory;
 
@@ -1763,8 +1739,6 @@ void     VKAPI_CALL vkDestroyShaderModule(VkDevice device, VkShaderModule shader
 	trampoline(device, shaderModule, pAllocator);
 }
 
-// An add-on that needs pipelines of its own built like the application's (the same vertex input, layout and
-// dynamic state, another shader) is shown each graphics pipeline with its 'VkGraphicsPipelineCreateInfo'
 static void (*s_graphics_pipeline_observer)(void *device, const void *create_info, uint64_t pipeline, void *user_data) = nullptr;
 static void *s_graphics_pipeline_observer_data = nullptr;
 extern "C" __attribute__((visibility("default"))) void ReShadeVulkanObserveGraphicsPipelines(void (*observer)(void *device, const void *create_info, uint64_t pipeline, void *user_data), void *user_data)
@@ -2037,7 +2011,6 @@ VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache p
 		{
 			reshade::invoke_addon_event<reshade::addon_event::init_pipeline>(
 				device_impl, reshade::api::pipeline_layout { (uint64_t)create_info.layout }, static_cast<uint32_t>(subobjects.size()), subobjects.data(), reshade::api::pipeline { (uint64_t)pPipelines[i] });
-			// (with what it was created from, while that is at hand: see ReShadeVulkanObserveGraphicsPipelines)
 			if (s_graphics_pipeline_observer != nullptr)
 				s_graphics_pipeline_observer(device, &create_info, (uint64_t)pPipelines[i], s_graphics_pipeline_observer_data);
 		}

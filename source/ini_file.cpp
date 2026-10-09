@@ -29,7 +29,6 @@ bool reshade::ini_file::load()
 {
 	std::error_code ec;
 	const std::filesystem::file_time_type modified_at = std::filesystem::last_write_time(_path, ec);
-	// A default timestamp means the file has not been loaded yet
 	if (!ec && _modified_at != std::filesystem::file_time_type {} && _modified_at >= modified_at)
 		return true; // Skip loading if there was no modification to the file since it was last loaded
 

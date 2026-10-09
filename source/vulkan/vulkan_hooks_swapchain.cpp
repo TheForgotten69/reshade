@@ -44,9 +44,6 @@ static void retire_swapchain(reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHA
 	if (swapchain_impl == nullptr || swapchain_impl->_retired)
 		return;
 
-	// Vulkan permits presenting an image acquired from the old swapchain after a replacement
-	// is created. Keep the object and image metadata alive until vkDestroySwapchainKHR, but
-	// release the effect runtime so ReShade never renders into a retired swapchain.
 	reshade::reset_effect_runtime(swapchain_impl);
 #if RESHADE_ADDON
 	reshade::invoke_addon_event<reshade::addon_event::destroy_swapchain>(swapchain_impl, false);
@@ -76,7 +73,6 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	if (device_impl->_primary_graphics_queue != nullptr)
 	{
 		// Add required usage flags to create info
-		// Transfer destination lets add-ons write results back into the back buffer with a copy (e.g. frames processed out of process)
 		create_info.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 #if VK_KHR_swapchain_mutable_format
@@ -255,9 +251,6 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 
 	if (reshade::invoke_addon_event<reshade::addon_event::create_swapchain>(reshade::api::device_api::vulkan, desc, hwnd))
 	{
-		// A Vulkan application bakes the swap chain format into render passes and
-		// pipelines. Keep its original images when an add-on changes only the WSI
-		// output format, rather than exposing the new format to the application.
 		use_proxy_images =
 			desc.back_buffer.texture.format != reshade::vulkan::convert_format(application_create_info.imageFormat) ||
 			desc.color_space != reshade::vulkan::convert_color_space(application_create_info.imageColorSpace);
@@ -312,14 +305,10 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 
 	if (use_proxy_images)
 	{
-		// ReShade copies the completed application image into the actual WSI image
-		// immediately before it renders effects and presents it.
 		create_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 		reshade::log::message(reshade::log::level::info, "Using Vulkan proxy swapchain images to preserve the application's render format.");
 	}
 
-	// The old handle remains valid for presentation of previously acquired images. Do not
-	// unregister or reuse its object: both old and replacement handles can coexist.
 	reshade::vulkan::object_data<VK_OBJECT_TYPE_SWAPCHAIN_KHR> *old_swapchain_impl = nullptr;
 	if (create_info.oldSwapchain != VK_NULL_HANDLE)
 		old_swapchain_impl = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SWAPCHAIN_KHR, true>(create_info.oldSwapchain);
@@ -329,8 +318,6 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	const VkResult result = trampoline(device, &create_info, pAllocator, pSwapchain);
 	g_in_dxgi_runtime = false;
 
-	// The Vulkan specification retires 'oldSwapchain' whether creation succeeds or fails.
-	// Retire our matching runtime only after the driver has observed the replacement request.
 	retire_swapchain(old_swapchain_impl);
 	if (result < VK_SUCCESS)
 	{
@@ -477,8 +464,6 @@ void     VKAPI_CALL vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapch
 			swapchain_impl->_runtime_destroyed = true;
 		}
 
-		// Image/private-data cleanup is deliberately delayed until the application's destroy
-		// call, because an old swapchain remains legal to present after recreation.
 		uint32_t num_images = 0;
 		vk.GetSwapchainImagesKHR(device, swapchain, &num_images, nullptr);
 		temp_mem<VkImage, 3> swapchain_images(num_images);
@@ -531,8 +516,6 @@ VkResult VKAPI_CALL vkGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swap
 }
 
 #if defined(__linux__)
-// Lets add-ons check that flushing the immediate command list during the present event waits for the
-// back buffer to be complete (see 'command_queue_impl::_present_wait_info'). Returns the behavior's version.
 extern "C" __attribute__((visibility("default"))) uint32_t ReShadePresentEventFlushWaits()
 {
 	return 1;
@@ -554,7 +537,6 @@ VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPr
 	else
 		queue_impl->_mutex.lock();
 
-	// The present's waits, taken over by the first flush of the immediate command list (see '_present_wait_info')
 	temp_mem<VkPipelineStageFlags> wait_stages(present_info.waitSemaphoreCount);
 	std::fill_n(wait_stages.p, present_info.waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 
@@ -598,9 +580,6 @@ VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPr
 				command_list->copy_texture_region(source, 0, nullptr, srgb_source, 0, nullptr, reshade::api::filter_mode::min_mag_mip_point);
 				command_list->barrier(destination, reshade::api::resource_usage::present, reshade::api::resource_usage::copy_dest);
 
-				// A non-null destination box forces a blit even when the formats have the
-				// same byte size (e.g. BGRA8 to RGB10A2). This applies the sRGB decode
-				// before the final HDR format conversion rather than copying raw bits.
 				const reshade::api::subresource_box destination_box = { 0, 0, 0, swapchain_impl->_create_info.imageExtent.width, swapchain_impl->_create_info.imageExtent.height, 1 };
 				command_list->barrier(srgb_source, reshade::api::resource_usage::copy_dest, reshade::api::resource_usage::copy_source);
 				command_list->copy_texture_region(srgb_source, 0, nullptr, destination, 0, &destination_box, reshade::api::filter_mode::min_mag_mip_linear);

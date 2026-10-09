@@ -8,8 +8,6 @@ namespace reshade::utils
 {
 	inline std::vector<std::filesystem::path> find_addon_files(const std::filesystem::path &user_directory, const std::filesystem::path &installed_directory)
 	{
-		// Each directory, and before it its "addon" folder: where an add-on lives together with the files
-		// it needs (libraries it loads, its data), apart from ReShade's own configuration and logs
 		std::vector<std::filesystem::path> directories;
 		for (const auto &directory : { user_directory, installed_directory })
 			if (!directory.empty())
@@ -25,7 +23,6 @@ namespace reshade::utils
 				const auto &path = it->path();
 				if (path.extension() != ".addon" && path.extension() != ".addon64")
 					continue;
-				// A user copy takes precedence over an installed copy of the same add-on.
 				if (std::none_of(files.begin(), files.end(), [&path](const auto &file) { return file.filename() == path.filename(); }))
 					files.push_back(path);
 			}

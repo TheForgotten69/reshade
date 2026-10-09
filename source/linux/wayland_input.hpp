@@ -15,11 +15,8 @@ struct wp_cursor_shape_device_v1;
 
 namespace reshade
 {
-	// Maps an 'ImGuiMouseCursor' to a shape of version 1 of the cursor shape protocol, or 0 if there is none.
 	uint32_t wayland_cursor_shape(int cursor);
 
-	// Input for one Vulkan surface on a Wayland connection owned by the host application. ReShade
-	// binds its own seat devices on a private event queue of that connection.
 	class wayland_input final : public input_backend
 	{
 	public:
@@ -33,7 +30,6 @@ namespace reshade
 		void set_clipboard_text(const char *text) override { if (_clipboard != nullptr) _clipboard->set_text(text, _last_serial); }
 		void set_overlay_cursor(int cursor) override;
 
-		// Protocol event handlers, called by the listeners and by unit tests.
 		void on_global(wl_registry *registry, uint32_t name, const char *interface, uint32_t version);
 		void on_global_remove(uint32_t name);
 		void on_seat_capabilities(uint32_t capabilities);
@@ -62,8 +58,6 @@ namespace reshade
 		void publish_pointer();
 		void log_pointer_changes();
 		bool accepts_focus(wl_surface *focused_surface, const char *device) const;
-		// Qt can give keyboard focus to its parent surface while the Vulkan subsurface has pointer
-		// focus, so a foreign keyboard focus counts while the pointer is over this surface.
 		void refresh_keyboard_focus();
 		void sync_modifiers();
 		void bind_pointer_objects();
@@ -85,11 +79,9 @@ namespace reshade
 		wp_cursor_shape_manager_v1 *_cursor_shape_manager = nullptr;
 		uint32_t _cursor_shape_manager_name = 0;
 		wp_cursor_shape_device_v1 *_cursor_shape_device = nullptr;
-		// Serial of the pointer entering the capture layer, which Wayland requires to change the cursor.
 		uint32_t _overlay_enter_serial = 0;
 		bool _pointer_on_overlay = false;
 		int _overlay_cursor = 0;
-		// Latest key or button serial, which Wayland requires to set the clipboard selection.
 		uint32_t _last_serial = 0;
 
 		xkb_context *_xkb_context = nullptr;

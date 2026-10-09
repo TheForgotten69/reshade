@@ -47,17 +47,8 @@ reshade::resources::data_resource reshade::resources::load_data_resource(unsigne
 
 namespace
 {
-	// Empty means "use the system default", matching how set_current_language("") is used on
-	// Windows to mean "MUI thread default"; resolved lazily so a later locale environment
-	// variable change (there is no equivalent of a live system language change notification
-	// on Linux) does not require re-selecting it explicitly.
 	thread_local std::string s_current_language;
 
-	// There is no per-thread MUI preferred-language concept on Linux; approximate the same
-	// "what language is the user running their desktop in" question from the same environment
-	// variables every other localized application on the system already reads, in POSIX locale
-	// precedence order. Normalizes e.g. "de_DE.UTF-8" to "de-DE" to match the res/lang_*.rc2
-	// naming convention (see source/linux/generate_localization.py).
 	std::string detect_system_language()
 	{
 		for (const char *const name : { "LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG" })
@@ -68,9 +59,9 @@ namespace
 
 			std::string language = value;
 			if (const size_t colon = language.find(':'); colon != std::string::npos)
-				language.resize(colon); // "LANGUAGE" may list multiple ':'-separated fallbacks; only the first is used
+				language.resize(colon);
 			if (const size_t suffix = language.find_first_of(".@"); suffix != std::string::npos)
-				language.resize(suffix); // Strip encoding/modifier, e.g. ".UTF-8" or "@euro"
+				language.resize(suffix);
 			std::replace(language.begin(), language.end(), '_', '-');
 			return language;
 		}
@@ -84,9 +75,6 @@ std::string reshade::resources::load_string(unsigned short id)
 	const std::string language = get_current_language();
 	if (const char *const text = find_localized_string_linux(language, id))
 		return text;
-	// Fall back to English when the current language exists but is missing this particular
-	// string (translations lag behind as new strings are added), mirroring the secondary
-	// MUI language Windows' set_current_language() implicitly appends.
 	if (language != "en-US")
 		if (const char *const text = find_localized_string_linux("en-US", id))
 			return text;

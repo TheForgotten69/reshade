@@ -270,7 +270,6 @@ namespace reshade
 			return false;
 
 #if defined(__linux__) && defined(IMGUI_VERSION_NUM)
-		// The function table keeps add-ons independent of ReShade's ImGui ABI.
 		if (!(imgui_function_table_instance() = static_cast<const imgui_function_table *>(ReShadeGetImGuiFunctionTable(IMGUI_VERSION_NUM))))
 		{
 			ReShadeUnregisterAddon(addon_module);
