@@ -28,7 +28,6 @@ namespace
 		device = nullptr;
 	}
 
-	// Only a release request makes the compositor stop sending events to these objects.
 	void release_pointer_proxy(wl_pointer *pointer)
 	{
 		if (pointer == nullptr)
@@ -71,7 +70,6 @@ namespace
 		[](void *data, wl_pointer *, uint32_t serial, uint32_t, uint32_t button, uint32_t state) { self(data)->on_pointer_button(serial, button, state); },
 		[](void *data, wl_pointer *pointer, uint32_t, uint32_t axis, wl_fixed_t value) {
 			self(data)->on_pointer_axis(axis, wl_fixed_to_double(value));
-			// Before version 5 there are no frame events, so every axis event is a frame of its own.
 			if (wl_pointer_get_version(pointer) < WL_POINTER_FRAME_SINCE_VERSION)
 				self(data)->on_pointer_frame();
 		},
@@ -135,8 +133,6 @@ bool reshade::wayland_input::initialize()
 	if (_queue == nullptr || _xkb_context == nullptr)
 		return false;
 
-	// Create the registry directly on the private queue. Moving it there after creation races
-	// the host's own dispatching of the default queue.
 	auto *const display_wrapper = static_cast<wl_display *>(wl_proxy_create_wrapper(_display));
 	if (display_wrapper == nullptr)
 		return false;
@@ -147,8 +143,6 @@ bool reshade::wayland_input::initialize()
 		return false;
 	wl_registry_add_listener(_registry, &registry_listener, this);
 
-	// The first round trip binds the globals, the second receives the seat capabilities (creating
-	// the devices), the third their initial state such as the keymap and current focus.
 	for (int i = 0; i < 3; ++i)
 	{
 		if (wl_display_roundtrip_queue(_display, _queue) < 0 || _seat == nullptr)
@@ -171,8 +165,6 @@ bool reshade::wayland_input::initialize()
 
 void reshade::wayland_input::next_frame()
 {
-	// The host is the only reader of its connection. Reading the socket here could block behind
-	// a host thread that prepared a read, so only events already routed to the queue are handled.
 	_pointer.set_extent(width(), height());
 	const int result = wl_display_dispatch_queue_pending(_display, _queue);
 	if (_clipboard != nullptr)
@@ -205,7 +197,6 @@ void reshade::wayland_input::on_global(wl_registry *registry, uint32_t name, con
 	}
 	else if (std::strcmp(interface, wp_cursor_shape_manager_v1_interface.name) == 0 && _cursor_shape_manager == nullptr)
 	{
-		// Version 1 is enough for all shapes 'wayland_cursor_shape' maps to
 		_cursor_shape_manager = static_cast<wp_cursor_shape_manager_v1 *>(wl_registry_bind(registry, name, &wp_cursor_shape_manager_v1_interface, 1));
 		_cursor_shape_manager_name = name;
 		set_queue(_cursor_shape_manager, _queue);
@@ -307,7 +298,6 @@ void reshade::wayland_input::on_key(uint32_t serial, uint32_t key, uint32_t stat
 		return;
 
 	_last_serial = serial;
-	// Wayland sends evdev codes, XKB keycodes are offset by 8.
 	const xkb_keycode_t keycode = key + 8;
 	const bool pressed = state == WL_KEYBOARD_KEY_STATE_PRESSED;
 	const xkb_keysym_t keysym = xkb_state_key_get_one_sym(_xkb_state, keycode);
@@ -331,7 +321,6 @@ void reshade::wayland_input::on_modifiers(uint32_t depressed, uint32_t latched, 
 void reshade::wayland_input::on_pointer_enter(uint32_t serial, wl_surface *surface, double x, double y)
 {
 	release_pointer();
-	// The capture layer covers the host surface at the same origin, and replaces the host's cursor.
 	_pointer_on_overlay = surface != nullptr && surface == _overlay.surface();
 	if (_pointer_on_overlay)
 	{
@@ -413,7 +402,6 @@ void reshade::wayland_input::apply_overlay_cursor()
 	if (!_pointer_on_overlay || _pointer_device == nullptr)
 		return;
 
-	// Without cursor shapes the overlay draws the cursor itself (see 'needs_overlay_cursor')
 	if (const uint32_t shape = wayland_cursor_shape(_overlay_cursor); shape != 0 && _cursor_shape_device != nullptr)
 		wp_cursor_shape_device_v1_set_shape(_cursor_shape_device, _overlay_enter_serial, shape);
 	else
@@ -428,14 +416,12 @@ void reshade::wayland_input::on_overlay_active_changed()
 
 void reshade::wayland_input::update_pointer_scale()
 {
-	// Wine maps its own coordinates, so they already match the swapchain.
 	if (!_wine_host)
 		_pointer.set_preferred_scale(_overlay.preferred());
 }
 
 void reshade::wayland_input::update_capture()
 {
-	// Size the layer by the lowest plausible scale, so it can never extend beyond the host surface.
 	double scale = _wine_host ? _overlay.preferred() : _pointer.scale();
 	if (scale < 1.0)
 		scale = 1.0;
@@ -480,8 +466,6 @@ void reshade::wayland_input::log_pointer_changes()
 bool reshade::wayland_input::accepts_focus(wl_surface *focused_surface, const char *device) const
 {
 	const bool exact_match = focused_surface == _surface;
-	// Wine presents through a surface of its own, so focus is on a different surface of the same
-	// connection. Accept it when that connection has no other Vulkan surface it could belong to.
 	const bool wine_match = !exact_match && _wine_host && count_windows_on_display(_display) == 1;
 
 	log::message(log::level::info, "Wayland %s enter: focused_surface=%p vulkan_surface=%p exact_match=%d%s.", device, focused_surface, _surface, exact_match, wine_match ? " fallback=wine-single-surface" : "");
@@ -550,7 +534,6 @@ void reshade::wayland_input::release_pointer_device()
 
 uint32_t reshade::wayland_cursor_shape(int cursor)
 {
-	// Indexed by 'ImGuiMouseCursor'
 	constexpr uint32_t shapes[] = {
 		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT,
 		WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT,

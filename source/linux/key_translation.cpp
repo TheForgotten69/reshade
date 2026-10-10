@@ -210,7 +210,6 @@ std::u32string reshade::text_composer::feed(xkb_keysym_t keysym, uint32_t utf32)
 		break;
 	case XKB_COMPOSE_COMPOSED:
 	{
-		// Not every rule names a keysym for its result, but all of them have a string
 		char utf8[64];
 		const int length = xkb_compose_state_get_utf8(_state, utf8, sizeof(utf8));
 		if (length > 0 && static_cast<size_t>(length) < sizeof(utf8))

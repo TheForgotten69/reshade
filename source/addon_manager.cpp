@@ -47,7 +47,6 @@ namespace
 {
 	void *get_module_handle(const void *address)
 	{
-		// Called for every add-on callback of every event, so this must not take the loader lock like dladdr1 does
 		dl_find_object result;
 		return address != nullptr && _dl_find_object(const_cast<void *>(address), &result) == 0 ? result.dlfo_link_map : nullptr;
 	}
@@ -213,7 +212,6 @@ static std::atomic_ulong s_reference_count_linux = 0;
 std::filesystem::path reshade::get_default_addon_search_path()
 {
 #if defined(__linux__)
-	// Keep add-ons next to the shared shader installation, rather than per-application configuration.
 	if (const std::filesystem::path root = utils::xdg_path("XDG_DATA_HOME", ".local/share"); !root.empty())
 		return root / "reshade";
 #endif
@@ -552,7 +550,6 @@ reshade::addon_info *reshade::find_addon(const void *address)
 	if (address == nullptr)
 		return nullptr;
 
-	// Loader handles are opaque on Linux (and are not necessarily code addresses).
 	for (auto it = addon_loaded_info.rbegin(); it != addon_loaded_info.rend(); ++it)
 		if (it->handle == address)
 			return &(*it);

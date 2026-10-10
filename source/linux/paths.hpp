@@ -6,7 +6,6 @@
 
 namespace reshade::utils
 {
-	// XDG directory overrides and HOME must be absolute paths.
 	inline std::filesystem::path xdg_path(const char *variable, const char *fallback)
 	{
 		if (const char *value = std::getenv(variable); value != nullptr && value[0] != '\0')
@@ -20,8 +19,6 @@ namespace reshade::utils
 		return {};
 	}
 
-	// Windows file systems are case-insensitive, so rename differently cased variants (e.g. "reshade.ini") to the expected name.
-	// Returns whether the file exists afterwards.
 	inline bool normalize_file_name_case(const std::filesystem::path &path)
 	{
 		const auto lower = [](std::string value) {
@@ -47,14 +44,12 @@ namespace reshade::utils
 		return std::filesystem::is_regular_file(path, ec);
 	}
 
-	// Moves the staged file into place unless the destination already exists, so concurrent writers never replace each other's file.
-	// Returns whether the destination exists afterwards.
 	inline bool publish_file(const std::filesystem::path &staged, const std::filesystem::path &destination, std::error_code &ec)
 	{
 		std::filesystem::create_hard_link(staged, destination, ec);
 		if (ec == std::errc::file_exists)
 			ec.clear();
-		else if (ec) // File system may not support hard links
+		else if (ec)
 			std::filesystem::rename(staged, destination, ec);
 
 		std::error_code remove_ec;

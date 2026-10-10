@@ -23,9 +23,6 @@
 lockfree_linear_map<VkSurfaceKHR, vulkan_surface, 16> g_vulkan_surfaces;
 lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
 
-// Some applications destroy a surface twice on error paths, possibly from two threads at once (e.g.
-// PCSX2 when creating a swap chain fails), which drivers do not tolerate. Remember destroyed handles
-// until they are handed out again. The mutex also orders updates of 'g_vulkan_surfaces' against it.
 static std::mutex s_surfaces_mutex;
 static std::unordered_set<VkSurfaceKHR> s_destroyed_surfaces;
 
@@ -152,7 +149,6 @@ VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo, co
 	// 'vkEnumerateInstanceExtensionProperties' is not included in the next 'vkGetInstanceProcAddr' from the call chain, so use global one instead
 	const auto enum_instance_extensions = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(GetProcAddress(GetModuleHandleW(L"vulkan-1.dll"), "vkEnumerateInstanceExtensionProperties"));
 #else
-	// Global commands are not guaranteed to be exposed by the next layer's GIPA. Resolve this one from the loader itself.
 	void *const vulkan_loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
 	const auto enum_instance_extensions = vulkan_loader != nullptr ? reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(dlsym(vulkan_loader, "vkEnumerateInstanceExtensionProperties")) : nullptr;
 #endif
@@ -343,7 +339,6 @@ void     VKAPI_CALL vkDestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surfac
 
 	vulkan_surface surface_info;
 	{
-		// Decide under one lock, the repeated call may come from another thread at the same time.
 		const std::lock_guard<std::mutex> lock(s_surfaces_mutex);
 		if (g_vulkan_surfaces.erase(surface, surface_info))
 		{

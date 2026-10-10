@@ -62,6 +62,7 @@ namespace reshade
 		bool is_loading() const { return _reload_remaining_effects != std::numeric_limits<size_t>::max() || !_reload_create_queue.empty(); }
 
 		void render_effects(api::command_list *cmd_list, api::resource_view rtv, api::resource_view rtv_srgb) final;
+		bool is_texture_semantic_in_use(const char *semantic) const;
 		void render_technique(api::effect_technique handle, api::command_list *cmd_list, api::resource_view rtv, api::resource_view rtv_srgb) final;
 
 		/// <summary>

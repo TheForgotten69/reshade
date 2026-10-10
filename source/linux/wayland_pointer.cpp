@@ -56,11 +56,9 @@ void reshade::wayland_pointer::leave()
 
 void reshade::wayland_pointer::absolute_motion(double x, double y)
 {
-	// Some compositors repeat the lock position, which carries no movement.
 	if (_mode == mode::software_relative && std::abs(x - _lock_anchor[0]) < 0.5 && std::abs(y - _lock_anchor[1]) < 0.5)
 		return;
 
-	// A host that follows the preferred scale never reports a point beyond its swapchain.
 	if (!_scale_refuted && _scale > 1.0 && _stable_batches >= stable_batches_required &&
 		(x * _scale > _extent[0] + 2.0 || y * _scale > _extent[1] + 2.0))
 	{
@@ -87,7 +85,6 @@ void reshade::wayland_pointer::relative_motion(double dx, double dy, uint64_t ti
 
 void reshade::wayland_pointer::end_batch()
 {
-	// A pointer pushed against a screen edge also moves relatively without moving absolutely.
 	if (_absolute_in_batch)
 		_lock_evidence = 0;
 	else if (_relative_in_batch && !is_on_edge() && _lock_evidence < lock_batches && _lock_evidence++ == 0)
@@ -133,7 +130,6 @@ void reshade::wayland_pointer::axis_discrete(int steps)
 
 int reshade::wayland_pointer::end_axis_frame()
 {
-	// Discrete and continuous values describe the same wheel event, prefer the discrete one.
 	int delta = 0;
 	if (_has_scroll_steps)
 		delta = -_scroll_steps;
@@ -169,14 +165,12 @@ void reshade::wayland_pointer::set_mode(mode new_mode)
 
 	if (new_mode == mode::software_relative)
 	{
-		// Start from where the cursor was last seen, locks keep the pointer in place.
 		_virtual[0] = _position[0];
 		_virtual[1] = _position[1];
 		std::copy_n(_logical, 2, _lock_anchor);
 	}
 	else if (_mode == mode::software_relative)
 	{
-		// Back to the host cursor, wherever the host left it.
 		std::copy_n(_absolute, 2, _virtual);
 		publish(_absolute);
 	}

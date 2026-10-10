@@ -29,9 +29,6 @@ extern bool resolve_path(std::filesystem::path &path, std::error_code &ec, const
 namespace
 {
 #if defined(__linux__)
-	// Dear ImGui's clipboard callbacks moved from 'ImGuiIO' (a plain 'void *user_data') to
-	// 'ImGuiPlatformIO' (an 'ImGuiContext *') in 1.91.1; adapt to the newer shape here so
-	// 'reshade::input's clipboard functions can stay framework-agnostic like the rest of it.
 	const char *imgui_get_clipboard_text(ImGuiContext *ctx) { return reshade::input::get_clipboard_text(ctx->PlatformIO.Platform_ClipboardUserData); }
 	void imgui_set_clipboard_text(ImGuiContext *ctx, const char *text) { reshade::input::set_clipboard_text(ctx->PlatformIO.Platform_ClipboardUserData, text); }
 #endif
@@ -134,9 +131,6 @@ void reshade::runtime::init_gui()
 	imgui_io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
 #endif
 #if defined(__linux__)
-	// Dear ImGui's built-in clipboard default implementation only has native support for
-	// Windows and macOS; wire up the Wayland data-device based implementation here instead
-	// (Platform_ClipboardUserData is kept current in draw_gui(), since '_input' is not yet valid here)
 	_imgui_context->PlatformIO.Platform_GetClipboardTextFn = imgui_get_clipboard_text;
 	_imgui_context->PlatformIO.Platform_SetClipboardTextFn = imgui_set_clipboard_text;
 #endif
@@ -251,7 +245,6 @@ void reshade::runtime::build_font_atlas()
 	else
 	if (language.compare(0, 2, "zh") == 0)
 	{
-		// Simplified Chinese (zh-CN, zh-SG, ...) vs. Traditional Chinese (zh-HK, zh-TW, zh-Hant, ...)
 		const bool traditional = language.find("HK") != std::string::npos || language.find("TW") != std::string::npos || language.find("Hant") != std::string::npos;
 		_default_font_path = reshade::utils::find_system_font(traditional ? "Noto Sans CJK TC" : "Noto Sans CJK SC");
 	}
@@ -927,8 +920,6 @@ void reshade::runtime::draw_gui()
 		unsigned int max_position[2];
 		_input->max_mouse_position(max_position);
 #if defined(__linux__)
-		// The compositor owns the pointer outside the render surface. Do not leave
-		// a second cursor or an active hover target at its last in-surface position.
 		if (!_input->is_mouse_position_valid())
 			imgui_io.AddMousePosEvent(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
 		else
@@ -1051,8 +1042,6 @@ void reshade::runtime::draw_gui()
 		};
 
 #if defined(__linux__)
-		// Submit complete taps in event order. A pressed-or-down snapshot merges
-		// consecutive short taps into one held key (or mouse button).
 		constexpr unsigned int mouse_keys[] = { input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2 };
 		for (const auto &event : _input->key_transitions())
 		{
@@ -1064,7 +1053,6 @@ void reshade::runtime::draw_gui()
 					imgui_io.AddMouseButtonEvent(i, event.down);
 		}
 #endif
-		// Reconcile polled inputs and focus-loss releases as well.
 		for (const std::pair<ImGuiKey, unsigned int> &mapping : key_mappings)
 			imgui_io.AddKeyEvent(mapping.first, _input->is_key_down(mapping.second));
 		imgui_io.AddKeyEvent(ImGuiMod_Super, _input->is_key_down(input::key_left_windows) || _input->is_key_down(input::key_right_windows));
@@ -1596,7 +1584,6 @@ void reshade::runtime::draw_gui()
 		_input->block_mouse_cursor_warping(_show_overlay || _block_input_next_frame || block_mouse_input);
 
 #if defined(__linux__)
-		// Block everything, or only what is on top of overlay windows (the Linux equivalent of 'WantCaptureMouse').
 		std::vector<input::capture_rect> capture;
 		if (block_input && _input_processing_mode == 2)
 			capture.push_back({ 0.0f, 0.0f, 1.0f, 1.0f });

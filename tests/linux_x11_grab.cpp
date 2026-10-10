@@ -1,5 +1,3 @@
-// Run only against an isolated X server without a window manager: this test grabs its pointer and
-// injects input. For example a rootful 'Xwayland :77' started inside a headless 'kwin_wayland --virtual'.
 #include "dll_log.hpp"
 #include "linux/x11_input.hpp"
 #include <xcb/xtest.h>
@@ -22,7 +20,6 @@ struct reshade::input_test_access
 };
 using test_access = reshade::input_test_access;
 
-// Waits until the backend observed the cursor change the host just made.
 static void settle(reshade::x11_input &backend, xcb_connection_t *host)
 {
 	xcb_flush(host);
@@ -62,7 +59,6 @@ int main()
 		backend.set_overlay_active(true);
 		assert(!test_access::uses_relative_motion(backend) && !backend.needs_overlay_cursor());
 
-		// A host hiding its cursor gets the overlay cursor, driven by raw motion.
 		const xcb_pixmap_t blank = xcb_generate_id(host);
 		xcb_create_pixmap(host, 1, blank, window, 1, 1);
 		const xcb_cursor_t invisible = xcb_generate_id(host);
@@ -99,8 +95,6 @@ int main()
 		assert(owner.is_key_pressed(reshade::input::key_home) && owner.is_key_released(reshade::input::key_home));
 		assert(owner.mouse_position_x() > start_x);
 		std::cout << "Home tap and cursor motion during host grabs: PASS" << std::endl;
-		// A windowed overlay must follow the server pointer, not retain a separate
-		// raw-delta position when the host pointer moves towards the menu bar.
 		const uint32_t default_cursor = XCB_CURSOR_NONE;
 		xcb_change_window_attributes(host, window, XCB_CW_CURSOR, &default_cursor);
 		settle(backend, host);
@@ -120,7 +114,6 @@ int main()
 		}
 		std::cout << "Windowed pointer alignment at all four corners: PASS" << std::endl;
 
-		// While the overlay blocks keyboard input the keyboard is grabbed, so the host cannot grab it.
 		const auto host_grab_status = [&]() {
 			auto *const reply = xcb_grab_keyboard_reply(host, xcb_grab_keyboard(host, false, window, XCB_CURRENT_TIME, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC), nullptr);
 			assert(reply);
@@ -137,7 +130,6 @@ int main()
 		assert(host_grab_status() == XCB_GRAB_STATUS_SUCCESS);
 		std::cout << "Keyboard grab while blocking keyboard input: PASS" << std::endl;
 	}
-	// Exercise the public validity signal consumed by the ImGui cursor/hover path.
 	const uint32_t size[] = {400, 300};
 	xcb_configure_window(host, window, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, size);
 	xcb_warp_pointer(host, XCB_WINDOW_NONE, window, 0, 0, 0, 0, 100, 100);
