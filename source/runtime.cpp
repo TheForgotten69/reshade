@@ -78,9 +78,15 @@ std::string expand_macro_string(const std::string &input, std::vector<std::pair<
 		// Allow using environment variables alongside macros
 		if (value.empty())
 		{
+#ifdef _WIN32
 			char buf[512] = ""; size_t buf_len = 0;
 			if (getenv_s(&buf_len, buf, sizeof(buf) - 1, std::string(input_macro_name).c_str()) == 0)
 				value = buf;
+#elif defined(__linux__)
+			const std::string name(input_macro_name);
+			if (const char *const environment_value = std::getenv(name.c_str()))
+				value = environment_value;
+#endif
 		}
 
 		if (colon_pos == std::string_view::npos)
@@ -113,7 +119,7 @@ static std::string expand_macro_string(const std::string &input, std::vector<std
 
 	char timestamp[21];
 	const std::time_t t = std::chrono::system_clock::to_time_t(now_seconds);
-	struct tm tm; localtime_s(&tm, &t);
+	struct tm tm; reshade::utils::local_time(t, tm);
 
 	std::snprintf(timestamp, std::size(timestamp), "%.4d-%.2d-%.2d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
 	macros.emplace_back("Date", timestamp);
@@ -560,7 +566,7 @@ bool reshade::runtime::on_init()
 		else
 			_input.reset();
 
-		_primary_input_handler = _input.use_count() == 1 || (_input == nullptr && _input_gamepad != nullptr);
+		_primary_input_handler = _input != nullptr ? _input->try_acquire_primary_handler() : _input_gamepad != nullptr;
 	}
 
 	// Reset frame count to zero so effects are loaded in 'update_effects'
@@ -688,6 +694,11 @@ void reshade::runtime::on_reset()
 #endif
 
 	log::message(log::level::info, "Destroyed runtime environment on runtime %p ('%s').", this, _config_path.u8string().c_str());
+
+	if (_primary_input_handler && _input != nullptr)
+		_input->release_primary_handler();
+	_primary_input_handler = false;
+	_input.reset();
 }
 void reshade::runtime::on_present()
 {
@@ -940,6 +951,8 @@ void reshade::runtime::on_present()
 	_effects_rendered_this_frame = false;
 
 	// Update input status
+	if (!_primary_input_handler && _input != nullptr && _input->try_acquire_primary_handler())
+		_primary_input_handler = true;
 	if (_primary_input_handler && _input != nullptr)
 		_input->next_frame();
 	if (_primary_input_handler && _input_gamepad != nullptr)
@@ -949,7 +962,7 @@ void reshade::runtime::on_present()
 	if (!ini_file::flush_cache())
 		_preset_save_successful = false;
 
-#if RESHADE_ADDON == 1
+#if RESHADE_ADDON == 1 && defined(_WIN32)
 	// Detect high network traffic
 	extern volatile long g_network_traffic;
 
@@ -1772,7 +1785,11 @@ bool reshade::runtime::load_effect(const std::filesystem::path &source_file, con
 			shader_model = 51; // D3D12
 
 		if ((_renderer_id & 0xF0000) == 0)
+#if defined(_WIN32)
 			codegen.reset(reshadefx::create_codegen_dxbc(shader_model, !_no_debug_info, _performance_mode, _performance_mode ? 3 : 1));
+#elif defined(__linux__)
+			assert(false);
+#endif
 		else if (_renderer_id < 0x20000)
 			codegen.reset(reshadefx::create_codegen_glsl(false, !_no_debug_info, _performance_mode, false, true));
 		else // Vulkan uses SPIR-V input
@@ -2957,7 +2974,7 @@ void reshade::runtime::load_textures(size_t effect_index)
 			tex.format == reshadefx::texture_format::rg32f ||
 			tex.format == reshadefx::texture_format::rgba32f;
 
-		if (FILE *const file = _wfsopen(source_path.c_str(), L"rb", SH_DENYNO))
+		if (FILE *const file = reshade::utils::open_file(source_path, "rb"))
 		{
 			fseek(file, 0, SEEK_END);
 			const size_t file_size = ftell(file);
@@ -3534,7 +3551,7 @@ bool reshade::runtime::load_effect_cache(const std::string &id, const std::strin
 	std::filesystem::path path = g_reshade_base_path / _effect_cache_path;
 	path /= std::filesystem::u8path("reshade-" + id + '.' + type);
 
-	FILE *const file = _wfsopen(path.c_str(), L"rb", SH_DENYNO);
+	FILE *const file = reshade::utils::open_file(path, "rb");
 	if (file == nullptr)
 		return false;
 
@@ -3555,7 +3572,7 @@ bool reshade::runtime::save_effect_cache(const std::string &id, const std::strin
 	std::filesystem::path path = g_reshade_base_path / _effect_cache_path;
 	path /= std::filesystem::u8path("reshade-" + id + '.' + type);
 
-	FILE *const file = _wfsopen(path.c_str(), L"wb", SH_DENYNO);
+	FILE *const file = reshade::utils::open_file(path, "wb");
 	if (file == nullptr)
 		return false;
 
@@ -3880,7 +3897,7 @@ void reshade::runtime::render_effects(api::command_list *cmd_list, api::resource
 			case special_uniform::date:
 				{
 					const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-					struct tm tm; localtime_s(&tm, &t);
+					struct tm tm; reshade::utils::local_time(t, tm);
 
 					const int value[4] = {
 						tm.tm_year + 1900,
@@ -4363,7 +4380,7 @@ void reshade::runtime::save_texture(const texture &tex)
 			// Default to a save failure unless it is reported to succeed below
 			bool save_success = false;
 
-			if (FILE *const file = _wfsopen(screenshot_path.c_str(), L"wb", SH_DENYNO))
+			if (FILE *const file = reshade::utils::open_file(screenshot_path, "wb"))
 			{
 				const auto write_callback = [](void *context, void *data, int size) {
 					fwrite(data, 1, size, static_cast<FILE *>(context));
@@ -4867,7 +4884,7 @@ void reshade::runtime::save_screenshot(const char *postfix_in)
 			// Default to a save failure unless it is reported to succeed below
 			bool save_success = false;
 
-			if (FILE *const file = _wfsopen(screenshot_path.c_str(), L"wb", SH_DENYNO))
+			if (FILE *const file = reshade::utils::open_file(screenshot_path, "wb"))
 			{
 				const auto write_callback = [](void *context, void *data, int size) {
 					fwrite(data, 1, size, static_cast<FILE *>(context));
@@ -4925,10 +4942,10 @@ void reshade::runtime::save_screenshot(const char *postfix_in)
 							auto rgba_float_bt2100_pq = _mm_div_ps(rgba_float_bt2100, _mm_set_ps1(125.0f));
 							alignas(16) float temp[4];
 							_mm_store_ps(temp, rgba_float_bt2100_pq);
-							rgba_float_bt2100_pq = _mm_setr_ps(std::powf(temp[0], PQ_m1), std::powf(temp[1], PQ_m1), std::powf(temp[2], PQ_m1), 0.0f);
+							rgba_float_bt2100_pq = _mm_setr_ps(std::pow(temp[0], PQ_m1), std::pow(temp[1], PQ_m1), std::pow(temp[2], PQ_m1), 0.0f);
 							rgba_float_bt2100_pq = _mm_div_ps(_mm_add_ps(_mm_mul_ps(_mm_set_ps1(PQ_c2), rgba_float_bt2100_pq), _mm_set_ps1(PQ_c1)), _mm_add_ps(_mm_mul_ps(_mm_set_ps1(PQ_c3), rgba_float_bt2100_pq), _mm_set_ps1(1.0f)));
 							_mm_store_ps(temp, rgba_float_bt2100_pq);
-							rgba_float_bt2100_pq = _mm_setr_ps(std::powf(temp[0], PQ_m2), std::powf(temp[1], PQ_m2), std::powf(temp[2], PQ_m2), 0.0f);
+							rgba_float_bt2100_pq = _mm_setr_ps(std::pow(temp[0], PQ_m2), std::pow(temp[1], PQ_m2), std::pow(temp[2], PQ_m2), 0.0f);
 
 							// Convert to integers and pack into 16-bit range
 							_mm_storel_epi64(reinterpret_cast<__m128i *>(result), _mm_packus_epi32(_mm_cvtps_epi32(_mm_mul_ps(rgba_float_bt2100_pq, _mm_set_ps1(65536.0f))), _mm_setzero_si128()));

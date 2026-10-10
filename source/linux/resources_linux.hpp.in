@@ -1,0 +1,16 @@
+#pragma once
+
+#include "resource.h"
+#include <cstddef>
+#include <cstdint>
+
+@RESHADE_LINUX_DATA_RESOURCE_ARRAYS@
+struct embedded_data_resource
+{
+	unsigned short id;
+	const unsigned char *data;
+	size_t size;
+};
+
+inline constexpr embedded_data_resource embedded_data_resources[] = {
+@RESHADE_LINUX_DATA_RESOURCE_TABLE@};

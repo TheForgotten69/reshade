@@ -7,12 +7,15 @@
 
 #include "reshade_api_device.hpp"
 #include <cassert>
+#include <cstring>
+#include <algorithm>
 #include <unordered_map>
+#include <vector>
 
 namespace reshade::api
 {
 	template <typename T, typename... api_object_base>
-	class __declspec(novtable) api_object_impl : public api_object_base...
+	class RESHADE_API_NOVTABLE api_object_impl : public api_object_base...
 	{
 		static_assert(sizeof(T) <= sizeof(uint64_t));
 
@@ -48,6 +51,13 @@ namespace reshade::api
 #endif
 		};
 
+		static guid_t make_guid(const uint8_t guid[16])
+		{
+			guid_t result;
+			std::memcpy(&result, guid, sizeof(result));
+			return result;
+		}
+
 	public:
 		api_object_impl(const api_object_impl &) = delete;
 		api_object_impl &operator=(const api_object_impl &) = delete;
@@ -56,24 +66,32 @@ namespace reshade::api
 		{
 			assert(data != nullptr);
 
-			if (_private_data.empty()) // Early-out to avoid crash when this is called after the object was destroyed
+			const guid_t key = make_guid(guid);
+			for (const auto &entry : _private_data)
 			{
-				*data = 0;
-				return;
+				if (typename guid_t::equal()(entry.first, key))
+				{
+					*data = entry.second;
+					return;
+				}
 			}
-
-			if (const auto it = _private_data.find(*reinterpret_cast<const guid_t *>(guid));
-				it != _private_data.end())
-				*data = it->second;
-			else
-				*data = 0;
+			*data = 0;
 		}
 		void set_private_data(const uint8_t guid[16], const uint64_t data)  final
 		{
+			const guid_t key = make_guid(guid);
+			const auto it = std::find_if(_private_data.begin(), _private_data.end(), [&key](const std::pair<guid_t, uint64_t> &entry) { return typename guid_t::equal()(entry.first, key); });
 			if (data != 0)
-				_private_data[*reinterpret_cast<const guid_t *>(guid)] = data;
-			else
-				_private_data.erase(*reinterpret_cast<const guid_t *>(guid));
+			{
+				if (it != _private_data.end())
+					it->second = data;
+				else
+					_private_data.emplace_back(key, data);
+			}
+			else if (it != _private_data.end())
+			{
+				_private_data.erase(it);
+			}
 		}
 
 		uint64_t get_native() const final { return (uint64_t)_orig; }
@@ -90,7 +108,7 @@ namespace reshade::api
 		}
 
 	private:
-		std::unordered_map<guid_t, uint64_t, typename guid_t::hash, typename guid_t::equal> _private_data;
+		std::vector<std::pair<guid_t, uint64_t>> _private_data;
 	};
 }
 

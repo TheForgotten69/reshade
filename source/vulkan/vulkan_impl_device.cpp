@@ -399,6 +399,11 @@ bool reshade::vulkan::device_impl::create_resource(const api::resource_desc &des
 {
 	*out_resource = { 0 };
 
+#if VK_EXT_external_memory_host
+	if ((desc.flags & api::resource_flags::shared_host) != 0)
+		return shared_handle != nullptr && import_host_buffer(desc, *shared_handle, out_resource);
+#endif
+
 	assert((desc.usage & initial_state) == initial_state || initial_state == api::resource_usage::general || initial_state == api::resource_usage::cpu_access);
 
 	VmaAllocation allocation = VMA_NULL;
@@ -731,6 +736,63 @@ bool reshade::vulkan::device_impl::create_resource(const api::resource_desc &des
 
 	return false;
 }
+#if VK_EXT_external_memory_host
+bool reshade::vulkan::device_impl::import_host_buffer(const api::resource_desc &desc, void *host_pointer, api::resource *out_resource)
+{
+	if (!vk.EXT_external_memory_host || desc.type != api::resource_type::buffer || host_pointer == nullptr)
+		return false;
+
+	VkMemoryHostPointerPropertiesEXT host_properties { VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
+	if (vk.GetMemoryHostPointerPropertiesEXT(_orig, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, host_pointer, &host_properties) != VK_SUCCESS || host_properties.memoryTypeBits == 0)
+	{
+		reshade::log::message(reshade::log::level::error, "Host pointer %p cannot be imported (check its alignment).", host_pointer);
+		return false;
+	}
+
+	VkBufferCreateInfo create_info { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	convert_resource_desc(desc, create_info);
+	VkExternalMemoryBufferCreateInfo external_memory_info { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
+	external_memory_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+	create_info.pNext = &external_memory_info;
+
+	VkImportMemoryHostPointerInfoEXT import_info { VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT };
+	import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+	import_info.pHostPointer = host_pointer;
+
+	VmaAllocationCreateInfo alloc_info = {};
+	alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+	alloc_info.memoryTypeBits = host_properties.memoryTypeBits;
+	VmaPoolCreateInfo pool_info = {};
+	pool_info.pMemoryAllocateNext = &import_info;
+	if (vmaFindMemoryTypeIndexForBufferInfo(_alloc, &create_info, &alloc_info, &pool_info.memoryTypeIndex) != VK_SUCCESS ||
+		vmaCreatePool(_alloc, &pool_info, &alloc_info.pool) != VK_SUCCESS)
+		return false;
+
+	VkBuffer object = VK_NULL_HANDLE;
+	VmaAllocation allocation = VMA_NULL;
+	VmaAllocationInfo allocation_info = {};
+	if (vmaCreateBuffer(_alloc, &create_info, &alloc_info, &object, &allocation, &allocation_info) != VK_SUCCESS)
+	{
+		reshade::log::message(reshade::log::level::error, "Failed to import host memory at %p as a %llu byte buffer.", host_pointer, static_cast<unsigned long long>(desc.buffer.size));
+		vmaDestroyPool(_alloc, alloc_info.pool);
+		return false;
+	}
+
+	object_data<VK_OBJECT_TYPE_BUFFER> data;
+	data.allocation = allocation;
+	data.pool = alloc_info.pool;
+	data.memory = allocation_info.deviceMemory;
+	data.memory_offset = allocation_info.offset;
+	data.create_info = create_info;
+	data.create_info.pNext = nullptr;
+
+	register_object<VK_OBJECT_TYPE_BUFFER>(object, std::move(data));
+
+	*out_resource = { (uint64_t)object };
+	return true;
+}
+#endif
+
 void reshade::vulkan::device_impl::destroy_resource(api::resource resource)
 {
 	if (resource == 0)

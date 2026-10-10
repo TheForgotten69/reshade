@@ -16,6 +16,7 @@
 #include "imgui_widgets.hpp"
 #include "localization.hpp"
 #include "platform_utils.hpp"
+#include "process_environment.hpp"
 #include "fonts/forkawesome.inl"
 #include <cmath> // std::abs, std::ceil, std::floor
 #include <cctype> // std::tolower
@@ -24,6 +25,14 @@
 #include <algorithm> // std::any_of, std::count_if, std::find, std::find_if, std::max, std::min, std::replace, std::rotate, std::search, std::swap, std::transform
 
 extern bool resolve_path(std::filesystem::path &path, std::error_code &ec, const std::filesystem::path &base = g_reshade_base_path);
+
+namespace
+{
+#if defined(__linux__)
+	const char *imgui_get_clipboard_text(ImGuiContext *ctx) { return reshade::input::get_clipboard_text(ctx->PlatformIO.Platform_ClipboardUserData); }
+	void imgui_set_clipboard_text(ImGuiContext *ctx, const char *text) { reshade::input::set_clipboard_text(ctx->PlatformIO.Platform_ClipboardUserData, text); }
+#endif
+}
 
 static bool string_contains(const std::string_view text, const std::string_view filter)
 {
@@ -117,7 +126,14 @@ void reshade::runtime::init_gui()
 	ImGuiIO &imgui_io = _imgui_context->IO;
 	imgui_io.IniFilename = nullptr;
 	imgui_io.ConfigFlags = ImGuiConfigFlags_DockingEnable | ImGuiConfigFlags_NavEnableKeyboard;
-	imgui_io.BackendFlags = ImGuiBackendFlags_HasMouseCursors | ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
+	imgui_io.BackendFlags = ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures;
+#if !defined(__linux__)
+	imgui_io.BackendFlags |= ImGuiBackendFlags_HasMouseCursors;
+#endif
+#if defined(__linux__)
+	_imgui_context->PlatformIO.Platform_GetClipboardTextFn = imgui_get_clipboard_text;
+	_imgui_context->PlatformIO.Platform_SetClipboardTextFn = imgui_set_clipboard_text;
+#endif
 
 	ImGuiStyle &imgui_style = _imgui_context->Style;
 	// Disable rounding by default
@@ -158,6 +174,7 @@ void reshade::runtime::build_font_atlas()
 	if (language.empty())
 		language = resources::get_current_language();
 
+#ifdef _WIN32
 	if (language.compare(0, 2, "ar") == 0 ||
 		language.compare(0, 2, "bg") == 0 ||
 		language.compare(0, 2, "pl") == 0 ||
@@ -206,6 +223,32 @@ void reshade::runtime::build_font_atlas()
 				_default_font_path = L"C:\\Windows\\Fonts\\mingliu.ttc";
 		}
 	}
+#elif defined(__linux__)
+	if (language.compare(0, 2, "ar") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans Arabic");
+	else
+	if (language.compare(0, 2, "bg") == 0 ||
+		language.compare(0, 2, "pl") == 0 ||
+		language.compare(0, 2, "ru") == 0 ||
+		language.compare(0, 2, "sl") == 0 ||
+		language.compare(0, 2, "tr") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans");
+	else
+	if (language.compare(0, 2, "th") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans Thai");
+	else
+	if (language.compare(0, 2, "ja") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans CJK JP");
+	else
+	if (language.compare(0, 2, "ko") == 0)
+		_default_font_path = reshade::utils::find_system_font("Noto Sans CJK KR");
+	else
+	if (language.compare(0, 2, "zh") == 0)
+	{
+		const bool traditional = language.find("HK") != std::string::npos || language.find("TW") != std::string::npos || language.find("Hant") != std::string::npos;
+		_default_font_path = reshade::utils::find_system_font(traditional ? "Noto Sans CJK TC" : "Noto Sans CJK SC");
+	}
+#endif
 #endif
 
 	const auto add_font_from_file = [atlas](std::filesystem::path &font_path, const ImFontConfig *font_config, std::error_code &ec) -> bool {
@@ -217,7 +260,7 @@ void reshade::runtime::build_font_atlas()
 
 		if (resolve_path(font_path, ec))
 		{
-			if (FILE *const file = _wfsopen(font_path.c_str(), L"rb", SH_DENYNO))
+			if (FILE *const file = reshade::utils::open_file(font_path, "rb"))
 			{
 				fseek(file, 0, SEEK_END);
 				const size_t file_size = ftell(file);
@@ -774,10 +817,12 @@ void reshade::runtime::draw_gui()
 
 	if (_input != nullptr)
 	{
+		const bool overlay_key_pressed = _input->is_key_pressed(_overlay_key_data, _force_shortcut_modifiers);
+
 		if (_show_overlay && !_ignore_shortcuts && _input->is_key_pressed(input::key_escape) &&
 			(_input_processing_mode == 2 || (_input_processing_mode == 1 && (_imgui_context->IO.WantCaptureMouse || _imgui_context->IO.WantCaptureKeyboard))) && !_imgui_context->IO.NavVisible)
 			show_overlay = false; // Close when pressing the escape button, input focus is on the overlay and not currently navigating with the keyboard
-		else if (!_ignore_shortcuts && _input->is_key_pressed(_overlay_key_data, _force_shortcut_modifiers) && _imgui_context->ActiveId == 0)
+		else if (!_ignore_shortcuts && overlay_key_pressed && _imgui_context->ActiveId == 0)
 			show_overlay = !_show_overlay;
 
 		if (!_ignore_shortcuts)
@@ -844,6 +889,9 @@ void reshade::runtime::draw_gui()
 			_input->block_mouse_input(_block_input_next_frame);
 			_input->block_keyboard_input(_block_input_next_frame);
 			_input->block_mouse_cursor_warping(_block_input_next_frame);
+#if defined(__linux__)
+			_input->set_pointer_capture(_block_input_next_frame ? std::vector<input::capture_rect> { { 0.0f, 0.0f, 1.0f, 1.0f } } : std::vector<input::capture_rect> {});
+#endif
 		}
 		return; // Early-out to avoid costly ImGui calls when no GUI elements are on the screen
 	}
@@ -862,9 +910,20 @@ void reshade::runtime::draw_gui()
 	{
 		imgui_io.MouseDrawCursor = _show_overlay && (!_should_save_screenshot || !_screenshot_save_gui);
 
+#if defined(__linux__)
+		if (!_input->is_mouse_position_valid() || !_input->needs_overlay_cursor())
+			imgui_io.MouseDrawCursor = false;
+		_imgui_context->PlatformIO.Platform_ClipboardUserData = _input.get();
+#endif
+
 		// Scale mouse position in case render resolution does not match the window size
 		unsigned int max_position[2];
 		_input->max_mouse_position(max_position);
+#if defined(__linux__)
+		if (!_input->is_mouse_position_valid())
+			imgui_io.AddMousePosEvent(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+		else
+#endif
 		imgui_io.AddMousePosEvent(
 			_input->mouse_position_x() * (imgui_io.DisplaySize.x / max_position[0]),
 			_input->mouse_position_y() * (imgui_io.DisplaySize.y / max_position[1]));
@@ -980,15 +1039,31 @@ void reshade::runtime::draw_gui()
 			{ ImGuiMod_Ctrl, input::key_ctrl },
 			{ ImGuiMod_Shift, input::key_shift },
 			{ ImGuiMod_Alt, input::key_alt },
-			{ ImGuiMod_Super, input::key_application },
 		};
 
+#if defined(__linux__)
+		constexpr unsigned int mouse_keys[] = { input::key_button_left, input::key_button_right, input::key_button_middle, input::key_button_xbutton1, input::key_button_xbutton2 };
+		for (const auto &event : _input->key_transitions())
+		{
+			for (const auto &mapping : key_mappings)
+				if (mapping.second == event.key)
+					imgui_io.AddKeyEvent(mapping.first, event.down);
+			for (ImGuiMouseButton i = 0; i < ImGuiMouseButton_COUNT; ++i)
+				if (mouse_keys[i] == event.key)
+					imgui_io.AddMouseButtonEvent(i, event.down);
+		}
+#endif
 		for (const std::pair<ImGuiKey, unsigned int> &mapping : key_mappings)
 			imgui_io.AddKeyEvent(mapping.first, _input->is_key_down(mapping.second));
+		imgui_io.AddKeyEvent(ImGuiMod_Super, _input->is_key_down(input::key_left_windows) || _input->is_key_down(input::key_right_windows));
 		for (ImGuiMouseButton i = 0; i < ImGuiMouseButton_COUNT; i++)
 			imgui_io.AddMouseButtonEvent(i, _input->is_mouse_button_down(i));
-		for (ImWchar16 c : _input->text_input())
-			imgui_io.AddInputCharacterUTF16(c);
+		for (wchar_t c : _input->text_input())
+#if defined(__linux__)
+			imgui_io.AddInputCharacter(static_cast<unsigned int>(c));
+#else
+			imgui_io.AddInputCharacterUTF16(static_cast<ImWchar16>(c));
+#endif
 	}
 
 	if (_input_gamepad != nullptr)
@@ -1235,7 +1310,7 @@ void reshade::runtime::draw_gui()
 		if (show_clock)
 		{
 			const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-			struct tm tm; localtime_s(&tm, &t);
+			struct tm tm; reshade::utils::local_time(t, tm);
 
 			int temp_size;
 			switch (_clock_format)
@@ -1507,6 +1582,19 @@ void reshade::runtime::draw_gui()
 		_input->block_mouse_input(block_mouse_input);
 		_input->block_keyboard_input(block_keyboard_input);
 		_input->block_mouse_cursor_warping(_show_overlay || _block_input_next_frame || block_mouse_input);
+
+#if defined(__linux__)
+		std::vector<input::capture_rect> capture;
+		if (block_input && _input_processing_mode == 2)
+			capture.push_back({ 0.0f, 0.0f, 1.0f, 1.0f });
+		else if (block_input)
+			for (const ImGuiWindow *const window : _imgui_context->Windows)
+				if (window->Active && !window->Hidden && (window->Flags & ImGuiWindowFlags_NoMouseInputs) == 0)
+					capture.push_back({ window->Pos.x / imgui_io.DisplaySize.x, window->Pos.y / imgui_io.DisplaySize.y, window->Size.x / imgui_io.DisplaySize.x, window->Size.y / imgui_io.DisplaySize.y });
+		_input->set_pointer_capture(std::move(capture));
+		static_assert(ImGuiMouseCursor_COUNT == 11, "Update 'wayland_cursor_shape' for the new cursors");
+		_input->set_overlay_cursor(imgui_io.MouseDrawCursor ? ImGuiMouseCursor_None : ImGui::GetMouseCursor());
+#endif
 	}
 
 	if (ImDrawData *const draw_data = ImGui::GetDrawData();
@@ -2076,6 +2164,10 @@ void reshade::runtime::draw_gui_settings()
 				"Block all input when overlay is visible\n");
 			std::replace(input_processing_mode_items.begin(), input_processing_mode_items.end(), '\n', '\0');
 			modified |= ImGui::Combo(_("Input processing"), reinterpret_cast<int *>(&_input_processing_mode), input_processing_mode_items.c_str());
+#if defined(__linux__)
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("On native Wayland the application keeps receiving keyboard input while the overlay is open.");
+#endif
 
 			modified |= imgui::key_input_box(_("Overlay key"), _overlay_key_data, *_input);
 
@@ -2187,7 +2279,11 @@ void reshade::runtime::draw_gui_settings()
 		modified |= imgui::file_input_box(_("Screenshot sound"), "sound.wav", _screenshot_sound_path, _file_selection_path, { L".wav" });
 		ImGui::SetItemTooltip(_("Audio file that is played when taking a screenshot."));
 
+#if defined(_WIN32)
 		modified |= imgui::file_input_box(_("Post-save command"), "command.bat", _screenshot_post_save_command, _file_selection_path, { L".exe", L".bat", L".cmd", L".ps1", L".py" });
+#else
+		modified |= imgui::file_input_box(_("Post-save command"), "command.sh", _screenshot_post_save_command, _file_selection_path, { L"", L".sh", L".py" });
+#endif
 		ImGui::SetItemTooltip(_(
 			"Executable or script that is called after saving a screenshot.\n"
 			"This can be used to perform additional processing on the image (e.g. compressing it with an image optimizer)."));
@@ -2534,7 +2630,7 @@ void reshade::runtime::draw_gui_statistics()
 			ImVec2(0, 50));
 
 		const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-		struct tm tm; localtime_s(&tm, &t);
+		struct tm tm; reshade::utils::local_time(t, tm);
 
 		ImGui::BeginGroup();
 
@@ -3056,8 +3152,12 @@ void reshade::runtime::draw_gui_statistics()
 void reshade::runtime::draw_gui_log()
 {
 	std::error_code ec;
+	#if defined(__linux__)
+	const std::filesystem::path log_path = process::get_log_path();
+	#else
 	std::filesystem::path log_path = global_config().path();
 	log_path.replace_extension(L".log");
+	#endif
 
 	const bool filter_changed = imgui::search_input_box(_log_filter, sizeof(_log_filter), -(ImGui::GetFrameHeight() + 8.0f * ImGui::GetFontSize() + 2 * _imgui_context->Style.ItemSpacing.x));
 
@@ -3081,7 +3181,7 @@ void reshade::runtime::draw_gui_log()
 	{
 		_log_editor.set_readonly(true);
 
-		if (FILE *const file = _wfsopen(log_path.c_str(), L"r", SH_DENYNO))
+		if (FILE *const file = reshade::utils::open_file(log_path, "r"))
 		{
 			if (filter_changed || file_size <= _last_log_size)
 				_log_editor.clear_text();
@@ -3150,11 +3250,13 @@ void reshade::runtime::draw_gui_about()
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_RESHADE);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#if defined(_WIN32)
 	if (ImGui::CollapsingHeader("MinHook"))
 	{
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_MINHOOK);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#endif
 	if (ImGui::CollapsingHeader("Dear ImGui"))
 	{
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_IMGUI);
@@ -3162,12 +3264,12 @@ void reshade::runtime::draw_gui_about()
 	}
 	if (ImGui::CollapsingHeader("ImGuiColorTextEdit"))
 	{
-		ImGui::TextUnformatted("Copyright (C) 2017 BalazsJako\
-\
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\
-\
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\
-\
+		ImGui::TextUnformatted("Copyright (C) 2017 BalazsJako\n\
+\n\
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\
+\n\
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\
+\n\
 THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.");
 	}
 	if (ImGui::CollapsingHeader("glad"))
@@ -3203,6 +3305,7 @@ THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_VMA);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#if defined(_WIN32)
 	if (ImGui::CollapsingHeader("OpenVR"))
 	{
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_OPENVR);
@@ -3213,20 +3316,21 @@ THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
 		const resources::data_resource resource = resources::load_data_resource(IDR_LICENSE_OPENXR);
 		ImGui::TextUnformatted(static_cast<const char *>(resource.data), static_cast<const char *>(resource.data) + resource.data_size);
 	}
+#endif
 	if (ImGui::CollapsingHeader("Solarized"))
 	{
-		ImGui::TextUnformatted("Copyright (C) 2011 Ethan Schoonover\
-\
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\
-\
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\
-\
+		ImGui::TextUnformatted("Copyright (C) 2011 Ethan Schoonover\n\
+\n\
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\
+\n\
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\
+\n\
 THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.");
 	}
 	if (ImGui::CollapsingHeader("Fork Awesome"))
 	{
-		ImGui::TextUnformatted("Copyright (C) 2018 Fork Awesome (https://forkawesome.github.io)\
-\
+		ImGui::TextUnformatted("Copyright (C) 2018 Fork Awesome (https://forkawesome.github.io)\n\
+\n\
 This Font Software is licensed under the SIL Open Font License, Version 1.1. (http://scripts.sil.org/OFL)");
 	}
 	if (ImGui::CollapsingHeader("libjxl simple lossless encoder"))
@@ -3254,7 +3358,7 @@ void reshade::runtime::draw_gui_addons()
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextUnformatted(_("This build of ReShade has only limited add-on functionality."));
 #else
-	std::filesystem::path addon_search_path = L".\\";
+	std::filesystem::path addon_search_path = get_default_addon_search_path();
 	config.get("ADDON", "AddonPath", addon_search_path);
 	if (imgui::directory_input_box(_("Add-on search path"), addon_search_path, _file_selection_path))
 		config.set("ADDON", "AddonPath", addon_search_path);
@@ -3335,7 +3439,9 @@ void reshade::runtime::draw_gui_addons()
 					return (at_pos == 0 || addon_name.substr(0, at_pos) == info.name) && addon_name.substr(at_pos + 1) == info.file;
 				});
 
-			bool enabled = (disabled_it == disabled_addons.end());
+			const bool unavailable = !info.error.empty();
+			bool enabled = !unavailable && disabled_it == disabled_addons.end();
+			ImGui::BeginDisabled(unavailable);
 			if (ImGui::Checkbox(info.name.c_str(), &enabled))
 			{
 				if (enabled)
@@ -3345,10 +3451,11 @@ void reshade::runtime::draw_gui_addons()
 
 				config.set("ADDON", "DisabledAddons", disabled_addons);
 			}
+			ImGui::EndDisabled();
 
 			ImGui::PopStyleColor();
 
-			if (enabled == (info.handle == nullptr))
+			if (info.error.empty() && enabled == (info.handle == nullptr))
 			{
 				ImGui::SameLine();
 				ImGui::TextUnformatted(enabled ? _("(will be enabled on next application restart)") : _("(will be disabled on next application restart)"));
@@ -3371,6 +3478,8 @@ void reshade::runtime::draw_gui_addons()
 					ImGui::Text(_("Website:"));
 				if (!info.issues_url.empty())
 					ImGui::Text(_("Issues:"));
+				if (!info.error.empty())
+					ImGui::Text(_("Status:"));
 
 				ImGui::EndGroup();
 				ImGui::SameLine(ImGui::GetWindowWidth() * 0.25f);
@@ -3392,6 +3501,8 @@ void reshade::runtime::draw_gui_addons()
 					ImGui::TextLinkOpenURL(info.website_url.c_str());
 				if (!info.issues_url.empty())
 					ImGui::TextLinkOpenURL(info.issues_url.c_str());
+				if (!info.error.empty())
+					ImGui::TextColored(COLOR_RED, "%s", info.error.c_str());
 
 				ImGui::EndGroup();
 
@@ -4619,7 +4730,7 @@ void reshade::runtime::open_code_editor(editor_instance &instance) const
 	// Only update text if there is no undo history (in which case it can be assumed that the text is already up-to-date)
 	if (!instance.editor.is_modified() && !instance.editor.can_undo())
 	{
-		if (FILE *const file = _wfsopen(instance.file_path.c_str(), L"rb", SH_DENYWR))
+		if (FILE *const file = reshade::utils::open_file(instance.file_path, "rb", reshade::utils::file_share_mode::read_only))
 		{
 			fseek(file, 0, SEEK_END);
 			const size_t file_size = ftell(file);
@@ -4653,7 +4764,7 @@ void reshade::runtime::draw_code_editor(editor_instance &instance)
 			(_input != nullptr && _input->is_key_pressed('S', true, false, false))))
 	{
 		// Write current editor text to file
-		if (FILE *const file = _wfsopen(instance.file_path.c_str(), L"wb", SH_DENYWR))
+		if (FILE *const file = reshade::utils::open_file(instance.file_path, "wb", reshade::utils::file_share_mode::read_only))
 		{
 			const std::string text = instance.editor.get_text();
 			fwrite(text.data(), 1, text.size(), file);

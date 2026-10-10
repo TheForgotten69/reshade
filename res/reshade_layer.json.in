@@ -1,0 +1,17 @@
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_reshade",
+    "type": "GLOBAL",
+    "library_path": "@RESHADE_LAYER_LIBRARY_PATH@",
+    "api_version": "1.4.0",
+    "implementation_version": "1",
+    "description": "ReShade post-processing injector",
+    "enable_environment": {
+      "RESHADE_ENABLE": "1"
+    },
+    "disable_environment": {
+      "DISABLE_RESHADE": "1"
+    }
+  }
+}

@@ -128,8 +128,8 @@ static void on_unmap_texture(device *, resource resource, uint32_t subresource)
 	save_texture_image(s_current_mapping.desc, s_current_mapping.data);
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "Texture Dump";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that dumps all textures used by the application to image files on disk (\"" RESHADE_ADDON_TEXTURE_SAVE_DIR "\" directory).";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "Texture Dump";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that dumps all textures used by the application to image files on disk (\"" RESHADE_ADDON_TEXTURE_SAVE_DIR "\" directory).";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

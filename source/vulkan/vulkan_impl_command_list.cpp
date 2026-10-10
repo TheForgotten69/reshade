@@ -497,7 +497,10 @@ void reshade::vulkan::command_list_impl::bind_viewports(uint32_t first, uint32_t
 		viewport_data[i].height = -viewport_data[i].height;
 	}
 
-	vk.CmdSetViewport(_orig, first, count, viewport_data.p);
+	if (_viewports_with_count && first == 0)
+		vk.CmdSetViewportWithCount(_orig, count, viewport_data.p);
+	else
+		vk.CmdSetViewport(_orig, first, count, viewport_data.p);
 }
 void reshade::vulkan::command_list_impl::bind_scissor_rects(uint32_t first, uint32_t count, const api::rect *rects)
 {
