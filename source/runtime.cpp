@@ -1788,7 +1788,7 @@ bool reshade::runtime::load_effect(const std::filesystem::path &source_file, con
 #if defined(_WIN32)
 			codegen.reset(reshadefx::create_codegen_dxbc(shader_model, !_no_debug_info, _performance_mode, _performance_mode ? 3 : 1));
 #elif defined(__linux__)
-			assert(false); // Direct3D effect compilation is not available in the Vulkan-only Linux build.
+			assert(false);
 #endif
 		else if (_renderer_id < 0x20000)
 			codegen.reset(reshadefx::create_codegen_glsl(false, !_no_debug_info, _performance_mode, false, true));

@@ -8,7 +8,6 @@ namespace
 {
 	constexpr size_t max_name_length = 96;
 
-	// Wine guest paths use backslashes, which are not separators on Linux
 	std::string guest_filename(std::string path)
 	{
 		const size_t separator = path.find_last_of("/\\");
@@ -50,7 +49,6 @@ namespace
 		return path.filename().u8string();
 	}
 
-	// Keep UTF-8 characters, but replace ASCII punctuation
 	std::string sanitize(std::string name)
 	{
 		for (char &value : name)
@@ -78,7 +76,6 @@ namespace
 		return base + '-' + safe_suffix;
 	}
 
-	// Steam only passes the install directory to games run through a compatibility tool, so extract it from the executable path otherwise
 	std::filesystem::path steam_install_directory(const std::filesystem::path &executable_path)
 	{
 		const auto end = executable_path.end();
@@ -91,7 +88,6 @@ namespace
 			const auto common = std::next(it);
 			if (common == end || *common != "common")
 				continue;
-			// The game directory must contain the executable rather than be it
 			if (const auto game = std::next(common); game != end && std::next(game) != end)
 				return result / *common / *game;
 		}
@@ -104,7 +100,6 @@ namespace
 		return name == "wine" || name == "wine64" || name == "wine-preloader" || name == "wine64-preloader";
 	}
 
-	// Only match at the start of a word, so that e.g. "sweden" is not detected as Eden
 	bool contains_word_prefix(const std::string &value, std::string_view marker)
 	{
 		const std::string lower = to_lower(value);
@@ -144,7 +139,6 @@ namespace
 			if (!is_game_content_path(*it))
 				continue;
 			std::string name = without_extension(guest_filename(*it));
-			// PS3 games boot "PS3_GAME/USRDIR/EBOOT.BIN", so name them after the folder that contains the game
 			if (to_lower(name) == "eboot")
 			{
 				std::filesystem::path parent = std::filesystem::u8path(*it).parent_path();
@@ -189,7 +183,6 @@ reshade::process::game_identity reshade::process::resolve_game_identity(const ga
 		return result;
 	}
 
-	// The Wine loader lives in the Proton installation, which does not name the game
 	const std::filesystem::path steam_install_path = inputs.steam_install_path.empty() && !result.wine_host ?
 		steam_install_directory(inputs.executable_path) : inputs.steam_install_path;
 	if (!inputs.steam_app_id.empty() && !steam_install_path.empty())

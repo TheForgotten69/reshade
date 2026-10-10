@@ -40,6 +40,8 @@ namespace reshade::vulkan
 
 		mutable std::recursive_mutex _mutex;
 
+		VkSubmitInfo *_present_wait_info = nullptr;
+
 	protected:
 		device_impl *const _device;
 

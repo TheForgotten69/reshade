@@ -13,8 +13,6 @@ extern char **environ;
 
 namespace
 {
-	// Starts 'argv' (nullptr-terminated, resolved through $PATH) without waiting for it. 'hide_window'
-	// redirects its stdio to /dev/null. A detached thread reaps the child so it does not stay a zombie.
 	bool spawn_detached(const std::vector<const char *> &argv, const std::filesystem::path &working_directory, bool hide_window)
 	{
 		posix_spawn_file_actions_t file_actions;
@@ -49,7 +47,6 @@ namespace
 		}
 		catch (...)
 		{
-			// The child was started, it just stays a zombie until this process exits.
 		}
 		return true;
 	}
@@ -88,7 +85,6 @@ std::filesystem::path reshade::utils::find_system_font(const char *family)
 	return result;
 }
 
-// Opens the directory containing 'path'. Selecting the file itself would need the FileManager1 D-Bus interface.
 bool reshade::utils::open_explorer(const std::filesystem::path &path)
 {
 	std::error_code ec;
@@ -99,7 +95,6 @@ bool reshade::utils::open_explorer(const std::filesystem::path &path)
 	return false;
 }
 
-// 'command_line' is the user's own post-save command setting, so it runs through the shell like on Windows.
 bool reshade::utils::execute_command(const std::string &command_line, const std::filesystem::path &working_directory, bool hide_window)
 {
 	if (command_line.empty())
@@ -110,7 +105,6 @@ bool reshade::utils::execute_command(const std::string &command_line, const std:
 	return false;
 }
 
-// Linux has no system API like 'PlaySound', so use the player of whichever sound server is available.
 void reshade::utils::play_sound_async(const std::filesystem::path &path)
 {
 	for (const char *const player : { "pw-play", "paplay", "aplay" })

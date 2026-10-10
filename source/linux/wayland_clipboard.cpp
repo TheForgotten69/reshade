@@ -11,7 +11,6 @@
 namespace
 {
 	constexpr size_t max_text_size = 16 * 1024 * 1024;
-	// A peer that never reads its pipe would otherwise accumulate send threads indefinitely.
 	constexpr int max_sends_in_flight = 4;
 	constexpr auto receive_timeout = std::chrono::milliseconds(100);
 	constexpr const char *text_mime_types[] = { "text/plain;charset=utf-8", "text/plain", "UTF8_STRING" };
@@ -57,15 +56,12 @@ void reshade::wayland_clipboard::offer_info::add_mime_type(const char *type)
 		return;
 
 	has_text = true;
-	// Prefer explicit UTF-8 over the legacy text types.
 	if (mime_type.empty() || std::strcmp(type, text_mime_types[0]) == 0)
 		mime_type = type;
 }
 
 reshade::wayland_clipboard *reshade::wayland_clipboard::get(wl_display *display)
 {
-	// Never destroyed, see the class description. Freeing it at exit could also touch a connection
-	// the host already closed.
 	static std::mutex s_mutex;
 	static std::unordered_map<wl_display *, wayland_clipboard *> s_clipboards;
 
@@ -84,7 +80,6 @@ reshade::wayland_clipboard *reshade::wayland_clipboard::get(wl_display *display)
 
 reshade::wayland_clipboard::~wayland_clipboard()
 {
-	// Only reached when initialization failed, which is before the data device exists.
 	if (_seat != nullptr)
 		wl_seat_destroy(_seat);
 	if (_manager != nullptr)
@@ -155,7 +150,6 @@ std::string reshade::wayland_clipboard::text()
 {
 	const std::lock_guard<std::mutex> lock(_mutex);
 
-	// Our own source is served on the same queue, which cannot dispatch while waiting here.
 	if (_source != nullptr)
 		return _source_text;
 
@@ -197,7 +191,6 @@ void reshade::wayland_clipboard::on_data_offer(wl_data_offer *offer)
 
 void reshade::wayland_clipboard::on_drag_enter(wl_data_offer *offer)
 {
-	// Drag and drop is not supported.
 	if (offer != nullptr && offer != _selection)
 		forget_offer(offer);
 }
@@ -217,8 +210,6 @@ void reshade::wayland_clipboard::on_offer_mime_type(wl_data_offer *offer, const 
 
 void reshade::wayland_clipboard::on_send(int32_t fd)
 {
-	// The receiving client may read slowly or never, so write on a detached thread that only owns
-	// copies of what it needs and therefore may outlive this object.
 	const std::shared_ptr<std::atomic<int>> in_flight = _sends_in_flight;
 	if (in_flight->fetch_add(1, std::memory_order_relaxed) >= max_sends_in_flight)
 	{

@@ -759,7 +759,6 @@ bool reshade::vulkan::device_impl::import_host_buffer(const api::resource_desc &
 	import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
 	import_info.pHostPointer = host_pointer;
 
-	// A dedicated pool carries the import structure into the allocation, like the Win32 import path in create_resource, so that destroy_resource frees it the usual way
 	VmaAllocationCreateInfo alloc_info = {};
 	alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
 	alloc_info.memoryTypeBits = host_properties.memoryTypeBits;
@@ -785,7 +784,7 @@ bool reshade::vulkan::device_impl::import_host_buffer(const api::resource_desc &
 	data.memory = allocation_info.deviceMemory;
 	data.memory_offset = allocation_info.offset;
 	data.create_info = create_info;
-	data.create_info.pNext = nullptr; // Clear out structure chain pointer, since it becomes invalid once leaving the current scope
+	data.create_info.pNext = nullptr;
 
 	register_object<VK_OBJECT_TYPE_BUFFER>(object, std::move(data));
 

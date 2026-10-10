@@ -140,12 +140,9 @@ namespace reshade
 		void release_primary_handler();
 #if defined(__linux__)
 		enum class wsi_kind { wayland, xcb, xlib };
-		// Called by the Vulkan WSI hooks, so 'register_window' knows which backend a window needs.
-		// A window stays registered while any of its Vulkan surfaces exists.
 		static void register_surface(window_handle window, wsi_kind kind, void *display, uintptr_t vulkan_surface, unsigned int width, unsigned int height);
 		static void unregister_surface(window_handle window, uintptr_t vulkan_surface);
 
-		// ImGui clipboard callbacks, 'user_data' is the 'reshade::input' instance.
 		static const char *get_clipboard_text(void *user_data);
 		static void set_clipboard_text(void *user_data, const char *text);
 #endif
@@ -200,13 +197,9 @@ namespace reshade
 		bool is_blocking_mouse_cursor_warping() const { return _block_cursor_warping; }
 #if defined(__linux__)
 		bool is_mouse_position_valid() const;
-		// Whether the overlay has to draw a cursor, because the application's one is hidden where the pointer is.
 		bool needs_overlay_cursor() const;
-		// Cursor the compositor shows over the pointer capture areas, as 'ImGuiMouseCursor' (-1 for none).
 		void set_overlay_cursor(int cursor);
 
-		// Linux cannot filter the application's events like 'block_mouse_input' does on Windows. Instead the
-		// backend covers these areas (relative to the window size) with a layer that takes pointer input.
 		struct capture_rect { float x, y, width, height; };
 		void set_pointer_capture(std::vector<capture_rect> regions) { _pointer_capture = std::move(regions); }
 		struct key_transition { unsigned int key; bool down; };
@@ -262,8 +255,6 @@ namespace reshade
 		uint64_t _frame_count = 0; // Keep track of frame count to identify windows with a lot of rendering
 		std::wstring _text_input;
 	#if defined(__linux__)
-		// Backends deliver events asynchronously to rendering, so a key can go down and up within
-		// one frame. These '_keys' bits latch such edges until 'next_frame'.
 		static constexpr uint8_t key_pressed_in_frame = 0x10;
 		static constexpr uint8_t key_released_in_frame = 0x20;
 

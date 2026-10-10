@@ -38,9 +38,7 @@ namespace reshade::vulkan
 		bool _retired = false;
 		bool _runtime_destroyed = false;
 
-		// When an add-on requests a presentation format different from the format
-		// exposed to the application, the application renders into these ordinary
-		// images while '_orig' remains the WSI swap chain used by ReShade.
+		std::vector<VkImage> _images;
 		std::vector<api::resource> _proxy_images;
 		std::vector<api::resource> _proxy_srgb_images;
 		std::vector<bool> _proxy_srgb_images_initialized;

@@ -1,5 +1,3 @@
-// Linux implementation of 'reshade::input': picks the Wayland or X11 backend from the WSI kind the
-// window was presented with, and forwards to it.
 #include "input.hpp"
 #include "dll_log.hpp"
 #include "key_translation.hpp"
@@ -25,7 +23,6 @@ bool reshade::input::is_keyboard_layout_german()
 
 std::shared_ptr<reshade::input> reshade::input::register_window(window_handle window)
 {
-	// Must be called with 's_windows_mutex' held.
 	const auto existing_input = [](const registered_window &registered) {
 		if (registered.input_instance != nullptr)
 			registered.input_instance->_backend->set_extent(registered.width, registered.height);
@@ -43,7 +40,6 @@ std::shared_ptr<reshade::input> reshade::input::register_window(window_handle wi
 		info = it->second;
 	}
 
-	// Initialization may block on round trips, so it runs without holding the registry lock.
 	auto result = std::make_shared<input>(window);
 	std::unique_ptr<input_backend> backend = create_backend(*result, window, info);
 	backend->set_extent(info.width, info.height);
@@ -58,7 +54,6 @@ std::shared_ptr<reshade::input> reshade::input::register_window(window_handle wi
 	const auto it = s_windows.find(window);
 	if (it == s_windows.end() || it->second.kind != info.kind || it->second.display != info.display)
 		return nullptr;
-	// Another runtime may have registered the same window meanwhile.
 	if (std::shared_ptr<input> existing = existing_input(it->second))
 		return existing;
 
@@ -93,7 +88,6 @@ void reshade::input::unregister_surface(window_handle window, uintptr_t vulkan_s
 
 const char *reshade::input::get_clipboard_text(void *user_data)
 {
-	// ImGui reads the returned string before calling again, from the single GUI thread.
 	static std::string buffer;
 	const auto *const self = static_cast<input *>(user_data);
 	buffer = self != nullptr && self->_backend != nullptr ? self->_backend->clipboard_text() : std::string();

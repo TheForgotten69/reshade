@@ -24,14 +24,12 @@ namespace
 	std::filesystem::path s_config_path;
 	std::filesystem::path s_log_path;
 
-	// Leave preset path unset, so that it defaults to a preset next to the configuration like on Windows
 	bool write_default_config(const std::filesystem::path &config_path, const std::filesystem::path &data_root)
 	{
 		const std::filesystem::path cache_root = reshade::utils::xdg_path("XDG_CACHE_HOME", ".cache");
 		if (cache_root.empty())
 			return false;
 
-		// Runtime falls back to a temporary directory if the cache path does not exist
 		std::error_code ec;
 		std::filesystem::create_directories(cache_root / "reshade", ec);
 
@@ -43,7 +41,6 @@ namespace
 		return config.save();
 	}
 
-	// Proton helper processes start alongside the game and share its configuration, so write to a temporary file first and publish that atomically
 	bool create_config(const std::filesystem::path &config_path, const std::filesystem::path &data_root)
 	{
 		std::error_code ec;
@@ -67,7 +64,6 @@ namespace
 
 	std::filesystem::path executable_path(std::error_code &ec)
 	{
-		// AppImage mounts are ephemeral, so use the original image path as the stable identity.
 		if (const char *const appimage = std::getenv("APPIMAGE"); appimage != nullptr && appimage[0] != '\0')
 		{
 			std::filesystem::path result = canonical_path(std::filesystem::u8path(appimage), ec);
@@ -133,7 +129,6 @@ bool reshade::process::initialize(const char *vulkan_application_name)
 			environment("RESHADE_PROFILE") });
 		s_application_id = identity.directory_name;
 
-		// Prefer a configuration next to the executable like on Windows (except for Wine, where the executable is the Wine loader)
 		const std::filesystem::path adjacent_config = g_target_executable_path.parent_path() / "ReShade.ini";
 		if (!identity.wine_host && reshade::utils::normalize_file_name_case(adjacent_config))
 		{

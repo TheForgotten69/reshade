@@ -153,7 +153,6 @@ void reshade::log::message(level level, const char *format, ...)
 
 	line_string += '\n'; // Terminate line with line feed
 
-	// Replace all LF with CRLF on Windows
 #ifdef _WIN32
 	for (size_t offset = 0; (offset = line_string.find('\n', offset)) != std::string::npos; offset += 2)
 		line_string.replace(offset, 1, "\r\n", 2);

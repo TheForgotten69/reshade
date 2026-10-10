@@ -68,7 +68,6 @@ static void save_shader_code(device_api device_type, const shader_desc &desc)
 	}
 	catch (...)
 	{
-		// An add-on must never terminate the host when its optional dump path is unavailable.
 	}
 	#endif
 }

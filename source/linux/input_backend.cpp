@@ -5,7 +5,6 @@
 
 auto reshade::input_backend::to_pixel_rects(const std::vector<input::capture_rect> &regions, unsigned int width, unsigned int height) -> std::vector<pixel_rect>
 {
-	// Round the edges rather than the size, so adjacent regions stay adjacent.
 	const auto edge = [](float position, unsigned int extent) {
 		return static_cast<int32_t>(std::lround(std::clamp(static_cast<double>(position), 0.0, 1.0) * extent));
 	};

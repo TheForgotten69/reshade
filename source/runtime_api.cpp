@@ -667,6 +667,35 @@ void reshade::runtime::get_texture_binding(api::effect_texture_variable handle, 
 		*out_srv_srgb = { 0 };
 }
 
+bool reshade::runtime::is_texture_semantic_in_use(const char *semantic) const
+{
+	for (const technique &tech : _techniques)
+	{
+		if (!tech.enabled || tech.effect_index >= _effects.size())
+			continue;
+		const effect &effect_data = _effects[tech.effect_index];
+		if (!effect_data.compiled)
+			continue;
+		for (size_t permutation_index = 0; permutation_index < tech.permutations.size() && permutation_index < effect_data.permutations.size(); ++permutation_index)
+		{
+			const reshadefx::effect_module &module = effect_data.permutations[permutation_index].module;
+			for (const technique::pass &pass : tech.permutations[permutation_index].passes)
+			{
+				for (const reshadefx::texture_binding &binding : pass.texture_bindings)
+				{
+					if (binding.index >= module.samplers.size())
+						continue;
+					const std::string &texture_name = module.samplers[binding.index].texture_name;
+					for (const reshadefx::texture &texture : module.textures)
+						if ((texture.unique_name == texture_name || texture.name == texture_name) && texture.semantic == semantic)
+							return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 void reshade::runtime::update_texture_bindings(const char *semantic, api::resource_view srv, api::resource_view srv_srgb)
 {
 	if (srv_srgb == 0)
