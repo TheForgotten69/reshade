@@ -33,8 +33,8 @@ static void draw_settings(reshade::api::effect_runtime *)
 	ImGui::SetItemTooltip("Set to zero to disable the FPS limit.");
 }
 
-extern "C" __declspec(dllexport) const char *NAME = "FPS Limiter";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Example add-on that limits the frame rate of an application to a specified FPS value.";
+extern "C" RESHADE_ADDON_EXPORT const char *NAME = "FPS Limiter";
+extern "C" RESHADE_ADDON_EXPORT const char *DESCRIPTION = "Example add-on that limits the frame rate of an application to a specified FPS value.";
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID)
 {

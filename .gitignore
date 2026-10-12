@@ -3,6 +3,7 @@
 [Oo]bj/
 [Ii]ntermediate/
 [Bb]uild/
+[Bb]uild-linux*/
 [Dd]ebug/
 [Rr]elease/
 *.obj

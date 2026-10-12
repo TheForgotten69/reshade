@@ -114,6 +114,7 @@ void ReShadeSetConfigArray(void *, reshade::api::effect_runtime *runtime, const 
 	}
 }
 
+#if defined(_WIN32)
 #include "d3d9/d3d9_impl_device.hpp"
 #include "d3d9/d3d9_impl_swapchain.hpp"
 #include "d3d10/d3d10_impl_device.hpp"
@@ -271,5 +272,6 @@ void ReShadeUpdateAndPresentEffectRuntime(reshade::api::effect_runtime *runtime)
 
 	runtime->get_command_queue()->flush_immediate_command_list();
 }
+#endif
 
 #endif

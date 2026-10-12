@@ -9,15 +9,23 @@
 
 #define vk _device->_dispatch_table
 
-reshade::vulkan::swapchain_impl::swapchain_impl(device_impl *device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR &create_info, HWND hwnd) :
+reshade::vulkan::swapchain_impl::swapchain_impl(device_impl *device, VkSwapchainKHR swapchain, const VkSwapchainCreateInfoKHR &create_info, void *native_window) :
 	api_object_impl(swapchain),
 	_device(device),
 	_create_info(create_info),
-	_hwnd(hwnd)
+	_hwnd(native_window)
 {
 	_create_info.pNext = nullptr;
 
 	assert(create_info.imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+
+	uint32_t num_images = 0;
+	if (vk.GetSwapchainImagesKHR(_device->_orig, _orig, &num_images, nullptr) == VK_SUCCESS && num_images != 0)
+	{
+		_images.resize(num_images);
+		if (vk.GetSwapchainImagesKHR(_device->_orig, _orig, &num_images, _images.data()) < VK_SUCCESS)
+			_images.clear();
+	}
 }
 
 reshade::api::device *reshade::vulkan::swapchain_impl::get_device()
@@ -32,15 +40,12 @@ void *reshade::vulkan::swapchain_impl::get_hwnd() const
 
 reshade::api::resource reshade::vulkan::swapchain_impl::get_back_buffer(uint32_t index)
 {
-	uint32_t num_images = index + 1;
-	temp_mem<VkImage, 3> swapchain_images(num_images);
-	return vk.GetSwapchainImagesKHR(_device->_orig, _orig, &num_images, swapchain_images.p) >= VK_SUCCESS ? api::resource { (uint64_t)swapchain_images[index] } : api::resource {};
+	return index < _images.size() ? api::resource { (uint64_t)_images[index] } : api::resource {};
 }
 
 uint32_t reshade::vulkan::swapchain_impl::get_back_buffer_count() const
 {
-	uint32_t num_images = 0;
-	return vk.GetSwapchainImagesKHR(_device->_orig, _orig, &num_images, nullptr) == VK_SUCCESS ? num_images : 0;
+	return static_cast<uint32_t>(_images.size());
 }
 
 uint32_t reshade::vulkan::swapchain_impl::get_current_back_buffer_index() const

@@ -14,14 +14,183 @@
 #endif
 #include "addon_manager.hpp"
 #include "lockfree_linear_map.hpp"
+#include "process_environment.hpp"
 #include <cstring> // std::strcmp, std::strncmp
 #include <algorithm> // std::find_if, std::min
+#include <mutex>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
 
 // Set during Vulkan device creation and presentation, to avoid hooking internal D3D devices created e.g. by NVIDIA Ansel, Optimus or layered DXGI swap chain
 extern thread_local bool g_in_dxgi_runtime;
 
 extern lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
 lockfree_linear_map<void *, reshade::vulkan::device_impl *, 8> g_vulkan_devices;
+
+#if defined(__linux__)
+#include "reshade_vulkan_interop.h"
+
+namespace
+{
+	constexpr VkQueueFlags queue_video_decode_bit = 0x20, queue_video_encode_bit = 0x40, queue_optical_flow_bit = 0x100;
+	constexpr const char optical_flow_extension_name[] = "VK_NV_optical_flow";
+	constexpr VkStructureType structure_type_optical_flow_features = static_cast<VkStructureType>(1000464000);
+	struct optical_flow_features
+	{
+		VkStructureType sType;
+		void *pNext;
+		VkBool32 opticalFlow;
+	};
+
+	struct device_interop
+	{
+		VkInstance instance;
+		VkPhysicalDevice physical_device;
+		PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+		PFN_vkGetDeviceProcAddr get_device_proc_addr;
+		uint32_t api_version;
+		std::vector<std::string> extension_names;
+		std::vector<const char *> extensions;
+		bool buffer_device_address;
+		std::vector<ReShadeVulkanQueue> queues;
+		std::vector<uint32_t> queue_families;
+	};
+
+	std::mutex s_interop_mutex;
+	std::vector<std::string> s_requested_device_extensions;
+	std::vector<std::string> s_hidden_device_extensions;
+	std::vector<uint32_t> s_requested_queues;
+	std::unordered_map<VkDevice, device_interop> s_device_interop;
+
+	std::vector<std::string> requested_device_extensions()
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		return s_requested_device_extensions;
+	}
+	std::vector<uint32_t> requested_queues()
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		return s_requested_queues;
+	}
+
+	bool choose_queue_family(const std::vector<VkQueueFamilyProperties> &families, VkQueueFlags required, std::vector<uint32_t> &used, const std::vector<bool> &special, uint32_t &out_family, uint32_t &out_index)
+	{
+		uint32_t best = std::numeric_limits<uint32_t>::max(), best_score = std::numeric_limits<uint32_t>::max();
+		for (uint32_t family = 0; family < families.size(); ++family)
+		{
+			const VkQueueFlags flags = families[family].queueFlags;
+			if ((flags & required) != required || special[family] || used[family] >= families[family].queueCount)
+				continue;
+			const VkQueueFlags extra = flags & ~required & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | queue_video_decode_bit | queue_video_encode_bit | queue_optical_flow_bit);
+			const uint32_t score = static_cast<uint32_t>(__builtin_popcount(extra)) + ((extra & VK_QUEUE_GRAPHICS_BIT) != 0 ? 8u : 0u);
+			if (score < best_score)
+				best = family, best_score = score;
+		}
+		if (best == std::numeric_limits<uint32_t>::max())
+			return false;
+		out_family = best;
+		out_index = used[best]++;
+		return true;
+	}
+}
+
+extern "C" __attribute__((visibility("default"))) void ReShadeVulkanRequestDeviceExtension(const char *name)
+{
+	if (name == nullptr)
+		return;
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	if (std::find(s_requested_device_extensions.begin(), s_requested_device_extensions.end(), name) == s_requested_device_extensions.end())
+		s_requested_device_extensions.emplace_back(name);
+}
+
+extern "C" __attribute__((visibility("default"))) void ReShadeVulkanHideDeviceExtension(const char *name)
+{
+	if (name == nullptr)
+		return;
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	if (std::find(s_hidden_device_extensions.begin(), s_hidden_device_extensions.end(), name) == s_hidden_device_extensions.end())
+		s_hidden_device_extensions.emplace_back(name);
+}
+
+VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice, const char *pLayerName, uint32_t *pPropertyCount, VkExtensionProperties *pProperties)
+{
+	if (pLayerName != nullptr && 0 == std::strcmp(pLayerName, "VK_LAYER_reshade"))
+	{
+		*pPropertyCount = 0;
+		return VK_SUCCESS;
+	}
+
+	RESHADE_VULKAN_GET_INSTANCE_DISPATCH_PTR(EnumerateDeviceExtensionProperties, physicalDevice);
+
+	std::vector<std::string> hidden;
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		hidden = s_hidden_device_extensions;
+	}
+	if (hidden.empty() || pLayerName != nullptr)
+		return trampoline(physicalDevice, pLayerName, pPropertyCount, pProperties);
+
+	uint32_t count = 0;
+	VkResult result = trampoline(physicalDevice, nullptr, &count, nullptr);
+	if (result != VK_SUCCESS)
+		return result;
+	std::vector<VkExtensionProperties> all(count);
+	result = trampoline(physicalDevice, nullptr, &count, all.data());
+	if (result != VK_SUCCESS && result != VK_INCOMPLETE)
+		return result;
+	all.resize(count);
+	all.erase(std::remove_if(all.begin(), all.end(), [&](const VkExtensionProperties &extension) {
+		return std::find(hidden.begin(), hidden.end(), extension.extensionName) != hidden.end(); }), all.end());
+
+	if (pProperties == nullptr)
+	{
+		*pPropertyCount = static_cast<uint32_t>(all.size());
+		return VK_SUCCESS;
+	}
+	const uint32_t copied = std::min(*pPropertyCount, static_cast<uint32_t>(all.size()));
+	std::copy_n(all.begin(), copied, pProperties);
+	*pPropertyCount = copied;
+	return copied < all.size() ? VK_INCOMPLETE : VK_SUCCESS;
+}
+
+extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanRequestQueue(uint32_t queue_flags)
+{
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	const auto it = std::find(s_requested_queues.begin(), s_requested_queues.end(), queue_flags);
+	if (it != s_requested_queues.end())
+		return static_cast<uint32_t>(it - s_requested_queues.begin());
+	s_requested_queues.push_back(queue_flags);
+	return static_cast<uint32_t>(s_requested_queues.size() - 1);
+}
+
+extern "C" __attribute__((visibility("default"))) uint32_t ReShadeVulkanGetDeviceInterop(void *device, ReShadeVulkanDeviceInterop *out)
+{
+	if (out == nullptr || out->size < offsetof(ReShadeVulkanDeviceInterop, queue_count))
+		return 0;
+	const std::lock_guard<std::mutex> lock(s_interop_mutex);
+	const auto it = s_device_interop.find(static_cast<VkDevice>(device));
+	if (it == s_device_interop.end())
+		return 0;
+	const device_interop &interop = it->second;
+	out->instance = interop.instance;
+	out->physical_device = interop.physical_device;
+	out->get_instance_proc_addr = reinterpret_cast<void *(*)(void *, const char *)>(interop.get_instance_proc_addr);
+	out->get_device_proc_addr = reinterpret_cast<void *(*)(void *, const char *)>(interop.get_device_proc_addr);
+	out->api_version = interop.api_version;
+	out->enabled_extension_count = static_cast<uint32_t>(interop.extensions.size());
+	out->enabled_extensions = interop.extensions.data();
+	out->buffer_device_address = interop.buffer_device_address ? 1 : 0;
+	if (out->size >= sizeof(ReShadeVulkanDeviceInterop))
+	{
+		out->queue_count = static_cast<uint32_t>(interop.queues.size());
+		out->queues = interop.queues.data();
+		out->queue_family_count = static_cast<uint32_t>(interop.queue_families.size());
+		out->queue_family_indices = interop.queue_families.data();
+	}
+	return 1;
+}
+#endif
 
 #if RESHADE_ADDON
 void create_default_view(reshade::vulkan::device_impl *device_impl, VkImage image)
@@ -140,6 +309,11 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 
 	std::vector<const char *> enabled_extensions;
 	enabled_extensions.reserve(pCreateInfo->enabledExtensionCount);
+	bool force_buffer_device_address = false;
+	bool force_optical_flow = false;
+#if defined(__linux__)
+	const std::vector<std::string> requested_extensions = requested_device_extensions();
+#endif
 	for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i)
 		enabled_extensions.push_back(pCreateInfo->ppEnabledExtensionNames[i]);
 
@@ -281,6 +455,11 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 			add_extension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, false);
 #endif
 
+#if VK_EXT_external_memory_host
+		if (instance.api_version >= VK_API_VERSION_1_1)
+			add_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, false);
+#endif
+
 #if VK_KHR_external_memory_win32
 		add_extension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, false);
 #endif
@@ -301,12 +480,56 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		else
 		{
 			// No Man's Sky initializes OpenVR before loading Vulkan (and therefore before loading ReShade), so need to manually install OpenVR hooks now when used
+#if defined(_WIN32)
 			extern void check_and_init_openvr_hooks();
 			check_and_init_openvr_hooks();
+#endif
 
 #if VK_KHR_swapchain_mutable_format
 			add_extension(VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME, true);
 			add_extension(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, true);
+#endif
+
+#if defined(__linux__)
+			for (const std::string &name : requested_extensions)
+			{
+				if (name == VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)
+				{
+					VkPhysicalDeviceBufferDeviceAddressFeatures supported_bda { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+					VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported_bda };
+					const auto get_features2 = instance.dispatch_table.GetPhysicalDeviceFeatures2 != nullptr ? instance.dispatch_table.GetPhysicalDeviceFeatures2 : instance.dispatch_table.GetPhysicalDeviceFeatures2KHR;
+					if (get_features2 != nullptr)
+						get_features2(physicalDevice, &supported);
+					if (!supported_bda.bufferDeviceAddress)
+					{
+						reshade::log::message(reshade::log::level::warning, "Add-on requested buffer device address, which this device does not support.");
+						continue;
+					}
+					if (instance.api_version < VK_API_VERSION_1_2 && !add_extension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, false))
+						continue;
+					force_buffer_device_address = true;
+					continue;
+				}
+				if (std::find_if(enabled_extensions.cbegin(), enabled_extensions.cend(),
+						[&name](const char *enabled) { return name == enabled; }) != enabled_extensions.cend())
+					continue;
+				if (name == optical_flow_extension_name)
+				{
+					optical_flow_features supported_flow { structure_type_optical_flow_features };
+					VkPhysicalDeviceFeatures2 supported { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supported_flow };
+					const auto get_features2 = instance.dispatch_table.GetPhysicalDeviceFeatures2 != nullptr ? instance.dispatch_table.GetPhysicalDeviceFeatures2 : instance.dispatch_table.GetPhysicalDeviceFeatures2KHR;
+					if (get_features2 != nullptr)
+						get_features2(physicalDevice, &supported);
+					if (!supported_flow.opticalFlow)
+						continue;
+					force_optical_flow = add_extension(name.c_str(), false);
+					if (force_optical_flow)
+						reshade::log::message(reshade::log::level::info, "Enabled device extension \"%s\" requested by an add-on.", name.c_str());
+					continue;
+				}
+				if (add_extension(name.c_str(), false))
+					reshade::log::message(reshade::log::level::info, "Enabled device extension \"%s\" requested by an add-on.", name.c_str());
+			}
 #endif
 		}
 	}
@@ -314,6 +537,61 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 	VkDeviceCreateInfo create_info = *pCreateInfo;
 	create_info.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
 	create_info.ppEnabledExtensionNames = enabled_extensions.data();
+
+#if defined(__linux__)
+	std::vector<VkDeviceQueueCreateInfo> queue_create_infos(pCreateInfo->pQueueCreateInfos, pCreateInfo->pQueueCreateInfos + pCreateInfo->queueCreateInfoCount);
+	std::vector<std::vector<float>> queue_priorities;
+	std::vector<ReShadeVulkanQueue> added_queues;
+	std::vector<uint32_t> added_queue_indices;
+	if (graphics_queue_family_index != std::numeric_limits<uint32_t>::max())
+	{
+		std::vector<uint32_t> used(queue_families.size(), 0);
+		std::vector<bool> special(queue_families.size(), false);
+		for (const VkDeviceQueueCreateInfo &info : queue_create_infos)
+			used[info.queueFamilyIndex] += info.queueCount, special[info.queueFamilyIndex] = special[info.queueFamilyIndex] || info.flags != 0;
+		std::vector<uint32_t> added_per_family(queue_families.size(), 0);
+		for (const uint32_t flags : requested_queues())
+		{
+			uint32_t family = 0, index = 0;
+			if (!choose_queue_family(queue_families, flags, used, special, family, index))
+			{
+				reshade::log::message(reshade::log::level::warning, "No queue family has room for a queue (flags 0x%x) requested by an add-on.", flags);
+				added_queues.push_back({ nullptr, std::numeric_limits<uint32_t>::max() });
+				added_queue_indices.push_back(0);
+				continue;
+			}
+			added_queues.push_back({ nullptr, family });
+			added_queue_indices.push_back(index);
+			added_per_family[family] += 1;
+			reshade::log::message(reshade::log::level::info, "Adding a queue (flags 0x%x, family %u, index %u) requested by an add-on.", flags, family, index);
+		}
+		for (uint32_t family = 0; family < added_per_family.size(); ++family)
+		{
+			if (added_per_family[family] == 0)
+				continue;
+			const auto existing = std::find_if(queue_create_infos.begin(), queue_create_infos.end(),
+				[family](const VkDeviceQueueCreateInfo &info) { return info.queueFamilyIndex == family; });
+			if (existing != queue_create_infos.end())
+			{
+				queue_priorities.emplace_back(existing->pQueuePriorities, existing->pQueuePriorities + existing->queueCount);
+				queue_priorities.back().resize(existing->queueCount + added_per_family[family], 1.0f);
+				existing->queueCount += added_per_family[family];
+				existing->pQueuePriorities = queue_priorities.back().data();
+			}
+			else
+			{
+				queue_priorities.emplace_back(added_per_family[family], 1.0f);
+				VkDeviceQueueCreateInfo info { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+				info.queueFamilyIndex = family;
+				info.queueCount = added_per_family[family];
+				info.pQueuePriorities = queue_priorities.back().data();
+				queue_create_infos.push_back(info);
+			}
+		}
+		create_info.queueCreateInfoCount = static_cast<uint32_t>(queue_create_infos.size());
+		create_info.pQueueCreateInfos = queue_create_infos.data();
+	}
+#endif
 
 	VkDevicePrivateDataCreateInfo private_data_info { VK_STRUCTURE_TYPE_DEVICE_PRIVATE_DATA_CREATE_INFO };
 	private_data_info.privateDataSlotRequestCount = 1;
@@ -335,6 +613,8 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		// Force enable timeline semaphore support (used for effect runtime present/graphics queue synchronization in case of present from compute, e.g. in Indiana Jones and the Great Circle and DOOM Eternal)
 		ext.timeline_semaphore = const_cast<VkPhysicalDeviceVulkan12Features *>(existing_vulkan_12_features)->timelineSemaphore = VK_TRUE;
 		ext.descriptor_indexing = existing_vulkan_12_features->descriptorIndexing;
+		if (force_buffer_device_address)
+			const_cast<VkPhysicalDeviceVulkan12Features *>(existing_vulkan_12_features)->bufferDeviceAddress = VK_TRUE;
 		ext.buffer_device_address = existing_vulkan_12_features->bufferDeviceAddress;
 	}
 	else
@@ -355,19 +635,23 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		{
 			ext.timeline_semaphore = const_cast<VkPhysicalDeviceTimelineSemaphoreFeatures *>(existing_timeline_semaphore_features)->timelineSemaphore = VK_TRUE;
 		}
-		else if (ext.timeline_semaphore)
+		else if (ext.timeline_semaphore || instance.api_version >= VK_API_VERSION_1_2)
 		{
 			append_to_structure_chain(&create_info, &ext.timeline_semaphore_features);
 			ext.timeline_semaphore_features.timelineSemaphore = VK_TRUE;
+			ext.timeline_semaphore = 1;
 		}
 
 		if (const auto existing_buffer_device_address_features = find_in_structure_chain<VkPhysicalDeviceBufferDeviceAddressFeatures>(
 				pCreateInfo->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES))
 		{
+			if (force_buffer_device_address)
+				const_cast<VkPhysicalDeviceBufferDeviceAddressFeatures *>(existing_buffer_device_address_features)->bufferDeviceAddress = VK_TRUE;
 			ext.buffer_device_address = existing_buffer_device_address_features->bufferDeviceAddress;
 		}
-		else if (ext.buffer_device_address)
+		else if (ext.buffer_device_address || force_buffer_device_address)
 		{
+			ext.buffer_device_address = 1;
 			append_to_structure_chain(&create_info, &ext.buffer_device_address_features);
 			ext.buffer_device_address_features.bufferDeviceAddress = VK_TRUE;
 		}
@@ -448,6 +732,22 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 			ext.host_image_copy_features.hostImageCopy = VK_TRUE;
 		}
 	}
+
+#if defined(__linux__)
+	optical_flow_features flow_features { structure_type_optical_flow_features };
+	if (force_optical_flow)
+	{
+		if (const auto existing_flow_features = find_in_structure_chain<optical_flow_features>(pCreateInfo->pNext, structure_type_optical_flow_features))
+		{
+			const_cast<optical_flow_features *>(existing_flow_features)->opticalFlow = VK_TRUE;
+		}
+		else
+		{
+			append_to_structure_chain(&create_info, &flow_features);
+			flow_features.opticalFlow = VK_TRUE;
+		}
+	}
+#endif
 
 	// Enable Vulkan memory model device scope if it is not, since it is required by atomics in generated SPIR-V code for effects
 	if (const auto existing_memory_model_features = find_in_structure_chain<VkPhysicalDeviceVulkanMemoryModelFeatures>(
@@ -532,7 +832,7 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 				0 == std::strcmp(name_without_prefix, "SubmitDebugUtilsMessageEXT") ||
 				0 == std::strcmp(name_without_prefix, "CreateDebugUtilsMessengerEXT") ||
 				0 == std::strcmp(name_without_prefix, "DestroyDebugUtilsMessengerEXT") ||
-				(std::strstr(name_without_prefix, "Properties") != nullptr && std::strstr(name_without_prefix, "AccelerationStructures") == nullptr && std::strstr(name_without_prefix, "Handle") == nullptr) ||
+				(std::strstr(name_without_prefix, "Properties") != nullptr && std::strstr(name_without_prefix, "AccelerationStructures") == nullptr && std::strstr(name_without_prefix, "Handle") == nullptr && std::strstr(name_without_prefix, "HostPointer") == nullptr) ||
 				(std::strstr(name_without_prefix, "Surface") != nullptr && std::strstr(name_without_prefix, "DeviceGroupSurface") == nullptr) ||
 				(std::strstr(name_without_prefix, "PhysicalDevice") != nullptr))
 				return reinterpret_cast<GLADapiproc>(device.dispatch_table.GetInstanceProcAddr(device.instance_handle, name));
@@ -663,8 +963,38 @@ VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, const VkDevi
 		device.dispatch_table.CopyMemoryToImage = device.dispatch_table.CopyMemoryToImageEXT;
 		device.dispatch_table.TransitionImageLayout = device.dispatch_table.TransitionImageLayoutEXT;
 #endif
+		device.dispatch_table.CmdBindDescriptorSets2 = reinterpret_cast<PFN_vkCmdBindDescriptorSets2>(get_device_proc_addr(*pDevice, "vkCmdBindDescriptorSets2KHR"));
+		device.dispatch_table.CmdPushDescriptorSet2 = reinterpret_cast<PFN_vkCmdPushDescriptorSet2>(get_device_proc_addr(*pDevice, "vkCmdPushDescriptorSet2KHR"));
+		if (device.dispatch_table.MapMemory2 == nullptr)
+			device.dispatch_table.MapMemory2 = reinterpret_cast<PFN_vkMapMemory2>(get_device_proc_addr(*pDevice, "vkMapMemory2KHR"));
+		if (device.dispatch_table.UnmapMemory2 == nullptr)
+			device.dispatch_table.UnmapMemory2 = reinterpret_cast<PFN_vkUnmapMemory2>(get_device_proc_addr(*pDevice, "vkUnmapMemory2KHR"));
 	}
 	#pragma endregion
+
+#if defined(__linux__)
+	{
+		for (size_t i = 0; i < added_queues.size(); ++i)
+		{
+			if (added_queues[i].family_index == std::numeric_limits<uint32_t>::max())
+				continue;
+			VkQueue queue = VK_NULL_HANDLE;
+			device.dispatch_table.GetDeviceQueue(device.handle, added_queues[i].family_index, added_queue_indices[i], &queue);
+			if (queue != VK_NULL_HANDLE)
+				*reinterpret_cast<void **>(queue) = *reinterpret_cast<void **>(device.handle);
+			added_queues[i].queue = queue;
+		}
+		device_interop interop { instance.handle, physicalDevice, get_instance_proc_addr, get_device_proc_addr, instance.api_version, {}, {}, ext.buffer_device_address != 0, added_queues, {} };
+		for (uint32_t i = 0; i < create_info.queueCreateInfoCount; ++i)
+			if (std::find(interop.queue_families.begin(), interop.queue_families.end(), create_info.pQueueCreateInfos[i].queueFamilyIndex) == interop.queue_families.end())
+				interop.queue_families.push_back(create_info.pQueueCreateInfos[i].queueFamilyIndex);
+		interop.extension_names.assign(enabled_extensions.begin(), enabled_extensions.end());
+		for (const std::string &name : interop.extension_names)
+			interop.extensions.push_back(name.c_str());
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		s_device_interop[device.handle] = std::move(interop);
+	}
+#endif
 
 	// Initialize per-device data
 	const auto device_impl = new reshade::vulkan::device_impl(
@@ -769,6 +1099,13 @@ void     VKAPI_CALL vkDestroyDevice(VkDevice device, const VkAllocationCallbacks
 	// Finally destroy the device
 	delete device_impl;
 
+#if defined(__linux__)
+	{
+		const std::lock_guard<std::mutex> lock(s_interop_mutex);
+		s_device_interop.erase(device);
+	}
+#endif
+
 	trampoline(device, pAllocator);
 }
 
@@ -833,6 +1170,84 @@ VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue, uint32_t submitCount, const Vk
 
 	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(QueueSubmit2, device_impl);
 	return trampoline(queue, submitCount, pSubmits, fence);
+}
+
+static std::shared_mutex s_mapped_memory_mutex;
+static std::unordered_map<VkDeviceMemory, void *> s_mapped_memory;
+
+VkResult VKAPI_CALL vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void **ppData)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(MapMemory, device_impl);
+
+	const VkResult result = trampoline(device, memory, offset, size, flags, ppData);
+	if (result == VK_SUCCESS && ppData != nullptr)
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory[memory] = static_cast<uint8_t *>(*ppData) - offset;
+	}
+	return result;
+}
+void     VKAPI_CALL vkUnmapMemory(VkDevice device, VkDeviceMemory memory)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory.erase(memory);
+	}
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(UnmapMemory, device_impl);
+	trampoline(device, memory);
+}
+VkResult VKAPI_CALL vkMapMemory2(VkDevice device, const VkMemoryMapInfo *pMemoryMapInfo, void **ppData)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(MapMemory2, device_impl);
+
+	const VkResult result = trampoline(device, pMemoryMapInfo, ppData);
+	if (result == VK_SUCCESS && ppData != nullptr && pMemoryMapInfo != nullptr)
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory[pMemoryMapInfo->memory] = static_cast<uint8_t *>(*ppData) - pMemoryMapInfo->offset;
+	}
+	return result;
+}
+VkResult VKAPI_CALL vkUnmapMemory2(VkDevice device, const VkMemoryUnmapInfo *pMemoryUnmapInfo)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	if (pMemoryUnmapInfo != nullptr)
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory.erase(pMemoryUnmapInfo->memory);
+	}
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(UnmapMemory2, device_impl);
+	return trampoline(device, pMemoryUnmapInfo);
+}
+void     VKAPI_CALL vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks *pAllocator)
+{
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
+	{
+		const std::unique_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+		s_mapped_memory.erase(memory);
+	}
+	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(FreeMemory, device_impl);
+	trampoline(device, memory, pAllocator);
+}
+
+extern "C" __attribute__((visibility("default"))) void *ReShadeVulkanGetMappedBuffer(void *device, uint64_t buffer)
+{
+#if RESHADE_ADDON
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(static_cast<VkDevice>(device)));
+	if (device_impl == nullptr || buffer == 0)
+		return nullptr;
+	const auto buffer_data = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_BUFFER>((VkBuffer)buffer);
+	if (buffer_data == nullptr || buffer_data->memory == VK_NULL_HANDLE)
+		return nullptr;
+	const std::shared_lock<std::shared_mutex> lock(s_mapped_memory_mutex);
+	const auto it = s_mapped_memory.find(buffer_data->memory);
+	return it != s_mapped_memory.end() ? static_cast<uint8_t *>(it->second) + buffer_data->memory_offset : nullptr;
+#else
+	return nullptr;
+#endif
 }
 
 VkResult VKAPI_CALL vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset)
@@ -1324,6 +1739,29 @@ void     VKAPI_CALL vkDestroyShaderModule(VkDevice device, VkShaderModule shader
 	trampoline(device, shaderModule, pAllocator);
 }
 
+static void (*s_graphics_pipeline_observer)(void *device, const void *create_info, uint64_t pipeline, void *user_data) = nullptr;
+static void *s_graphics_pipeline_observer_data = nullptr;
+extern "C" __attribute__((visibility("default"))) void ReShadeVulkanObserveGraphicsPipelines(void (*observer)(void *device, const void *create_info, uint64_t pipeline, void *user_data), void *user_data)
+{
+	s_graphics_pipeline_observer_data = user_data;
+	s_graphics_pipeline_observer = observer;
+}
+extern "C" __attribute__((visibility("default"))) const uint32_t *ReShadeVulkanGetShaderModuleCode(void *device, uint64_t shader_module, uint32_t *word_count)
+{
+#if RESHADE_ADDON
+	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(static_cast<VkDevice>(device)));
+	if (device_impl == nullptr || shader_module == 0 || word_count == nullptr)
+		return nullptr;
+	const auto module_data = device_impl->get_private_data_for_object<VK_OBJECT_TYPE_SHADER_MODULE>((VkShaderModule)shader_module);
+	if (module_data == nullptr || module_data->spirv.empty())
+		return nullptr;
+	*word_count = static_cast<uint32_t>(module_data->spirv.size() / 4);
+	return reinterpret_cast<const uint32_t *>(module_data->spirv.data());
+#else
+	return nullptr;
+#endif
+}
+
 VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount, const VkGraphicsPipelineCreateInfo *pCreateInfos, const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines)
 {
 	reshade::vulkan::device_impl *const device_impl = g_vulkan_devices.at(dispatch_key_from_handle(device));
@@ -1573,6 +2011,8 @@ VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache p
 		{
 			reshade::invoke_addon_event<reshade::addon_event::init_pipeline>(
 				device_impl, reshade::api::pipeline_layout { (uint64_t)create_info.layout }, static_cast<uint32_t>(subobjects.size()), subobjects.data(), reshade::api::pipeline { (uint64_t)pPipelines[i] });
+			if (s_graphics_pipeline_observer != nullptr)
+				s_graphics_pipeline_observer(device, &create_info, (uint64_t)pPipelines[i], s_graphics_pipeline_observer_data);
 		}
 		else
 		{

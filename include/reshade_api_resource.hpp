@@ -244,6 +244,7 @@ namespace reshade::api
 		/// Resource is backed by sparse memory.
 		/// </summary>
 		sparse_binding = 0x40000,
+		shared_host = 0x100000,
 	};
 	RESHADE_DEFINE_ENUM_FLAG_OPERATORS(resource_flags);
 
