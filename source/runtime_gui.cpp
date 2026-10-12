@@ -217,7 +217,7 @@ void reshade::runtime::build_font_atlas()
 
 		if (resolve_path(font_path, ec))
 		{
-			if (FILE *const file = _wfsopen(font_path.c_str(), L"rb", SH_DENYNO))
+			if (FILE *const file = utils::open_file(font_path, "rb"))
 			{
 				fseek(file, 0, SEEK_END);
 				const size_t file_size = ftell(file);
@@ -1235,7 +1235,7 @@ void reshade::runtime::draw_gui()
 		if (show_clock)
 		{
 			const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-			struct tm tm; localtime_s(&tm, &t);
+			const std::tm tm = utils::local_time(t);
 
 			int temp_size;
 			switch (_clock_format)
@@ -2534,7 +2534,7 @@ void reshade::runtime::draw_gui_statistics()
 			ImVec2(0, 50));
 
 		const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-		struct tm tm; localtime_s(&tm, &t);
+		const std::tm tm = utils::local_time(t);
 
 		ImGui::BeginGroup();
 
@@ -3081,7 +3081,7 @@ void reshade::runtime::draw_gui_log()
 	{
 		_log_editor.set_readonly(true);
 
-		if (FILE *const file = _wfsopen(log_path.c_str(), L"r", SH_DENYNO))
+		if (FILE *const file = utils::open_file(log_path, "r"))
 		{
 			if (filter_changed || file_size <= _last_log_size)
 				_log_editor.clear_text();
@@ -4619,7 +4619,7 @@ void reshade::runtime::open_code_editor(editor_instance &instance) const
 	// Only update text if there is no undo history (in which case it can be assumed that the text is already up-to-date)
 	if (!instance.editor.is_modified() && !instance.editor.can_undo())
 	{
-		if (FILE *const file = _wfsopen(instance.file_path.c_str(), L"rb", SH_DENYWR))
+		if (FILE *const file = utils::open_file(instance.file_path, "rb", utils::file_share_mode::deny_write))
 		{
 			fseek(file, 0, SEEK_END);
 			const size_t file_size = ftell(file);
@@ -4653,7 +4653,7 @@ void reshade::runtime::draw_code_editor(editor_instance &instance)
 			(_input != nullptr && _input->is_key_pressed('S', true, false, false))))
 	{
 		// Write current editor text to file
-		if (FILE *const file = _wfsopen(instance.file_path.c_str(), L"wb", SH_DENYWR))
+		if (FILE *const file = utils::open_file(instance.file_path, "wb", utils::file_share_mode::deny_write))
 		{
 			const std::string text = instance.editor.get_text();
 			fwrite(text.data(), 1, text.size(), file);

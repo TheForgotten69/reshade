@@ -5,10 +5,34 @@
 
 #pragma once
 
+#include <cstdio>
+#include <ctime>
+#include <string>
 #include <filesystem>
 
 namespace reshade::utils
 {
+	enum class file_share_mode
+	{
+		deny_none,
+		deny_write
+	};
+
+	/// <summary>
+	/// Opens the specified file, optionally preventing other processes from writing to it while it is open.
+	/// </summary>
+	FILE *open_file(const std::filesystem::path &path, const char *mode, file_share_mode share_mode = file_share_mode::deny_none);
+
+	/// <summary>
+	/// Converts the specified time to calendar time in the local time zone.
+	/// </summary>
+	std::tm local_time(std::time_t time);
+
+	/// <summary>
+	/// Gets the value of the specified environment variable, or an empty string if it does not exist.
+	/// </summary>
+	std::string get_environment_variable(const std::string &name);
+
 	/// <summary>
 	/// Opens a file explorer window with the specified file selected.
 	/// </summary>

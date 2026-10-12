@@ -5,9 +5,34 @@
 
 #include "platform_utils.hpp"
 #include <utf8/unchecked.h>
+#include <share.h>
 #include <Windows.h>
 #include <Shellapi.h>
 #include <mmsystem.h>
+
+FILE *reshade::utils::open_file(const std::filesystem::path &path, const char *mode, file_share_mode share_mode)
+{
+	wchar_t mode_wide[8] = L"";
+	for (size_t i = 0; i < std::size(mode_wide) - 1 && mode[i] != '\0'; ++i)
+		mode_wide[i] = static_cast<wchar_t>(mode[i]);
+
+	return _wfsopen(path.c_str(), mode_wide, share_mode == file_share_mode::deny_write ? SH_DENYWR : SH_DENYNO);
+}
+
+std::tm reshade::utils::local_time(std::time_t time)
+{
+	std::tm result;
+	localtime_s(&result, &time);
+	return result;
+}
+
+std::string reshade::utils::get_environment_variable(const std::string &name)
+{
+	char buf[512] = ""; size_t buf_len = 0;
+	if (getenv_s(&buf_len, buf, sizeof(buf) - 1, name.c_str()) != 0)
+		return {};
+	return buf;
+}
 
 bool reshade::utils::open_explorer(const std::filesystem::path &path)
 {

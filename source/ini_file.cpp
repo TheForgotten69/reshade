@@ -4,6 +4,7 @@
  */
 
 #include "ini_file.hpp"
+#include "platform_utils.hpp"
 #include <mutex>
 #include <shared_mutex>
 #include <cctype> // std::toupper
@@ -34,7 +35,7 @@ bool reshade::ini_file::load()
 	// Clear when file does not exist too
 	_sections.clear();
 
-	FILE *const file = _wfsopen(_path.c_str(), L"r", SH_DENYWR);
+	FILE *const file = utils::open_file(_path, "r", utils::file_share_mode::deny_write);
 	if (file == nullptr)
 		return false;
 
@@ -204,7 +205,7 @@ bool reshade::ini_file::save()
 		}
 	}
 
-	FILE *const file = _wfsopen(_path.c_str(), L"w", SH_DENYWR);
+	FILE *const file = utils::open_file(_path, "w", utils::file_share_mode::deny_write);
 	if (file == nullptr)
 		return false;
 	const size_t file_size_written = fwrite(data.data(), 1, data.size(), file);

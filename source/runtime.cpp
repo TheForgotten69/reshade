@@ -77,11 +77,7 @@ std::string expand_macro_string(const std::string &input, std::vector<std::pair<
 
 		// Allow using environment variables alongside macros
 		if (value.empty())
-		{
-			char buf[512] = ""; size_t buf_len = 0;
-			if (getenv_s(&buf_len, buf, sizeof(buf) - 1, std::string(input_macro_name).c_str()) == 0)
-				value = buf;
-		}
+			value = reshade::utils::get_environment_variable(std::string(input_macro_name));
 
 		if (colon_pos == std::string_view::npos)
 		{
@@ -113,7 +109,7 @@ static std::string expand_macro_string(const std::string &input, std::vector<std
 
 	char timestamp[21];
 	const std::time_t t = std::chrono::system_clock::to_time_t(now_seconds);
-	struct tm tm; localtime_s(&tm, &t);
+	const std::tm tm = reshade::utils::local_time(t);
 
 	std::snprintf(timestamp, std::size(timestamp), "%.4d-%.2d-%.2d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
 	macros.emplace_back("Date", timestamp);
@@ -2957,7 +2953,7 @@ void reshade::runtime::load_textures(size_t effect_index)
 			tex.format == reshadefx::texture_format::rg32f ||
 			tex.format == reshadefx::texture_format::rgba32f;
 
-		if (FILE *const file = _wfsopen(source_path.c_str(), L"rb", SH_DENYNO))
+		if (FILE *const file = utils::open_file(source_path, "rb"))
 		{
 			fseek(file, 0, SEEK_END);
 			const size_t file_size = ftell(file);
@@ -3534,7 +3530,7 @@ bool reshade::runtime::load_effect_cache(const std::string &id, const std::strin
 	std::filesystem::path path = g_reshade_base_path / _effect_cache_path;
 	path /= std::filesystem::u8path("reshade-" + id + '.' + type);
 
-	FILE *const file = _wfsopen(path.c_str(), L"rb", SH_DENYNO);
+	FILE *const file = utils::open_file(path, "rb");
 	if (file == nullptr)
 		return false;
 
@@ -3555,7 +3551,7 @@ bool reshade::runtime::save_effect_cache(const std::string &id, const std::strin
 	std::filesystem::path path = g_reshade_base_path / _effect_cache_path;
 	path /= std::filesystem::u8path("reshade-" + id + '.' + type);
 
-	FILE *const file = _wfsopen(path.c_str(), L"wb", SH_DENYNO);
+	FILE *const file = utils::open_file(path, "wb");
 	if (file == nullptr)
 		return false;
 
@@ -3880,7 +3876,7 @@ void reshade::runtime::render_effects(api::command_list *cmd_list, api::resource
 			case special_uniform::date:
 				{
 					const std::time_t t = std::chrono::system_clock::to_time_t(_current_time);
-					struct tm tm; localtime_s(&tm, &t);
+					const std::tm tm = utils::local_time(t);
 
 					const int value[4] = {
 						tm.tm_year + 1900,
@@ -4363,7 +4359,7 @@ void reshade::runtime::save_texture(const texture &tex)
 			// Default to a save failure unless it is reported to succeed below
 			bool save_success = false;
 
-			if (FILE *const file = _wfsopen(screenshot_path.c_str(), L"wb", SH_DENYNO))
+			if (FILE *const file = utils::open_file(screenshot_path, "wb"))
 			{
 				const auto write_callback = [](void *context, void *data, int size) {
 					fwrite(data, 1, size, static_cast<FILE *>(context));
@@ -4867,7 +4863,7 @@ void reshade::runtime::save_screenshot(const char *postfix_in)
 			// Default to a save failure unless it is reported to succeed below
 			bool save_success = false;
 
-			if (FILE *const file = _wfsopen(screenshot_path.c_str(), L"wb", SH_DENYNO))
+			if (FILE *const file = utils::open_file(screenshot_path, "wb"))
 			{
 				const auto write_callback = [](void *context, void *data, int size) {
 					fwrite(data, 1, size, static_cast<FILE *>(context));
