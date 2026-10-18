@@ -85,7 +85,6 @@ namespace reshade::vulkan
 	struct application_state
 	{
 		VkPipeline graphics_pipeline = VK_NULL_HANDLE;
-		struct descriptor_set { VkPipelineLayout layout; VkDescriptorSet set; } sets[8] = {};
 		struct vertex_buffer { VkBuffer buffer; VkDeviceSize offset, size, stride; } vertex_buffers[16] = {};
 		uint32_t vertex_buffer_mask = 0;
 		bool vertex_buffer_strides = false;

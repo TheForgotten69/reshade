@@ -504,9 +504,6 @@ extern "C" __attribute__((visibility("default"))) void ReShadeVulkanRestoreState
 
 	if (s.graphics_pipeline != VK_NULL_HANDLE)
 		vk.CmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s.graphics_pipeline);
-	for (uint32_t i = 0; i < 8; ++i)
-		if (s.sets[i].set != VK_NULL_HANDLE)
-			vk.CmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, s.sets[i].layout, i, 1, &s.sets[i].set, 0, nullptr);
 	for (uint32_t i = 0; i < 16; ++i)
 		if ((s.vertex_buffer_mask & (1u << i)) != 0)
 		{
@@ -699,7 +696,6 @@ void VKAPI_CALL vkCmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelin
 
 	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdBindDescriptorSets, device_impl);
 	trampoline(commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets);
-	RESHADE_VULKAN_APP_STATE(if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS) for (uint32_t i = 0; i < descriptorSetCount && firstSet + i < 8; ++i) s.sets[firstSet + i] = { layout, pDescriptorSets[i] };)
 
 #if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::bind_descriptor_tables>())
@@ -2285,7 +2281,6 @@ void VKAPI_CALL vkCmdBindDescriptorSets2(VkCommandBuffer commandBuffer, const Vk
 
 	RESHADE_VULKAN_GET_DEVICE_DISPATCH_PTR(CmdBindDescriptorSets2, device_impl);
 	trampoline(commandBuffer, pBindDescriptorSetsInfo);
-	RESHADE_VULKAN_APP_STATE(if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_ALL_GRAPHICS) for (uint32_t i = 0; i < pBindDescriptorSetsInfo->descriptorSetCount && pBindDescriptorSetsInfo->firstSet + i < 8; ++i) s.sets[pBindDescriptorSetsInfo->firstSet + i] = { pBindDescriptorSetsInfo->layout, pBindDescriptorSetsInfo->pDescriptorSets[i] };)
 
 #if RESHADE_ADDON >= 2
 	if (!reshade::has_addon_event<reshade::addon_event::bind_descriptor_tables>())
