@@ -8,6 +8,7 @@
 #include "vulkan_impl_command_queue.hpp"
 #include "vulkan_impl_swapchain.hpp"
 #include "vulkan_impl_type_convert.hpp"
+#include "vulkan_swapchain_override.hpp"
 #include "dll_log.hpp"
 #include "addon_manager.hpp"
 #include "runtime_manager.hpp"
@@ -15,6 +16,7 @@
 #include "lockfree_linear_map.hpp"
 #include <algorithm> // std::fill_n, std::sort, std::unique
 #include <atomic>
+#include <vector>
 
 #define vk device_impl->_dispatch_table
 
@@ -69,6 +71,24 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	VkImageFormatListCreateInfo format_list_info;
 	std::vector<uint32_t> queue_family_list;
 
+	// The application's format list is patched in place below (its chain cannot be copied generically), so restore it on return.
+	// Otherwise it would keep a dangling pointer to 'format_list' and a modified count, which breaks applications that reuse their create info.
+	struct format_list_restore
+	{
+		VkImageFormatListCreateInfo *info = nullptr;
+		uint32_t view_format_count = 0;
+		const VkFormat *view_formats = nullptr;
+
+		~format_list_restore()
+		{
+			if (info != nullptr)
+			{
+				info->viewFormatCount = view_format_count;
+				info->pViewFormats = view_formats;
+			}
+		}
+	} application_format_list;
+
 	// Only have to enable additional features if there is a graphics queue, since ReShade will not run otherwise
 	if (device_impl->_primary_graphics_queue != nullptr)
 	{
@@ -94,8 +114,12 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 			std::sort(format_list.begin(), format_list.end());
 			format_list.erase(std::unique(format_list.begin(), format_list.end()), format_list.end());
 
-			const_cast<VkImageFormatListCreateInfo *>(existing_format_list_info)->viewFormatCount = static_cast<uint32_t>(format_list.size());
-			const_cast<VkImageFormatListCreateInfo *>(existing_format_list_info)->pViewFormats = format_list.data();
+			application_format_list.info = const_cast<VkImageFormatListCreateInfo *>(existing_format_list_info);
+			application_format_list.view_format_count = existing_format_list_info->viewFormatCount;
+			application_format_list.view_formats = existing_format_list_info->pViewFormats;
+
+			application_format_list.info->viewFormatCount = static_cast<uint32_t>(format_list.size());
+			application_format_list.info->pViewFormats = format_list.data();
 		}
 		else if (format_list[0] != format_list[1])
 		{
@@ -251,9 +275,53 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 
 	if (reshade::invoke_addon_event<reshade::addon_event::create_swapchain>(reshade::api::device_api::vulkan, desc, hwnd))
 	{
+		const reshade::api::format application_format = reshade::vulkan::convert_format(pCreateInfo->imageFormat);
+		const reshade::api::color_space application_color_space = reshade::vulkan::convert_color_space(pCreateInfo->imageColorSpace);
+		const bool format_changed = desc.back_buffer.texture.format != application_format;
+
+		if (format_changed || desc.color_space != application_color_space)
+		{
+			const VkFormat override_format = reshade::vulkan::convert_format(desc.back_buffer.texture.format);
+			const VkColorSpaceKHR override_color_space = reshade::vulkan::convert_color_space(desc.color_space);
+
+			std::vector<VkSurfaceFormatKHR> surface_formats;
+			uint32_t num_surface_formats = 0;
+			if (vk.GetPhysicalDeviceSurfaceFormatsKHR(device_impl->_physical_device, create_info.surface, &num_surface_formats, nullptr) >= VK_SUCCESS && num_surface_formats != 0)
+			{
+				surface_formats.resize(num_surface_formats);
+				if (vk.GetPhysicalDeviceSurfaceFormatsKHR(device_impl->_physical_device, create_info.surface, &num_surface_formats, surface_formats.data()) < VK_SUCCESS)
+					num_surface_formats = 0;
+				surface_formats.resize(num_surface_formats);
+			}
+
+			bool revert = false;
+			if (!reshade::vulkan::surface_format_supported(surface_formats.data(), static_cast<uint32_t>(surface_formats.size()), override_format, override_color_space))
+			{
+				revert = true;
+				reshade::log::message(reshade::log::level::warning, "Add-on swap chain override (format %d, color space %d) is not supported by the surface; reverting to the application's (format %d, color space %d).",
+					static_cast<int>(override_format), static_cast<int>(override_color_space), static_cast<int>(pCreateInfo->imageFormat), static_cast<int>(pCreateInfo->imageColorSpace));
+			}
+			else if (format_changed && !reshade::vulkan::proxy_blit_decodes_srgb(application_format))
+			{
+				revert = true;
+				reshade::log::message(reshade::log::level::warning, "Add-on swap chain format override (format %d) cannot be fed from application format %d through the sRGB proxy blit; reverting to the application's format and color space.",
+					static_cast<int>(override_format), static_cast<int>(pCreateInfo->imageFormat));
+			}
+			else
+			{
+				reshade::log::message(reshade::log::level::info, "Applying add-on swap chain override: format %d, color space %d.",
+					static_cast<int>(override_format), static_cast<int>(override_color_space));
+			}
+
+			if (revert)
+			{
+				desc.back_buffer.texture.format = application_format;
+				desc.color_space = application_color_space;
+			}
+		}
+
 		use_proxy_images =
-			desc.back_buffer.texture.format != reshade::vulkan::convert_format(application_create_info.imageFormat) ||
-			desc.color_space != reshade::vulkan::convert_color_space(application_create_info.imageColorSpace);
+			desc.back_buffer.texture.format != application_format || desc.color_space != application_color_space;
 
 		create_info.imageFormat = reshade::vulkan::convert_format(desc.back_buffer.texture.format);
 		create_info.imageColorSpace = reshade::vulkan::convert_color_space(desc.color_space);
@@ -294,10 +362,20 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 		if (const auto existing_format_list_info = find_in_structure_chain<VkImageFormatListCreateInfo>(
 				create_info.pNext, VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO))
 		{
-			if (const VkFormat *const formats_begin = existing_format_list_info->pViewFormats, *const formats_end = existing_format_list_info->pViewFormats + existing_format_list_info->viewFormatCount;
-				std::find(formats_begin, formats_end, create_info.imageFormat) == formats_end)
+			if (!reshade::vulkan::view_format_list_contains(existing_format_list_info->pViewFormats, existing_format_list_info->viewFormatCount, create_info.imageFormat))
 			{
-				const_cast<VkImageFormatListCreateInfo *>(existing_format_list_info)->viewFormatCount = 0;
+				const auto format_list_to_patch = const_cast<VkImageFormatListCreateInfo *>(existing_format_list_info);
+				if (format_list_to_patch != &format_list_info && application_format_list.info == nullptr)
+				{
+					application_format_list.info = format_list_to_patch;
+					application_format_list.view_format_count = format_list_to_patch->viewFormatCount;
+					application_format_list.view_formats = format_list_to_patch->pViewFormats;
+				}
+
+				format_list_to_patch->viewFormatCount = 0;
+
+				// Without a view format list the mutable-format bit would be invalid for the overridden format (VUID-VkSwapchainCreateInfoKHR-pNext-04099).
+				create_info.flags &= ~static_cast<VkSwapchainCreateFlagsKHR>(VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR);
 			}
 		}
 	}
@@ -578,7 +656,8 @@ VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPr
 					swapchain_impl->_proxy_srgb_images_initialized[image_index] ? reshade::api::resource_usage::copy_dest : reshade::api::resource_usage::undefined,
 					reshade::api::resource_usage::copy_dest);
 				command_list->copy_texture_region(source, 0, nullptr, srgb_source, 0, nullptr, reshade::api::filter_mode::min_mag_mip_point);
-				command_list->barrier(destination, reshade::api::resource_usage::present, reshade::api::resource_usage::copy_dest);
+				// The full-extent blit overwrites the image, so its previous contents and layout are irrelevant.
+				command_list->barrier(destination, reshade::api::resource_usage::undefined, reshade::api::resource_usage::copy_dest);
 
 				const reshade::api::subresource_box destination_box = { 0, 0, 0, swapchain_impl->_create_info.imageExtent.width, swapchain_impl->_create_info.imageExtent.height, 1 };
 				command_list->barrier(srgb_source, reshade::api::resource_usage::copy_dest, reshade::api::resource_usage::copy_source);

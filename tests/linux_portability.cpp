@@ -11,6 +11,7 @@
 #include "../source/linux/paths.hpp"
 #include "../source/linux/addon_paths.hpp"
 #include "../examples/09-depth/generic_depth_detection.hpp"
+#include "../source/vulkan/vulkan_swapchain_override.hpp"
 #include <glad/vulkan.h>
 #include <cassert>
 #include <cstring>
@@ -878,9 +879,34 @@ static void test_game_identity()
 	assert(resolve_game_identity(profile).directory_name == "Pokémon_Colosseum");
 }
 
+// Add-on swap chain overrides must be supported by the surface and decodable by the proxy sRGB blit.
+static void test_swapchain_override_rules()
+{
+	using reshade::api::format;
+	assert(reshade::vulkan::proxy_blit_decodes_srgb(format::b8g8r8a8_unorm));
+	assert(reshade::vulkan::proxy_blit_decodes_srgb(format::b8g8r8a8_unorm_srgb));
+	assert(reshade::vulkan::proxy_blit_decodes_srgb(format::r8g8b8a8_unorm));
+	assert(reshade::vulkan::proxy_blit_decodes_srgb(format::r8g8b8a8_unorm_srgb));
+	assert(!reshade::vulkan::proxy_blit_decodes_srgb(format::r10g10b10a2_unorm));
+	assert(!reshade::vulkan::proxy_blit_decodes_srgb(format::r16g16b16a16_float));
+	const VkSurfaceFormatKHR formats[] = {
+		{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR },
+		{ VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT } };
+	assert(reshade::vulkan::surface_format_supported(formats, 2, VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT));
+	assert(!reshade::vulkan::surface_format_supported(formats, 2, VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
+	assert(!reshade::vulkan::surface_format_supported(nullptr, 0, VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR));
+
+	// A mutable swap chain keeps its flag while the new format is still in the view format list (sRGB sibling), and drops list and flag together otherwise.
+	const VkFormat list[] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB };
+	assert(reshade::vulkan::view_format_list_contains(list, 2, VK_FORMAT_B8G8R8A8_SRGB));
+	assert(!reshade::vulkan::view_format_list_contains(list, 2, VK_FORMAT_R16G16B16A16_SFLOAT));
+	assert(!reshade::vulkan::view_format_list_contains(nullptr, 0, VK_FORMAT_B8G8R8A8_SRGB));
+}
+
 int main()
 {
 	test_game_identity();
+	test_swapchain_override_rules();
 	test_clipboard_offer_mime_types();
 	test_clipboard_write();
 	test_translation_tables();
