@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cstdint>
 #include <glad/vulkan.h>
+#include "reshade_api_wsi.hpp"
 
 enum VkLayerFunction
 {
@@ -52,14 +53,8 @@ struct vulkan_instance
 	GladVulkanContext dispatch_table;
 };
 
-enum class vulkan_wsi_kind
-{
-	unknown,
-	win32,
-	wayland,
-	xcb,
-	xlib,
-};
+// Same values the add-on reads back through reshade::api::wsi::surface_kind_guid.
+using vulkan_wsi_kind = reshade::api::wsi::surface_kind;
 
 struct vulkan_surface
 {
