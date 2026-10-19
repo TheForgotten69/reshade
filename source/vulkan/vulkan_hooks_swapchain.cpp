@@ -492,6 +492,7 @@ VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreat
 	}
 
 #if RESHADE_ADDON
+	swapchain_impl->set_private_data(reshade::api::wsi::surface_kind_guid, static_cast<uint64_t>(surface_info.kind));
 	reshade::invoke_addon_event<reshade::addon_event::init_swapchain>(swapchain_impl, false);
 
 	// Create default views for swap chain images (do this after the 'init_swapchain' event, so that the images are known to add-ons)
