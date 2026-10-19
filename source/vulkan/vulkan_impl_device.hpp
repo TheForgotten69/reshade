@@ -161,6 +161,9 @@ namespace reshade::vulkan
 		const VkPhysicalDeviceFeatures _enabled_features;
 
 	private:
+#if VK_EXT_external_memory_host
+		bool import_host_buffer(const api::resource_desc &desc, void *host_pointer, api::resource *out_resource);
+#endif
 		bool create_descriptor_set_layout(const api::pipeline_layout_param &param, VkDescriptorSetLayout *out_set_layout, std::vector<VkSampler> &embedded_samplers);
 
 		VmaAllocator _alloc = nullptr;

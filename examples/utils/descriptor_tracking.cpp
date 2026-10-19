@@ -10,7 +10,15 @@ using namespace reshade::api;
 
 buffer_range descriptor_tracking::get_buffer_range(descriptor_heap heap, uint32_t offset) const
 {
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(mutex);
+	const auto it = heaps.find(heap);
+	if (it == heaps.end())
+		return { 0 };
+	const descriptor_heap_data &heap_data = it->second;
+	#else
 	const descriptor_heap_data &heap_data = heaps.at(heap);
+	#endif
 
 	if (offset < heap_data.descriptors.size())
 	{
@@ -26,7 +34,15 @@ buffer_range descriptor_tracking::get_buffer_range(descriptor_heap heap, uint32_
 
 sampler descriptor_tracking::get_sampler(descriptor_heap heap, uint32_t offset) const
 {
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(mutex);
+	const auto it = heaps.find(heap);
+	if (it == heaps.end())
+		return { 0 };
+	const descriptor_heap_data &heap_data = it->second;
+	#else
 	const descriptor_heap_data &heap_data = heaps.at(heap);
+	#endif
 
 	if (offset < heap_data.descriptors.size())
 	{
@@ -41,7 +57,15 @@ sampler descriptor_tracking::get_sampler(descriptor_heap heap, uint32_t offset) 
 }
 resource_view descriptor_tracking::get_resource_view(descriptor_heap heap, uint32_t offset) const
 {
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(mutex);
+	const auto it = heaps.find(heap);
+	if (it == heaps.end())
+		return { 0 };
+	const descriptor_heap_data &heap_data = it->second;
+	#else
 	const descriptor_heap_data &heap_data = heaps.at(heap);
+	#endif
 
 	if (offset < heap_data.descriptors.size())
 	{
@@ -61,13 +85,24 @@ resource_view descriptor_tracking::get_resource_view(descriptor_heap heap, uint3
 
 pipeline_layout_param descriptor_tracking::get_pipeline_layout_param(pipeline_layout layout, uint32_t param) const
 {
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(mutex);
+	const auto it = layouts.find(layout);
+	if (it == layouts.end() || param >= it->second.params.size())
+		return pipeline_layout_param(0, static_cast<const descriptor_range *>(nullptr));
+	const pipeline_layout_data &layout_data = it->second;
+	#else
 	const pipeline_layout_data &layout_data = layouts.at(layout);
+	#endif
 
 	return layout_data.params[param];
 }
 
 void descriptor_tracking::register_pipeline_layout(pipeline_layout layout, uint32_t count, const pipeline_layout_param *params)
 {
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(mutex);
+	#endif
 	pipeline_layout_data &layout_data = layouts[layout];
 	layout_data.params.assign(params, params + count);
 	layout_data.ranges.resize(count);
@@ -83,6 +118,9 @@ void descriptor_tracking::register_pipeline_layout(pipeline_layout layout, uint3
 }
 void descriptor_tracking::unregister_pipeline_layout(pipeline_layout layout)
 {
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(mutex);
+	#endif
 	pipeline_layout_data &layout_data = layouts[layout];
 	layout_data.params.clear();
 	layout_data.ranges.clear();
@@ -111,6 +149,9 @@ void descriptor_tracking::on_destroy_pipeline_layout(device *device, pipeline_la
 bool descriptor_tracking::on_copy_descriptor_tables(device *device, uint32_t count, const descriptor_table_copy *copies)
 {
 	auto &ctx = *device->get_private_data<descriptor_tracking>();
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(ctx.mutex);
+	#endif
 
 	for (uint32_t i = 0; i < count; ++i)
 	{
@@ -124,15 +165,23 @@ bool descriptor_tracking::on_copy_descriptor_tables(device *device, uint32_t cou
 		descriptor_heap dst_heap;
 		device->get_descriptor_heap_offset(copy.dest_table, copy.dest_binding, copy.dest_array_offset, &dst_heap, &dst_offset);
 
+		#if defined(__linux__)
+		const auto src_it = ctx.heaps.find(src_heap);
+		if (src_it == ctx.heaps.end() || src_offset > src_it->second.descriptors.size() || copy.count > src_it->second.descriptors.size() - src_offset)
+			continue;
+		const descriptor_heap_data &src_pool_data = src_it->second;
+		#else
 		descriptor_heap_data &src_pool_data = ctx.heaps[src_heap];
+		#endif
 		descriptor_heap_data &dst_pool_data = ctx.heaps[dst_heap];
 
-		if (dst_offset + copy.count > dst_pool_data.descriptors.size())
-			dst_pool_data.descriptors.grow_to_at_least(dst_offset + copy.count);
+		const std::size_t dst_end = static_cast<std::size_t>(dst_offset) + copy.count;
+		if (dst_end > dst_pool_data.descriptors.size())
+			dst_pool_data.grow_to_at_least(dst_end);
 
 		for (uint32_t k = 0; k < copy.count; ++k)
 		{
-			dst_pool_data.descriptors[dst_offset + k] = src_pool_data.descriptors[src_offset + k];
+			dst_pool_data.descriptors[static_cast<std::size_t>(dst_offset) + k] = src_pool_data.descriptors[static_cast<std::size_t>(src_offset) + k];
 		}
 	}
 
@@ -142,6 +191,9 @@ bool descriptor_tracking::on_copy_descriptor_tables(device *device, uint32_t cou
 bool descriptor_tracking::on_update_descriptor_tables(device *device, uint32_t count, const descriptor_table_update *updates)
 {
 	auto &ctx = *device->get_private_data<descriptor_tracking>();
+	#if defined(__linux__)
+	std::lock_guard<std::mutex> lock(ctx.mutex);
+	#endif
 
 	for (uint32_t i = 0; i < count; ++i)
 	{
@@ -154,7 +206,7 @@ bool descriptor_tracking::on_update_descriptor_tables(device *device, uint32_t c
 		descriptor_heap_data &heap_data = ctx.heaps[heap];
 
 		if (offset + update.count > heap_data.descriptors.size())
-			heap_data.descriptors.grow_to_at_least(offset + update.count);
+			heap_data.grow_to_at_least(offset + update.count);
 
 		for (uint32_t k = 0; k < update.count; ++k)
 		{

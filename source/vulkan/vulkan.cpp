@@ -9,6 +9,7 @@
 #include "hook_manager.hpp"
 #endif
 #include "lockfree_linear_map.hpp"
+#include "process_environment.hpp"
 #include <cstring> // std::strcmp
 
 extern lockfree_linear_map<void *, vulkan_instance, 16> g_vulkan_instances;
@@ -33,6 +34,13 @@ PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *p
 #if VK_VERSION_1_0
 #if RESHADE_ADDON
 	RESHADE_VULKAN_HOOK_PROC(QueueSubmit);
+	RESHADE_VULKAN_HOOK_PROC(MapMemory);
+	RESHADE_VULKAN_HOOK_PROC(UnmapMemory);
+	RESHADE_VULKAN_HOOK_PROC(FreeMemory);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(MapMemory2, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(MapMemory2, KHR);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(UnmapMemory2, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(UnmapMemory2, KHR);
 	RESHADE_VULKAN_HOOK_PROC(BindBufferMemory);
 	RESHADE_VULKAN_HOOK_PROC(BindImageMemory);
 	RESHADE_VULKAN_HOOK_PROC(CreateQueryPool);
@@ -91,8 +99,39 @@ PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *p
 #if RESHADE_ADDON
 	RESHADE_VULKAN_HOOK_PROC(CmdSetViewport);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetScissor);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetViewportWithCount, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetViewportWithCount, EXT);
 #endif
 #if RESHADE_ADDON >= 2
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdPushDescriptorSet2, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdPushDescriptorSet2, KHR);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdBindDescriptorSets2, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdBindDescriptorSets2, KHR);
+#endif
+#if RESHADE_ADDON
+#endif
+#if RESHADE_ADDON >= 2
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthTestEnable, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthTestEnable, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetScissorWithCount, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetScissorWithCount, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetCullMode, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetCullMode, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetFrontFace, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetFrontFace, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthBiasEnable, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthBiasEnable, EXT);
+	RESHADE_VULKAN_HOOK_PROC(CmdSetDepthBounds);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthBoundsTestEnable, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthBoundsTestEnable, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetStencilTestEnable, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetStencilTestEnable, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetStencilOp, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetStencilOp, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthWriteEnable, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthWriteEnable, EXT);
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthCompareOp, );
+	RESHADE_VULKAN_HOOK_PROC_OPTIONAL(CmdSetDepthCompareOp, EXT);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetDepthBias);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetBlendConstants);
 	RESHADE_VULKAN_HOOK_PROC(CmdSetStencilCompareMask);
@@ -196,6 +235,7 @@ PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *p
 #if VK_KHR_swapchain
 	RESHADE_VULKAN_HOOK_PROC(CreateSwapchainKHR);
 	RESHADE_VULKAN_HOOK_PROC(DestroySwapchainKHR);
+	RESHADE_VULKAN_HOOK_PROC(GetSwapchainImagesKHR);
 	RESHADE_VULKAN_HOOK_PROC(QueuePresentKHR);
 #endif
 
@@ -336,6 +376,7 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 	RESHADE_VULKAN_HOOK_PROC(DestroyInstance);
 	RESHADE_VULKAN_HOOK_PROC(CreateDevice);
 	RESHADE_VULKAN_HOOK_PROC(DestroyDevice);
+	RESHADE_VULKAN_HOOK_PROC(EnumerateDeviceExtensionProperties);
 #endif
 
 #if VK_VERSION_1_3
@@ -344,6 +385,15 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 
 #if VK_KHR_win32_surface
 	RESHADE_VULKAN_HOOK_PROC(CreateWin32SurfaceKHR);
+#endif
+#if VK_KHR_wayland_surface
+	RESHADE_VULKAN_HOOK_PROC(CreateWaylandSurfaceKHR);
+#endif
+#if VK_KHR_xcb_surface
+	RESHADE_VULKAN_HOOK_PROC(CreateXcbSurfaceKHR);
+#endif
+#if VK_KHR_xlib_surface
+	RESHADE_VULKAN_HOOK_PROC(CreateXlibSurfaceKHR);
 #endif
 
 #if VK_KHR_surface
@@ -368,11 +418,14 @@ PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const c
 	return trampoline(instance, pName);
 }
 
+#if defined(__linux__)
 enum VkNegotiateLayerStructType
 {
 	LAYER_NEGOTIATE_UNINTIALIZED = 0,
 	LAYER_NEGOTIATE_INTERFACE_STRUCT = 1,
 };
+
+constexpr uint32_t loader_layer_interface_version = 2;
 
 struct VkNegotiateLayerInterface
 {
@@ -384,16 +437,18 @@ struct VkNegotiateLayerInterface
 	PFN_vkGetInstanceProcAddr pfnGetPhysicalDeviceProcAddr;
 };
 
-extern "C" VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
+extern "C" __attribute__((visibility("default"))) VkResult VKAPI_CALL vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *pVersionStruct)
 {
 	if (pVersionStruct == nullptr ||
-		pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT)
+		pVersionStruct->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT ||
+		pVersionStruct->loaderLayerInterfaceVersion < loader_layer_interface_version)
 		return VK_ERROR_INITIALIZATION_FAILED;
 
-	pVersionStruct->loaderLayerInterfaceVersion = 2; // Version 2 added 'vkNegotiateLoaderLayerInterfaceVersion'
+	pVersionStruct->loaderLayerInterfaceVersion = loader_layer_interface_version;
 	pVersionStruct->pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
 	pVersionStruct->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;
 	pVersionStruct->pfnGetPhysicalDeviceProcAddr = nullptr;
 
 	return VK_SUCCESS;
 }
+#endif

@@ -28,6 +28,7 @@ namespace reshade
 		std::string author;
 		std::string website_url;
 		std::string issues_url;
+		std::string error;
 		union version
 		{
 			struct number
